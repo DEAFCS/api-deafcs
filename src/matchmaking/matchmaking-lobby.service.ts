@@ -159,11 +159,15 @@ export class MatchmakingLobbyService {
 
     const _players = lobby.players.map(({ steam_id }) => {
       const playerElo = eloMap.get(steam_id);
-      let elo = 5000;
-      if (playerElo) {
-        elo = Number(playerElo[type.toLowerCase()]);
-      }
-      return { steam_id, rank: elo };
+      const rawElo = playerElo?.[type.toLowerCase()];
+      // `rawElo` is null/undefined for a player who has never played this
+      // match type (get_player_elo_by_type already defaults this to 5000 at
+      // the DB level, but this is defensive: `Number(null)` is 0, not 5000,
+      // which would otherwise make a brand-new player look like the worst
+      // possible player to the balancing logic instead of an average one).
+      const elo =
+        rawElo === null || rawElo === undefined ? 5000 : Number(rawElo);
+      return { steam_id, rank: Number.isFinite(elo) ? elo : 5000 };
     });
 
     const matchmakingLobby: MatchmakingLobby = {

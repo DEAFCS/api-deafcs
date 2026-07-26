@@ -41,7 +41,13 @@ BEGIN
     ORDER BY created_at DESC
     LIMIT 1;
 
-    RETURN elo_value;
+    -- A player who has never played this match type has no player_elo row
+    -- yet. Default them to the baseline starting ELO (5000, same as
+    -- match_player_elo.sql uses for a player's very first match) instead of
+    -- NULL, which showed as a blank rating and, worse, was read as 0 by
+    -- matchmaking team balancing — making a brand-new player look like the
+    -- weakest possible player instead of an average one.
+    RETURN COALESCE(elo_value, 5000);
 END;
 $$;
 
