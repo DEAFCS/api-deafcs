@@ -32,6 +32,7 @@ const EXTENSION_BY_MIMETYPE: Record<string, string> = {
   "image/jpeg": "jpg",
   "image/webp": "webp",
   "image/gif": "gif",
+  "video/mp4": "mp4",
 };
 
 @Injectable()
@@ -227,10 +228,37 @@ export class NewsService {
 
   public async uploadImage(buffer: Buffer, mimetype: string): Promise<string> {
     const ext = EXTENSION_BY_MIMETYPE[mimetype] || "png";
-    const filename = `${crypto.randomBytes(12).toString("hex")}.${ext}`;
-    await this.s3.put(`${NewsService.IMAGE_PREFIX}/${filename}`, buffer);
+    const filename = this.generateFilename(ext);
+    await this.s3.put(this.mediaKey(filename), buffer);
     this.logger.log(`Uploaded news image ${filename}`);
     return filename;
+  }
+
+  public async uploadVideo(buffer: Buffer, mimetype: string): Promise<string> {
+    const ext = EXTENSION_BY_MIMETYPE[mimetype] || "mp4";
+    const filename = this.generateFilename(ext);
+    await this.s3.put(this.mediaKey(filename), buffer, mimetype);
+    this.logger.log(`Uploaded news video ${filename}`);
+    return filename;
+  }
+
+  public generateFilename(extension: string): string {
+    return `${crypto.randomBytes(12).toString("hex")}.${extension}`;
+  }
+
+  public mediaKey(filename: string): string {
+    return `${NewsService.IMAGE_PREFIX}/${filename}`;
+  }
+
+  // Same setting the demo/event-media upload flows use: when a Cloudflare
+  // worker fronts the B2 bucket, browser part PUTs must go through it — B2
+  // has no CORS rules, so direct presigned PUTs fail the preflight.
+  public async getCloudflareWorkerUrl(): Promise<string | null> {
+    const rows = await this.postgres.query<Array<{ value: string }>>(
+      `SELECT value FROM public.settings WHERE name = 'cloudflare_worker_url' LIMIT 1`,
+    );
+    const value = rows.at(0)?.value?.trim();
+    return value ? value.replace(/\/+$/, "") : null;
   }
 
   public async getImageStream(
