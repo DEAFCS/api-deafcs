@@ -832,13 +832,23 @@ export class MatchmakeService {
       },
     );
 
+    // The match_lineup_players trigger (tbid_match_lineup_players) makes
+    // whichever row is inserted first for a lineup its captain, so sorting
+    // by rank descending before the insert makes the highest-ELO player on
+    // each team the captain, instead of whoever happened to be first in the
+    // (essentially arbitrary) queue-join order.
+    const byRankDesc = (a: { rank: number }, b: { rank: number }) =>
+      b.rank - a.rank;
+
     await this.hasura.mutation({
       insert_match_lineup_players: {
         __args: {
-          objects: team1.map((player) => ({
-            steam_id: player.steam_id,
-            match_lineup_id: match.lineup_1_id,
-          })),
+          objects: [...team1]
+            .sort(byRankDesc)
+            .map((player) => ({
+              steam_id: player.steam_id,
+              match_lineup_id: match.lineup_1_id,
+            })),
         },
         __typename: true,
       },
@@ -847,10 +857,12 @@ export class MatchmakeService {
     await this.hasura.mutation({
       insert_match_lineup_players: {
         __args: {
-          objects: team2.map((player) => ({
-            steam_id: player.steam_id,
-            match_lineup_id: match.lineup_2_id,
-          })),
+          objects: [...team2]
+            .sort(byRankDesc)
+            .map((player) => ({
+              steam_id: player.steam_id,
+              match_lineup_id: match.lineup_2_id,
+            })),
         },
         __typename: true,
       },
