@@ -301,14 +301,20 @@ BEGIN
 
     _performance_multiplier := _impact;
 
-    -- Calculate the expected score based on team ELO averages
+    -- Calculate the expected score from this player's OWN rating vs. the
+    -- opponent team's average — not the player's team average. Using the
+    -- team average made every teammate share one expected score, so a 6000
+    -- and a 4600 player on the same team got an identical Δ; comparing each
+    -- player's individual rating against the opponents means a stronger
+    -- player who beats a weaker team gains less, and a weaker player who
+    -- beats a stronger team gains more, even when they're on the same team.
     -- ELO formula: Expected Score = 1 / (1 + 10^((Opponent Rating - Player Rating) / Scale Factor))
     -- The scale factor (4000) is increased for a wider ELO range:
     -- - A difference of 4000 points means the stronger player is expected to win 10 times more often
     -- - A difference of 2000 points means the stronger player is expected to win 3 times more often
     -- - A difference of 1000 points means the stronger player is expected to win 1.6 times more often
     -- This allows for a much wider range of ratings (0-50,000+) with 28,000 being expert level
-    _expected_score := 1.0 / (1.0 + POWER(10.0, (_opponent_team_elo_avg - _player_team_elo_avg) / _scale_factor));
+    _expected_score := 1.0 / (1.0 + POWER(10.0, (_opponent_team_elo_avg - _current_player_elo) / _scale_factor));
 
     -- Determine the actual score based on match result
     -- 1.0 for a win, 0.0 for a loss
