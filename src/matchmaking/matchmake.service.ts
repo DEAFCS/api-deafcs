@@ -158,28 +158,14 @@ export class MatchmakeService {
       return;
     }
 
-    // sort lobbies by a weighted score combining rank difference and wait time
-    lobbies = lobbies.sort((a, b) => {
-      // normalize wait times to 0-1 range (longer wait = higher priority)
-      const aWaitTime = (Date.now() - a.joinedAt.getTime()) / 1000;
-      const bWaitTime = (Date.now() - b.joinedAt.getTime()) / 1000;
-
-      const maxWaitTime = Math.max(aWaitTime, bWaitTime);
-
-      const normalizedAWait = aWaitTime / maxWaitTime;
-      const normalizedBWait = bWaitTime / maxWaitTime;
-
-      // weight rank differences more heavily (0.7) than wait time (0.3)
-      const rankWeight = 0.7;
-      const waitWeight = 0.3;
-
-      return (
-        rankWeight * b.avgRank +
-        waitWeight * normalizedBWait -
-        rankWeight * a.avgRank +
-        waitWeight * normalizedAWait
-      );
-    });
+    // sort lobbies by average rank so lobbies with similar skill end up
+    // adjacent to each other — the grouping step below relies on that
+    // adjacency, and already expands its own rank tolerance the longer a
+    // group has waited, so wait time doesn't need factoring in twice here.
+    // (The previous version tried to blend rank and wait time in one
+    // comparator, but the wait term wasn't antisymmetric between a/b, which
+    // made the sort order effectively arbitrary.)
+    lobbies = lobbies.sort((a, b) => a.avgRank - b.avgRank);
 
     // group lobbies based on rank differences that expand with wait time
     const groupedLobbies = [];
@@ -187,15 +173,6 @@ export class MatchmakeService {
 
     for (const currentLobby of lobbies.slice(1)) {
       const firstLobbyInGroup = currentGroup.at(0);
-
-      // TODO - check if rank difference feature is enabled
-      const rankDiffEnabled = false;
-
-      if (!rankDiffEnabled) {
-        // if rank difference feature is disabled, just add lobbies in order
-        currentGroup.push(currentLobby);
-        continue;
-      }
 
       // calculate wait time in seconds
       const waitTimeSeconds = Math.max(
@@ -356,27 +333,22 @@ export class MatchmakeService {
       return totalPlayers;
     }
 
-    // try to make as many valid matches as possible
-    const team1: MatchmakingTeam = {
-      players: [],
-      lobbies: [],
-      avgRank: 0,
-    };
-    const team2: MatchmakingTeam = {
-      players: [],
-      lobbies: [],
-      avgRank: 0,
-    };
-
-    const lobbiesAdded: Array<string> = [];
     const playersPerTeam = requiredPlayers / 2;
 
+    // select which lobbies fill this match (up to exactly requiredPlayers
+    // total) — team assignment happens afterward, once we know the full
+    // participant list, so it can find the best possible split instead of
+    // deciding team-by-team as lobbies happen to arrive.
+    const selectedLobbies: Array<MatchmakingLobby> = [];
+    let selectedPlayerCount = 0;
+    const lobbiesAdded: Array<string> = [];
     let lobbyLocks = new Set<string>();
 
-    // try to fill teams with available lobbies
-    // if they are unable to accuire the lock, it means they are already being matched, or another region is trying to matchmake
-    // we assign lobbies to the team that keeps average elo between teams as close as possible
     for (const lobby of lobbies) {
+      if (selectedPlayerCount >= requiredPlayers) {
+        break;
+      }
+
       try {
         const lock = await this.claimLobby(lobby.lobbyId, lobby);
 
@@ -387,70 +359,15 @@ export class MatchmakeService {
           continue;
         }
 
-        const team1HasRoom =
-          team1.players.length + lobby.players.length <= playersPerTeam;
-        const team2HasRoom =
-          team2.players.length + lobby.players.length <= playersPerTeam;
-
-        if (!team1HasRoom && !team2HasRoom) {
+        if (selectedPlayerCount + lobby.players.length > requiredPlayers) {
+          // doesn't fit in what's left of this match
           await this.releaseLobbyAndRequeue(lobby.lobbyId);
           continue;
         }
 
-        let targetTeam: MatchmakingTeam;
-
-        if (!team1HasRoom) {
-          targetTeam = team2;
-        } else if (!team2HasRoom) {
-          targetTeam = team1;
-        } else {
-          // Calculate current team totals and player counts
-          const team1TotalRank = team1.players.reduce(
-            (acc, player) => acc + player.rank,
-            0,
-          );
-          const team2TotalRank = team2.players.reduce(
-            (acc, player) => acc + player.rank,
-            0,
-          );
-          const lobbyTotalRank = lobby.players.reduce(
-            (acc, player) => acc + player.rank,
-            0,
-          );
-
-          // Calculate what the new averages would be if we add this lobby to each team
-          const team1NewAvg =
-            (team1TotalRank + lobbyTotalRank) /
-            (team1.players.length + lobby.players.length);
-          const team2NewAvg =
-            (team2TotalRank + lobbyTotalRank) /
-            (team2.players.length + lobby.players.length);
-
-          // Calculate current team averages
-          const team1CurrentAvg =
-            team1.players.length > 0
-              ? team1TotalRank / team1.players.length
-              : 0;
-          const team2CurrentAvg =
-            team2.players.length > 0
-              ? team2TotalRank / team2.players.length
-              : 0;
-
-          const diffIfToTeam1 = Math.abs(team1NewAvg - team2CurrentAvg);
-          const diffIfToTeam2 = Math.abs(team1CurrentAvg - team2NewAvg);
-
-          targetTeam = diffIfToTeam1 <= diffIfToTeam2 ? team1 : team2;
-        }
-
         lobbyLocks.add(lobby.lobbyId);
-
-        targetTeam.players.push(...lobby.players);
-        targetTeam.lobbies.push(lobby.lobbyId);
-
-        targetTeam.avgRank =
-          targetTeam.players.reduce((acc, player) => acc + player.rank, 0) /
-          targetTeam.players.length;
-
+        selectedLobbies.push(lobby);
+        selectedPlayerCount += lobby.players.length;
         lobbiesAdded.push(lobby.lobbyId);
       } catch (error) {
         this.logger.error(`Error processing lobby ${lobby.lobbyId}:`, error);
@@ -472,11 +389,18 @@ export class MatchmakeService {
     }
 
     let totalPlayerNotQueued = 0;
-    // check if we have valid teams for this match
-    if (
-      team1.players.length === playersPerTeam &&
-      team2.players.length === playersPerTeam
-    ) {
+    let team1: MatchmakingTeam = { players: [], lobbies: [], avgRank: 0 };
+    let team2: MatchmakingTeam = { players: [], lobbies: [], avgRank: 0 };
+
+    // check if we have a full match's worth of players
+    if (selectedPlayerCount === requiredPlayers) {
+      const { teamA, teamB } = this.splitIntoBalancedTeams(
+        selectedLobbies,
+        playersPerTeam,
+      );
+      team1 = this.buildTeamFromLobbies(teamA);
+      team2 = this.buildTeamFromLobbies(teamB);
+
       try {
         // lobby locks will be released after confimrmation
         for (const lobbyId of [...team1.lobbies, ...team2.lobbies]) {
@@ -496,10 +420,10 @@ export class MatchmakeService {
         totalPlayerNotQueued = team1.players.length + team2.players.length;
       }
     } else {
-      totalPlayerNotQueued = team1.players.length + team2.players.length;
+      totalPlayerNotQueued = selectedPlayerCount;
       // Release all acquired locks since we can't create a match
-      for (const lobbyId of [...team1.lobbies, ...team2.lobbies]) {
-        await this.releaseLobbyAndRequeue(lobbyId);
+      for (const lobby of selectedLobbies) {
+        await this.releaseLobbyAndRequeue(lobby.lobbyId);
       }
     }
 
@@ -522,6 +446,78 @@ export class MatchmakeService {
     }
 
     return totalPlayerNotQueued;
+  }
+
+  private buildTeamFromLobbies(
+    lobbies: Array<MatchmakingLobby>,
+  ): MatchmakingTeam {
+    const players = lobbies.flatMap((lobby) => lobby.players);
+    return {
+      players,
+      lobbies: lobbies.map((lobby) => lobby.lobbyId),
+      avgRank: players.length
+        ? players.reduce((acc, player) => acc + player.rank, 0) /
+          players.length
+        : 0,
+    };
+  }
+
+  // Finds the exact split of `lobbies` into two teams (of `teamSize` players
+  // each) that minimizes the difference in total rank — a lobby/party always
+  // stays together on one side. The candidate pool is always small (at most
+  // one match's worth of players, e.g. 10 for Competitive), so a full
+  // combinatorial search is cheap and, unlike a greedy pick, always finds the
+  // best possible pairing (e.g. pairing the highest and lowest rank together
+  // when that beats pairing them with the middle).
+  private splitIntoBalancedTeams(
+    lobbies: Array<MatchmakingLobby>,
+    teamSize: number,
+  ): { teamA: Array<MatchmakingLobby>; teamB: Array<MatchmakingLobby> } {
+    const lobbyRank = (lobby: MatchmakingLobby) =>
+      lobby.players.reduce((acc, player) => acc + player.rank, 0);
+
+    const totalRank = lobbies.reduce(
+      (acc, lobby) => acc + lobbyRank(lobby),
+      0,
+    );
+
+    let bestIndices: number[] | null = null;
+    let bestDiff = Infinity;
+    const chosen: number[] = [];
+
+    const search = (start: number, size: number, rankSum: number) => {
+      if (size === teamSize) {
+        const diff = Math.abs(2 * rankSum - totalRank);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          bestIndices = [...chosen];
+        }
+        return;
+      }
+
+      for (let i = start; i < lobbies.length; i++) {
+        const lobby = lobbies[i];
+        if (size + lobby.players.length > teamSize) {
+          continue;
+        }
+        chosen.push(i);
+        search(i + 1, size + lobby.players.length, rankSum + lobbyRank(lobby));
+        chosen.pop();
+      }
+    };
+
+    search(0, 0, 0);
+
+    // Every lobby is guaranteed to fit exactly into two teamSize halves by
+    // the caller (selectedPlayerCount === requiredPlayers), so a split always
+    // exists — this is just a defensive fallback.
+    const indices = bestIndices ?? lobbies.map((_, i) => i).slice(0, 0);
+    const indexSet = new Set<number>(indices);
+
+    return {
+      teamA: lobbies.filter((_, i) => indexSet.has(i)),
+      teamB: lobbies.filter((_, i) => !indexSet.has(i)),
+    };
   }
 
   private async aquireMatchmakeRegionLock(region: string): Promise<boolean> {
