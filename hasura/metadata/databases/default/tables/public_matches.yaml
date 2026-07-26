@@ -531,6 +531,7 @@ select_permissions:
         - label
         - lineup_1_id
         - lineup_2_id
+        - map_veto_pick_expires_at
         - match_options_id
         - organizer_steam_id
         - region
@@ -591,6 +592,7 @@ select_permissions:
         - label
         - lineup_1_id
         - lineup_2_id
+        - map_veto_pick_expires_at
         - match_options_id
         - organizer_steam_id
         - region

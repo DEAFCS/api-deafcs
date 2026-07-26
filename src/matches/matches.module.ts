@@ -31,6 +31,7 @@ import { MatchServerMiddlewareMiddleware } from "./match-server-middleware/match
 import { Queue } from "bullmq";
 import { CheckForScheduledMatches } from "./jobs/CheckForScheduledMatches";
 import { CancelExpiredMatches } from "./jobs/CancelExpiredMatches";
+import { AutoPickExpiredMapVeto } from "./jobs/AutoPickExpiredMapVeto";
 import { RemoveCancelledMatches } from "./jobs/RemoveCancelledMatches";
 import { CheckForTournamentStart } from "./jobs/CheckForTournamentStart";
 import { CheckForScheduledTournamentBrackets } from "./jobs/CheckForScheduledTournamentBrackets";
@@ -157,6 +158,7 @@ import { LeaguesModule } from "../leagues/leagues.module";
     CheckOnDemandServerJob,
     CheckOnDemandServerJobEvents,
     CancelExpiredMatches,
+    AutoPickExpiredMapVeto,
     CheckForTournamentStart,
     CheckForScheduledTournamentBrackets,
     CheckLeagueSeasonTransitions,
@@ -257,6 +259,16 @@ export class MatchesModule implements NestModule {
       {
         repeat: {
           pattern: "* * * * *",
+        },
+      },
+    );
+
+    void scheduleMatchQueue.add(
+      AutoPickExpiredMapVeto.name,
+      {},
+      {
+        repeat: {
+          every: 5_000,
         },
       },
     );

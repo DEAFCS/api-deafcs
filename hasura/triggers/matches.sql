@@ -417,16 +417,19 @@ BEGIN
             NEW.cancels_at = COALESCE(scheduled_at, NOW()) + (_auto_cancel_duration)::interval;
         END IF;
         NEW.ended_at = null;
+        NEW.map_veto_pick_expires_at = NOW() + (get_int_setting('public.map_veto_pick_seconds', 20) || ' seconds')::interval;
     END IF;
 
     IF NEW.status = 'WaitingForServer' AND OLD.status != 'WaitingForServer' THEN
         NEW.cancels_at = null;
         NEW.ended_at = null;
+        NEW.map_veto_pick_expires_at = null;
     END IF;
 
     IF (NEW.status = 'Canceled' AND OLD.status != 'Canceled')  THEN
         NEW.cancels_at = NOW();
         NEW.ended_at = null;
+        NEW.map_veto_pick_expires_at = null;
 
         DELETE FROM match_region_veto_picks WHERE match_id = NEW.id;
         DELETE FROM match_map_veto_picks WHERE match_id = NEW.id;
@@ -436,15 +439,17 @@ BEGIN
         NEW.started_at = NOW();
         NEW.cancels_at = null;
         NEW.ended_at = null;
+        NEW.map_veto_pick_expires_at = null;
     END IF;
 
-    IF 
+    IF
         (NEW.status = 'Finished' AND OLD.status != 'Finished')
         OR (NEW.status = 'Forfeit' AND OLD.status != 'Forfeit')
         OR (NEW.status = 'Tie' AND OLD.status != 'Tie')
     THEN
         NEW.ended_at = NOW();
         NEW.cancels_at = null;
+        NEW.map_veto_pick_expires_at = null;
     END IF;
 
     PERFORM check_match_status(NEW);
