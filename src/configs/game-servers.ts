@@ -1,4 +1,4 @@
-import { GameServersConfig } from "./types/GameServersConfig";
+﻿import { GameServersConfig } from "./types/GameServersConfig";
 
 export default (): {
   gameServers: GameServersConfig;
@@ -13,7 +13,8 @@ export default (): {
     },
     gameStreamerImage:
       process.env.GAME_STREAMER_IMAGE ||
-      "ghcr.io/5stackgg/game-streamer:latest",
+      "ghcr.io/deafcs/game-streamer:latest",
     namespace: "5stack",
   },
 });
+
