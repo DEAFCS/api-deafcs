@@ -1483,6 +1483,9 @@ export class MatchAssistantService {
               type: {
                 _eq: mapPoolType,
               },
+              enabled: {
+                _eq: true,
+              },
             },
           },
           id: true,
