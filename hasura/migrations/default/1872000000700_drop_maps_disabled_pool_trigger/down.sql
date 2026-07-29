@@ -1,0 +1,3 @@
+-- Intentionally not recreating the trigger — it's being removed
+-- because its assumption was wrong, not because of an unrelated
+-- rollback.
