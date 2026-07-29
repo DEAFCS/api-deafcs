@@ -1,2 +1,0 @@
--- Irreversible data cleanup: the deleted _map_pool rows (stale
--- memberships for already-disabled maps) are not recoverable.
