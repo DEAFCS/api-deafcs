@@ -26648,6 +26648,9 @@ export default {
             "_category": [
                 78
             ],
+            "_elo_view": [
+                78
+            ],
             "_exclude_tournaments": [
                 3
             ],
@@ -26683,6 +26686,9 @@ export default {
         },
         "get_player_leaderboard_rank_args": {
             "_category": [
+                78
+            ],
+            "_elo_view": [
                 78
             ],
             "_exclude_tournaments": [

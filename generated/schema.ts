@@ -45742,11 +45742,11 @@ export interface gamedata_signature_validations_variance_fieldsGenqlSelection{
 
 export interface get_event_leaderboard_args {_category?: (Scalars['String'] | null),_event_id?: (Scalars['uuid'] | null),_match_type?: (Scalars['String'] | null),_min_rounds?: (Scalars['Int'] | null)}
 
-export interface get_leaderboard_args {_category?: (Scalars['String'] | null),_exclude_tournaments?: (Scalars['Boolean'] | null),_match_type?: (Scalars['String'] | null),_role?: (Scalars['String'] | null),_season_id?: (Scalars['uuid'] | null),_window_days?: (Scalars['Int'] | null)}
+export interface get_leaderboard_args {_category?: (Scalars['String'] | null),_elo_view?: (Scalars['String'] | null),_exclude_tournaments?: (Scalars['Boolean'] | null),_match_type?: (Scalars['String'] | null),_role?: (Scalars['String'] | null),_season_id?: (Scalars['uuid'] | null),_window_days?: (Scalars['Int'] | null)}
 
 export interface get_league_season_leaderboard_args {_category?: (Scalars['String'] | null),_league_season_id?: (Scalars['uuid'] | null),_role?: (Scalars['String'] | null)}
 
-export interface get_player_leaderboard_rank_args {_category?: (Scalars['String'] | null),_exclude_tournaments?: (Scalars['Boolean'] | null),_match_type?: (Scalars['String'] | null),_player_steam_id?: (Scalars['String'] | null),_season_id?: (Scalars['uuid'] | null),_window_days?: (Scalars['Int'] | null)}
+export interface get_player_leaderboard_rank_args {_category?: (Scalars['String'] | null),_elo_view?: (Scalars['String'] | null),_exclude_tournaments?: (Scalars['Boolean'] | null),_match_type?: (Scalars['String'] | null),_player_steam_id?: (Scalars['String'] | null),_season_id?: (Scalars['uuid'] | null),_window_days?: (Scalars['Int'] | null)}
 
 
 /** Boolean expression to compare columns of type "inet". All fields are combined with logical 'AND'. */

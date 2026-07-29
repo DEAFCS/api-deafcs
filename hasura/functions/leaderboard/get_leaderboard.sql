@@ -11,6 +11,7 @@ DROP FUNCTION IF EXISTS public.get_leaderboard(TEXT, INT, TEXT, BOOLEAN);       
 DROP FUNCTION IF EXISTS public.get_leaderboard(TEXT, INT, TEXT, BOOLEAN, TEXT);      -- pre-_season 5-arg
 DROP FUNCTION IF EXISTS public.get_player_leaderboard_rank(TEXT, INT, TEXT, TEXT, BOOLEAN); -- pre-_season 5-arg
 DROP FUNCTION IF EXISTS public._leaderboard_elo(INT, TEXT, BOOLEAN);
+DROP FUNCTION IF EXISTS public._leaderboard_elo(INT, TEXT, BOOLEAN, UUID);
 DROP FUNCTION IF EXISTS public._leaderboard_kdr(INT, TEXT, BOOLEAN);
 DROP FUNCTION IF EXISTS public._leaderboard_win_rate(INT, TEXT, BOOLEAN);
 DROP FUNCTION IF EXISTS public._leaderboard_hs_pct(INT, TEXT, BOOLEAN);
@@ -42,14 +43,15 @@ CREATE OR REPLACE FUNCTION public.get_leaderboard(
   _match_type TEXT DEFAULT NULL,
   _exclude_tournaments BOOLEAN DEFAULT FALSE,
   _role TEXT DEFAULT NULL,
-  _season_id UUID DEFAULT NULL
+  _season_id UUID DEFAULT NULL,
+  _elo_view TEXT DEFAULT 'current'
 )
 RETURNS SETOF public.leaderboard_entries
 LANGUAGE plpgsql STABLE
 AS $$
 BEGIN
   IF _category = 'elo' THEN
-    RETURN QUERY SELECT * FROM _leaderboard_elo(_window_days, _match_type, _exclude_tournaments, _season_id);
+    RETURN QUERY SELECT * FROM _leaderboard_elo(_window_days, _match_type, _exclude_tournaments, _season_id, _elo_view);
 
   ELSIF _category = 'best_kdr' THEN
     RETURN QUERY SELECT * FROM _leaderboard_kdr(_window_days, _match_type, _exclude_tournaments, _season_id);
@@ -92,7 +94,8 @@ CREATE OR REPLACE FUNCTION public._leaderboard_elo(
   _window_days INT,
   _match_type TEXT,
   _exclude_tournaments BOOLEAN,
-  _season_id UUID DEFAULT NULL
+  _season_id UUID DEFAULT NULL,
+  _elo_view TEXT DEFAULT 'current'
 )
 RETURNS SETOF public.leaderboard_entries
 LANGUAGE plpgsql STABLE
@@ -100,8 +103,18 @@ AS $$
 DECLARE
   _from timestamptz;
   _to timestamptz;
-  _all_time_peak boolean;
+  _use_peak boolean;
+  _unbounded_current boolean;
 BEGIN
+  IF _elo_view IS NULL OR lower(_elo_view) NOT IN ('current', 'peak') THEN
+    RAISE EXCEPTION 'Invalid ELO view: %. Must be one of: current, peak', _elo_view;
+  END IF;
+
+  _use_peak := lower(_elo_view) = 'peak';
+  IF _use_peak AND (_window_days <> 0 OR _season_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'Peak ELO view only supports window_days = 0 without a season';
+  END IF;
+
   IF _season_id IS NOT NULL THEN
     SELECT s.starts_at, COALESCE(s.ends_at, now())
       INTO _from, _to
@@ -115,20 +128,21 @@ BEGIN
     _to := NULL;
   END IF;
 
-  _all_time_peak := (_season_id IS NULL AND _window_days = 0);
+  _unbounded_current := NOT _use_peak AND _season_id IS NULL AND _window_days = 0;
 
   IF _exclude_tournaments THEN
     RETURN QUERY
     WITH last_elo_raw AS (
       SELECT DISTINCT ON (pe.steam_id)
         pe.steam_id,
-        pe.current as raw_current
+        pe.current as raw_current,
+        pe.change as latest_change
       FROM player_elo pe
       WHERE 1=1
         AND (_match_type IS NULL OR pe.type = _match_type)
         AND (_season_id IS NULL OR pe.season_id = _season_id)
         AND ((_from IS NULL OR pe.created_at >= _from) AND (_to IS NULL OR pe.created_at < _to))
-      ORDER BY pe.steam_id, pe.created_at DESC
+      ORDER BY pe.steam_id, pe.created_at DESC, pe.match_id DESC
     ),
     peak_elo AS (
       SELECT pe.steam_id, MAX(pe.current) as peak_current
@@ -158,7 +172,7 @@ BEGIN
         AND (_match_type IS NULL OR pe.type = _match_type)
         AND (_season_id IS NULL OR pe.season_id = _season_id)
         AND ((_from IS NULL OR pe.created_at >= _from) AND (_to IS NULL OR pe.created_at < _to))
-      ORDER BY pe.steam_id, pe.created_at ASC
+      ORDER BY pe.steam_id, pe.created_at ASC, pe.match_id ASC
     ),
     match_counts AS (
       SELECT pe.steam_id, COUNT(*)::int as matches_played
@@ -197,12 +211,14 @@ BEGIN
       p.name                     as player_name,
       p.avatar_url               as player_avatar_url,
       p.country                  as player_country,
-      CASE WHEN _all_time_peak
+      CASE WHEN _use_peak
         THEN (pk_e.peak_current - COALESCE(ta.tourney_total, 0))::float
         ELSE (le.raw_current - COALESCE(ta.tourney_total, 0))::float
       END                        as value,
-      CASE WHEN _all_time_peak
+      CASE WHEN _use_peak
         THEN 0::float
+        WHEN _unbounded_current
+        THEN le.latest_change::float
         ELSE ((le.raw_current - COALESCE(ta.tourney_total, 0)) - fe.starting_elo)::float
       END                        as secondary_value,
       COALESCE(ws.streak, 0)::float as tertiary_value,
@@ -221,13 +237,14 @@ BEGIN
     WITH last_elo AS (
       SELECT DISTINCT ON (pe.steam_id)
         pe.steam_id,
-        pe.current as current_elo
+        pe.current as current_elo,
+        pe.change as latest_change
       FROM player_elo pe
       WHERE 1=1
         AND (_match_type IS NULL OR pe.type = _match_type)
         AND (_season_id IS NULL OR pe.season_id = _season_id)
         AND ((_from IS NULL OR pe.created_at >= _from) AND (_to IS NULL OR pe.created_at < _to))
-      ORDER BY pe.steam_id, pe.created_at DESC
+      ORDER BY pe.steam_id, pe.created_at DESC, pe.match_id DESC
     ),
     peak_elo AS (
       SELECT pe.steam_id, MAX(pe.current) as peak_current
@@ -247,7 +264,7 @@ BEGIN
         AND (_match_type IS NULL OR pe.type = _match_type)
         AND (_season_id IS NULL OR pe.season_id = _season_id)
         AND ((_from IS NULL OR pe.created_at >= _from) AND (_to IS NULL OR pe.created_at < _to))
-      ORDER BY pe.steam_id, pe.created_at ASC
+      ORDER BY pe.steam_id, pe.created_at ASC, pe.match_id ASC
     ),
     match_counts AS (
       SELECT pe.steam_id, COUNT(*)::int as matches_played
@@ -284,12 +301,14 @@ BEGIN
       p.name                     as player_name,
       p.avatar_url               as player_avatar_url,
       p.country                  as player_country,
-      CASE WHEN _all_time_peak
+      CASE WHEN _use_peak
         THEN pk_e.peak_current::float
         ELSE le.current_elo::float
       END                        as value,
-      CASE WHEN _all_time_peak
+      CASE WHEN _use_peak
         THEN 0::float
+        WHEN _unbounded_current
+        THEN le.latest_change::float
         ELSE (le.current_elo - fe.starting_elo)::float
       END                        as secondary_value,
       COALESCE(ws.streak, 0)::float as tertiary_value,
@@ -576,7 +595,7 @@ CREATE TABLE IF NOT EXISTS public.player_leaderboard_rank (
 
 -- Drop every stale overload so the get_leaderboard() call below resolves
 -- unambiguously. The current get_leaderboard / get_player_leaderboard_rank both
--- take 6 args, so anything with a different arg count is a stale signature.
+-- take 7 args, so anything with a different arg count is a stale signature.
 DO $$
 DECLARE r record;
 BEGIN
@@ -585,7 +604,7 @@ BEGIN
     FROM pg_proc p
     WHERE p.pronamespace = 'public'::regnamespace
       AND p.proname IN ('get_leaderboard', 'get_player_leaderboard_rank')
-      AND p.pronargs <> 6
+      AND p.pronargs <> 7
   LOOP
     EXECUTE 'DROP FUNCTION ' || r.sig;
   END LOOP;
@@ -597,7 +616,8 @@ CREATE OR REPLACE FUNCTION public.get_player_leaderboard_rank(
   _player_steam_id TEXT,
   _match_type TEXT DEFAULT NULL,
   _exclude_tournaments BOOLEAN DEFAULT FALSE,
-  _season_id UUID DEFAULT NULL
+  _season_id UUID DEFAULT NULL,
+  _elo_view TEXT DEFAULT 'current'
 )
 RETURNS SETOF public.player_leaderboard_rank
 LANGUAGE plpgsql STABLE
@@ -610,9 +630,9 @@ BEGIN
       le.value,
       (RANK() OVER (ORDER BY le.value DESC))::int AS rank,
       (COUNT(*) OVER ())::int AS total
-    -- Pass all 6 args explicitly. A shorter call binds ambiguously if a stale
-    -- overload still exists; exact arity always resolves the 6-arg one.
-    FROM public.get_leaderboard(_category, _window_days, _match_type, _exclude_tournaments, NULL::text, _season_id) le
+    -- Pass all 7 args explicitly. A shorter call binds ambiguously if a stale
+    -- overload still exists; exact arity always resolves the 7-arg one.
+    FROM public.get_leaderboard(_category, _window_days, _match_type, _exclude_tournaments, NULL::text, _season_id, _elo_view) le
   )
   SELECT r.player_steam_id, r.value, r.rank, r.total
   FROM ranked r

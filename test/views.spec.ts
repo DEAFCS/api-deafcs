@@ -5,6 +5,7 @@ import {
   seedRegionWithServer,
   SqlTestDb,
 } from "./utils/sql-test-db";
+import { TournamentFixtures } from "./utils/tournament-fixtures";
 
 // Exercises the read-side SQL the app displays: the HLTV rating view, the
 // clutch feed, the player ELO ledger view and profile aggregation
@@ -15,11 +16,13 @@ describe("read-side views and aggregations (SQL-driven)", () => {
   let db: SqlTestDb;
   let postgres: PostgresService;
   let fx: Fixtures;
+  let tournamentFx: TournamentFixtures;
 
   beforeAll(async () => {
     db = await bootMigratedDb("ViewsTest");
     postgres = db.postgres;
     fx = new Fixtures(postgres, 76561199950000000n);
+    tournamentFx = new TournamentFixtures(postgres, fx);
     await seedRegionWithServer(postgres, "TestA");
   }, 600_000);
 
@@ -123,9 +126,24 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       );
       const ctx = { matchId: match.id, mapId: map.id };
 
-      await fx.kill(ctx, c, b, { round: 1, time: T(10), attackerTeam: "TERRORIST", victimTeam: "CT" });
-      await fx.kill(ctx, a, c, { round: 1, time: T(9), attackerTeam: "CT", victimTeam: "TERRORIST" });
-      await fx.kill(ctx, a, d, { round: 1, time: T(8), attackerTeam: "CT", victimTeam: "TERRORIST" });
+      await fx.kill(ctx, c, b, {
+        round: 1,
+        time: T(10),
+        attackerTeam: "TERRORIST",
+        victimTeam: "CT",
+      });
+      await fx.kill(ctx, a, c, {
+        round: 1,
+        time: T(9),
+        attackerTeam: "CT",
+        victimTeam: "TERRORIST",
+      });
+      await fx.kill(ctx, a, d, {
+        round: 1,
+        time: T(8),
+        attackerTeam: "CT",
+        victimTeam: "TERRORIST",
+      });
       await fx.round(ctx.mapId, 1, { winningSide: "CT", time: T(7) });
 
       const clutches = await postgres.query<
@@ -186,9 +204,7 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       expect(loser.match_result).toBe("loss");
       // current_elo is the pre-match rating; updated_elo the post-match one.
       expect(Number(winner.current_elo)).toBe(5000);
-      expect(Number(winner.updated_elo)).toBe(
-        5000 + Number(winner.elo_change),
-      );
+      expect(Number(winner.updated_elo)).toBe(5000 + Number(winner.elo_change));
     });
 
     it("profile aggregation returns per-type ladders (seasons off)", async () => {
@@ -223,11 +239,10 @@ describe("read-side views and aggregations (SQL-driven)", () => {
   describe("v_team_ranks", () => {
     it("averages the displayed rating sources across the roster, ignoring gaps", async () => {
       const team = await fx.team(1);
-      const roster = await postgres.query<
-        Array<{ player_steam_id: string }>
-      >("SELECT player_steam_id FROM team_roster WHERE team_id = $1 ORDER BY player_steam_id", [
-        team.id,
-      ]);
+      const roster = await postgres.query<Array<{ player_steam_id: string }>>(
+        "SELECT player_steam_id FROM team_roster WHERE team_id = $1 ORDER BY player_steam_id",
+        [team.id],
+      );
       const [p1, p2] = roster.map((r) => r.player_steam_id);
 
       // Competitive elo rows for both (via the ledger the view actually reads).
@@ -383,6 +398,34 @@ describe("read-side views and aggregations (SQL-driven)", () => {
         [category, windowDays, type ?? null],
       );
 
+    const eloLeaderboard = (
+      windowDays: number,
+      type: "Competitive" | "Wingman" | "Duel",
+      view: "current" | "peak" = "current",
+      excludeTournaments = false,
+    ) =>
+      postgres.query<Array<LeaderboardRow>>(
+        "SELECT * FROM get_leaderboard('elo', $1, $2, $3, NULL, NULL, $4)",
+        [windowDays, type, excludeTournaments, view],
+      );
+
+    const insertElo = async (
+      steamId: string,
+      matchId: string,
+      type: "Competitive" | "Wingman" | "Duel",
+      current: number,
+      change: number,
+      daysAgo: number,
+      seasonId: string | null = null,
+    ) => {
+      await postgres.query(
+        `INSERT INTO player_elo
+           (steam_id, match_id, type, "current", change, created_at, season_id)
+         VALUES ($1, $2, $3, $4, $5, now() - make_interval(days => $6), $7)`,
+        [steamId, matchId, type, current, change, daysAgo, seasonId],
+      );
+    };
+
     // A finished '5stack' match with a materialized map to hang kills on. The
     // stat categories inner-join match_options, so bareMatch (optionless, the
     // demo-import shape) would be invisible to them.
@@ -405,6 +448,252 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       expect(elo.length).toBe(2);
       expect(elo[0].player_steam_id).toBe(a);
       expect(Number(elo[0].value)).toBeGreaterThan(Number(elo[1].value));
+    });
+
+    it.each(["Competitive", "Wingman", "Duel"] as const)(
+      "separates current and peak %s ladders and uses the latest change for current",
+      async (type) => {
+        const [formerLeader, currentLeader] = await fx.players(2);
+        const oldPeakMatch = await fx.bareMatch(T(60 * 24 * 10));
+        const latestMatch = await fx.bareMatch(T(60 * 24));
+
+        await insertElo(
+          formerLeader,
+          oldPeakMatch.matchId,
+          type,
+          6200,
+          1200,
+          10,
+        );
+        await insertElo(formerLeader, latestMatch.matchId, type, 5896, -304, 1);
+        await insertElo(
+          currentLeader,
+          latestMatch.matchId,
+          type,
+          6110,
+          1110,
+          1,
+        );
+
+        const current = await eloLeaderboard(0, type);
+        expect(current.map((row) => row.player_steam_id)).toEqual([
+          currentLeader,
+          formerLeader,
+        ]);
+        expect(Number(current[0].value)).toBe(6110);
+        expect(Number(current[1].value)).toBe(5896);
+        expect(Number(current[1].secondary_value)).toBe(-304);
+
+        const peak = await eloLeaderboard(0, type, "peak");
+        expect(peak.map((row) => row.player_steam_id)).toEqual([
+          formerLeader,
+          currentLeader,
+        ]);
+        expect(Number(peak[0].value)).toBe(6200);
+        expect(Number(peak[0].secondary_value)).toBe(0);
+
+        const [currentRank] = await postgres.query<
+          Array<{ rank: number; total: number; value: number }>
+        >(
+          `SELECT * FROM get_player_leaderboard_rank(
+             'elo', 0, $1, $2, false, NULL, 'current'
+           )`,
+          [currentLeader, type],
+        );
+        const [peakRank] = await postgres.query<
+          Array<{ rank: number; total: number; value: number }>
+        >(
+          `SELECT * FROM get_player_leaderboard_rank(
+             'elo', 0, $1, $2, false, NULL, 'peak'
+           )`,
+          [formerLeader, type],
+        );
+        expect(Number(currentRank.rank)).toBe(1);
+        expect(Number(currentRank.total)).toBe(2);
+        expect(Number(currentRank.value)).toBe(6110);
+        expect(Number(peakRank.rank)).toBe(1);
+        expect(Number(peakRank.value)).toBe(6200);
+      },
+    );
+
+    it("uses accumulated net change for rolling windows and excludes inactive players", async () => {
+      const [gainer, flat, loser, inactive] = await fx.players(4);
+      const oldMatch = await fx.bareMatch(T(60 * 24 * 40));
+      const sixDayMatch = await fx.bareMatch(T(60 * 24 * 6));
+      const threeDayMatch = await fx.bareMatch(T(60 * 24 * 3));
+      const latestMatch = await fx.bareMatch(T(60 * 24));
+
+      await insertElo(gainer, sixDayMatch.matchId, "Duel", 6000, 50, 6);
+      await insertElo(gainer, latestMatch.matchId, "Duel", 6110, 110, 1);
+      await insertElo(flat, threeDayMatch.matchId, "Duel", 5800, 0, 3);
+      await insertElo(loser, threeDayMatch.matchId, "Duel", 5900, -50, 3);
+      await insertElo(inactive, oldMatch.matchId, "Duel", 6300, 1300, 40);
+
+      for (const days of [7, 30]) {
+        const rows = await eloLeaderboard(days, "Duel");
+        const byId = new Map(rows.map((row) => [row.player_steam_id, row]));
+        expect(byId.has(inactive)).toBe(false);
+        expect(Number(byId.get(gainer)!.value)).toBe(6110);
+        expect(Number(byId.get(gainer)!.secondary_value)).toBe(160);
+        expect(Number(byId.get(flat)!.secondary_value)).toBe(0);
+        expect(Number(byId.get(loser)!.secondary_value)).toBe(-50);
+
+        const byChange = [...rows].sort(
+          (a, b) => Number(b.secondary_value) - Number(a.secondary_value),
+        );
+        expect(byChange.map((row) => Number(row.secondary_value))).toEqual([
+          160, 0, -50,
+        ]);
+      }
+    });
+
+    it("defaults omitted ELO view to current and validates unsupported views", async () => {
+      const [player] = await fx.players(1);
+      const match = await fx.bareMatch(T(60));
+      await insertElo(player, match.matchId, "Duel", 5400, 75, 0);
+
+      const omitted = await leaderboard("elo", 0, "Duel");
+      expect(Number(omitted[0].value)).toBe(5400);
+      expect(Number(omitted[0].secondary_value)).toBe(75);
+
+      await expect(
+        postgres.query(
+          "SELECT * FROM get_leaderboard('elo', 0, 'Duel', false, NULL, NULL, 'invalid')",
+        ),
+      ).rejects.toThrow(/Invalid ELO view/);
+      await expect(
+        postgres.query(
+          "SELECT * FROM get_leaderboard('elo', 7, 'Duel', false, NULL, NULL, 'peak')",
+        ),
+      ).rejects.toThrow(/Peak ELO view only supports/);
+    });
+
+    it("preserves season-current behavior and rejects a season peak view", async () => {
+      const [player] = await fx.players(1);
+      const seasonId = await fx.season("2025-01-01");
+      const firstMatch = await fx.bareMatch(T(60 * 24 * 2));
+      const latestMatch = await fx.bareMatch(T(60 * 24));
+      await insertElo(
+        player,
+        firstMatch.matchId,
+        "Competitive",
+        5100,
+        100,
+        2,
+        seasonId,
+      );
+      await insertElo(
+        player,
+        latestMatch.matchId,
+        "Competitive",
+        5075,
+        -25,
+        1,
+        seasonId,
+      );
+
+      const [current] = await postgres.query<Array<LeaderboardRow>>(
+        `SELECT * FROM get_leaderboard(
+           'elo', 0, 'Competitive', false, NULL, $1, 'current'
+         )`,
+        [seasonId],
+      );
+      expect(Number(current.value)).toBe(5075);
+      expect(Number(current.secondary_value)).toBe(75);
+
+      await expect(
+        postgres.query(
+          `SELECT * FROM get_leaderboard(
+             'elo', 0, 'Competitive', false, NULL, $1, 'peak'
+           )`,
+          [seasonId],
+        ),
+      ).rejects.toThrow(/Peak ELO view only supports/);
+    });
+
+    it("keeps rank ties and total population behavior unchanged", async () => {
+      const [one, two] = await fx.players(2);
+      const match = await fx.bareMatch(T(60));
+      await insertElo(one, match.matchId, "Wingman", 5600, 50, 0);
+      await insertElo(two, match.matchId, "Wingman", 5600, -20, 0);
+
+      for (const player of [one, two]) {
+        const [rank] = await postgres.query<
+          Array<{ rank: number; total: number }>
+        >(
+          `SELECT * FROM get_player_leaderboard_rank(
+             'elo', 0, $1, 'Wingman', false, NULL, 'current'
+           )`,
+          [player],
+        );
+        expect(Number(rank.rank)).toBe(1);
+        expect(Number(rank.total)).toBe(2);
+      }
+    });
+
+    it("uses match_id as a deterministic tie-breaker for equal ledger timestamps", async () => {
+      const [player] = await fx.players(1);
+      const firstMatch = await fx.bareMatch(T(60));
+      const secondMatch = await fx.bareMatch(T(60));
+      const createdAt = T(30);
+      const rows = [
+        { matchId: firstMatch.matchId, current: 5500, change: 100 },
+        { matchId: secondMatch.matchId, current: 5650, change: 150 },
+      ].sort((a, b) => b.matchId.localeCompare(a.matchId));
+
+      for (const row of rows) {
+        await postgres.query(
+          `INSERT INTO player_elo
+             (steam_id, match_id, type, "current", change, created_at)
+           VALUES ($1, $2, 'Duel', $3, $4, $5)`,
+          [player, row.matchId, row.current, row.change, createdAt],
+        );
+      }
+
+      const [current] = await eloLeaderboard(0, "Duel");
+      expect(Number(current.value)).toBe(rows[0].current);
+      expect(Number(current.secondary_value)).toBe(rows[0].change);
+    });
+
+    it("preserves tournament inclusion and exclusion adjustments", async () => {
+      const tournament = await tournamentFx.launch(
+        [
+          {
+            type: "SingleElimination",
+            order: 1,
+            minTeams: 2,
+            maxTeams: 2,
+          },
+        ],
+        2,
+      );
+      const [bracket] = await tournamentFx.getBrackets(tournament.stageIds[0]);
+      expect(bracket.match_id).not.toBeNull();
+
+      const [player] = await fx.players(1);
+      const regularMatch = await fx.bareMatch(T(60 * 24 * 2));
+      await insertElo(player, regularMatch.matchId, "Wingman", 5000, 0, 2);
+      await insertElo(player, bracket.match_id!, "Wingman", 5100, 100, 1);
+
+      const [includedCurrent] = await eloLeaderboard(
+        0,
+        "Wingman",
+        "current",
+        false,
+      );
+      const [excludedCurrent] = await eloLeaderboard(
+        0,
+        "Wingman",
+        "current",
+        true,
+      );
+      const [excludedPeak] = await eloLeaderboard(0, "Wingman", "peak", true);
+
+      expect(Number(includedCurrent.value)).toBe(5100);
+      expect(Number(includedCurrent.secondary_value)).toBe(100);
+      expect(Number(excludedCurrent.value)).toBe(5000);
+      expect(Number(excludedPeak.value)).toBe(5000);
+      expect(Number(excludedPeak.secondary_value)).toBe(0);
     });
 
     it("best_kdr divides kills by deaths, falling back to kill count for the deathless", async () => {
@@ -482,10 +771,9 @@ describe("read-side views and aggregations (SQL-driven)", () => {
 
       const [rank] = await postgres.query<
         Array<{ rank: number; total: number; value: number }>
-      >(
-        "SELECT * FROM get_player_leaderboard_rank('elo', 30, $1, 'Duel')",
-        [rival],
-      );
+      >("SELECT * FROM get_player_leaderboard_rank('elo', 30, $1, 'Duel')", [
+        rival,
+      ]);
       expect(Number(rank.rank)).toBe(2);
       expect(Number(rank.total)).toBe(2);
     });

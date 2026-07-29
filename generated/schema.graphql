@@ -18512,6 +18512,7 @@ input get_event_leaderboard_args {
 
 input get_leaderboard_args {
   _category: String
+  _elo_view: String
   _exclude_tournaments: Boolean
   _match_type: String
   _role: String
@@ -18527,6 +18528,7 @@ input get_league_season_leaderboard_args {
 
 input get_player_leaderboard_rank_args {
   _category: String
+  _elo_view: String
   _exclude_tournaments: Boolean
   _match_type: String
   _player_steam_id: String
