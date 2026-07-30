@@ -331,6 +331,7 @@ ALTER TABLE public.awards DROP CONSTRAINT IF EXISTS awards_single_scope_check;
 ALTER TABLE public.awards ADD CONSTRAINT awards_single_scope_check CHECK (
   num_nonnulls(tournament_id, event_id, elo_season_id, league_season_id) <= 1
   AND (system_key IS NULL OR num_nonnulls(tournament_id, event_id, elo_season_id, league_season_id) = 0)
+  AND (league_season_division_id IS NULL OR league_season_id IS NOT NULL)
 );
 
 ALTER TABLE public.award_recipients RENAME TO legacy_award_recipients_phase_a;
@@ -355,7 +356,10 @@ CREATE TABLE public.award_occurrences (
   calculation_key text UNIQUE,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT award_occurrences_single_scope CHECK (num_nonnulls(tournament_id, event_id, elo_season_id, league_season_id) <= 1),
+  CONSTRAINT award_occurrences_single_scope CHECK (
+    num_nonnulls(tournament_id, event_id, elo_season_id, league_season_id) <= 1
+    AND (league_season_division_id IS NULL OR league_season_id IS NOT NULL)
+  ),
   CONSTRAINT award_occurrences_calculated_tournament CHECK (
     source <> 'tournament_calculated' OR (tournament_id IS NOT NULL AND calculation_key IS NOT NULL)
   )
@@ -409,7 +413,7 @@ BEGIN
   FOR r IN SELECT * FROM public.legacy_award_recipients_phase_a LOOP
     INSERT INTO public.award_occurrences(award_id,tournament_id,placement,source,effective_at,note,awarded_by,calculation_key)
     VALUES (r.award_id,r.tournament_id,r.placement,CASE WHEN r.source='manual' THEN 'manual' ELSE 'migration' END,r.created_at,r.note,r.awarded_by_steam_id,
-      CASE WHEN r.source='manual' THEN NULL ELSE 'migration:tournament:'||r.tournament_id||':legacy:'||r.id END)
+      'migration:tournament:'||COALESCE(r.tournament_id::text,'global')||':legacy:'||r.id)
     RETURNING id INTO occurrence;
     INSERT INTO public.award_recipients(occurrence_id,player_steam_id,team_id,tournament_team_id,created_at)
     VALUES (occurrence,r.player_steam_id,r.team_id,r.tournament_team_id,r.created_at);
@@ -451,6 +455,9 @@ BEGIN
     FROM public.award_occurrences o WHERE r.id=OLD.id AND o.id=r.occurrence_id AND o.source='manual';
     RETURN OLD;
   END IF;
+  IF COALESCE(NEW.source,'manual') <> 'manual' THEN
+    RAISE EXCEPTION 'Calculated awards must be managed by the tournament calculator';
+  END IF;
   definition:=COALESCE(
     NEW.award_id,
     public.resolve_tournament_award(NEW.tournament_id,NEW.placement)
@@ -479,11 +486,12 @@ BEGIN
     definition,
     NEW.tournament_id,
     NEW.placement,
-    CASE WHEN COALESCE(NEW.source,'manual')='manual' THEN 'manual' ELSE 'tournament_calculated' END,
+    'manual',
     now()
   ) RETURNING id INTO occurrence;
+  NEW.id:=COALESCE(NEW.id,gen_random_uuid());
   INSERT INTO public.award_recipients(id,occurrence_id,tournament_team_id,player_steam_id,team_id)
-  VALUES(COALESCE(NEW.id,gen_random_uuid()),occurrence,NEW.tournament_team_id,NEW.player_steam_id,NEW.team_id);
+  VALUES(NEW.id,occurrence,NEW.tournament_team_id,NEW.player_steam_id,NEW.team_id);
   RETURN NEW;
 END $$;
 CREATE TRIGGER tournament_trophies_compat_write INSTEAD OF INSERT OR DELETE ON public.tournament_trophies FOR EACH ROW EXECUTE FUNCTION public.tournament_trophies_compat_write();
@@ -500,7 +508,8 @@ BEGIN
   SELECT public.resolve_tournament_award(NEW.tournament_id,NEW.placement) INTO definition;
   INSERT INTO public.tournament_award_slots(id,tournament_id,slot,award_id,custom_name,silhouette_override,image_override)
   VALUES(COALESCE(NEW.id,gen_random_uuid()),NEW.tournament_id,slot_name,definition,NEW.custom_name,NEW.silhouette,NEW.image_url)
-  ON CONFLICT(tournament_id,slot) DO UPDATE SET custom_name=excluded.custom_name,silhouette_override=excluded.silhouette_override,image_override=excluded.image_override,updated_at=now();
+  ON CONFLICT(tournament_id,slot) DO UPDATE SET custom_name=excluded.custom_name,silhouette_override=excluded.silhouette_override,image_override=excluded.image_override,updated_at=now()
+  RETURNING id INTO NEW.id;
   RETURN NEW;
 END $$;
 CREATE TRIGGER tournament_trophy_configs_compat_write INSTEAD OF INSERT OR UPDATE OR DELETE ON public.tournament_trophy_configs FOR EACH ROW EXECUTE FUNCTION public.tournament_trophy_configs_compat_write();

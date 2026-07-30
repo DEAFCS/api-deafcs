@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { Readable } from "stream";
+import { PoolClient } from "pg";
 import {
   BadRequestException,
   ForbiddenException,
@@ -187,7 +188,7 @@ export class AwardsService {
     if (award.system_key)
       throw new ForbiddenException("Built-in awards cannot be archived");
     const [updated] = await this.postgres.query<AwardRow[]>(
-      `UPDATE public.awards SET archived_at=CASE WHEN $2 THEN now() ELSE NULL END,archived_by=CASE WHEN $2 THEN $3 ELSE NULL END,updated_at=now() WHERE id=$1 RETURNING *`,
+      `UPDATE public.awards SET archived_at=CASE WHEN $2 THEN now() ELSE NULL END,archived_by=CASE WHEN $2 THEN $3::bigint ELSE NULL END,updated_at=now() WHERE id=$1 RETURNING *`,
       [awardId, archived, steamId],
     );
     return updated;
@@ -205,36 +206,6 @@ export class AwardsService {
     if (award.archived_at) {
       throw new BadRequestException("Archived awards cannot be granted");
     }
-    if (!award.allow_multiple) {
-      const duplicate = await this.postgres.query<Array<{ id: string }>>(
-        `SELECT r.id
-           FROM public.award_recipients r
-           JOIN public.award_occurrences o ON o.id=r.occurrence_id
-          WHERE o.award_id=$1
-            AND o.tournament_id IS NOT DISTINCT FROM $2
-            AND o.event_id IS NOT DISTINCT FROM $3
-            AND o.elo_season_id IS NOT DISTINCT FROM $4
-            AND o.league_season_id IS NOT DISTINCT FROM $5
-            AND r.revoked_at IS NULL
-            AND (($6::bigint IS NOT NULL AND r.player_steam_id=$6)
-              OR ($7::uuid IS NOT NULL AND r.team_id=$7))
-          LIMIT 1`,
-        [
-          input.award_id,
-          input.tournament_id ?? null,
-          input.event_id ?? null,
-          input.elo_season_id ?? null,
-          input.league_season_id ?? null,
-          input.player_steam_id ?? null,
-          input.team_id ?? null,
-        ],
-      );
-      if (duplicate.length) {
-        throw new BadRequestException(
-          "Award already granted to this recipient",
-        );
-      }
-    }
     let tournamentTeamId: string | null = null;
     if (input.tournament_id) {
       tournamentTeamId = await this.resolveTournamentTeam(
@@ -243,36 +214,75 @@ export class AwardsService {
         input.team_id ?? null,
       );
     }
-    const [occurrence] = await this.postgres.query<Array<{ id: string }>>(
-      `INSERT INTO public.award_occurrences
-        (award_id,tournament_id,event_id,elo_season_id,league_season_id,source,note,awarded_by)
-       VALUES ($1,$2,$3,$4,$5,'manual',$6,$7) RETURNING id`,
-      [
-        input.award_id,
-        input.tournament_id ?? null,
-        input.event_id ?? null,
-        input.elo_season_id ?? null,
-        input.league_season_id ?? null,
-        input.note ?? null,
-        input.awarded_by_steam_id,
-      ],
-    );
-    const [granted] = await this.postgres.query<Array<{ id: string }>>(
-      `INSERT INTO public.award_recipients
-        (occurrence_id,player_steam_id,team_id,tournament_team_id,recipient_note)
-       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [
-        occurrence.id,
-        input.player_steam_id ?? null,
-        input.team_id ?? null,
-        tournamentTeamId,
-        input.note ?? null,
-      ],
-    );
-    if (input.team_id) {
-      await this.grantToRoster(occurrence.id, input.team_id, tournamentTeamId);
-    }
-    return granted;
+    return await this.postgres.transaction(async (client) => {
+      if (!award.allow_multiple) {
+        const duplicate = await client.query<{ id: string }>(
+          `SELECT r.id
+             FROM public.award_recipients r
+             JOIN public.award_occurrences o ON o.id=r.occurrence_id
+            WHERE o.award_id=$1
+              AND o.tournament_id IS NOT DISTINCT FROM $2
+              AND o.event_id IS NOT DISTINCT FROM $3
+              AND o.elo_season_id IS NOT DISTINCT FROM $4
+              AND o.league_season_id IS NOT DISTINCT FROM $5
+              AND r.revoked_at IS NULL
+              AND (($6::bigint IS NOT NULL AND r.player_steam_id=$6)
+                OR ($7::uuid IS NOT NULL AND r.team_id=$7))
+            LIMIT 1`,
+          [
+            input.award_id,
+            input.tournament_id ?? null,
+            input.event_id ?? null,
+            input.elo_season_id ?? null,
+            input.league_season_id ?? null,
+            input.player_steam_id ?? null,
+            input.team_id ?? null,
+          ],
+        );
+        if (duplicate.rows.length) {
+          throw new BadRequestException(
+            "Award already granted to this recipient",
+          );
+        }
+      }
+
+      const occurrenceResult = await client.query<{ id: string }>(
+        `INSERT INTO public.award_occurrences
+          (award_id,tournament_id,event_id,elo_season_id,league_season_id,source,note,awarded_by)
+         VALUES ($1,$2,$3,$4,$5,'manual',$6,$7) RETURNING id`,
+        [
+          input.award_id,
+          input.tournament_id ?? null,
+          input.event_id ?? null,
+          input.elo_season_id ?? null,
+          input.league_season_id ?? null,
+          input.note ?? null,
+          input.awarded_by_steam_id,
+        ],
+      );
+      const occurrence = occurrenceResult.rows[0];
+      const grantedResult = await client.query<{ id: string }>(
+        `INSERT INTO public.award_recipients
+          (occurrence_id,player_steam_id,team_id,tournament_team_id,recipient_note)
+         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [
+          occurrence.id,
+          input.player_steam_id ?? null,
+          input.team_id ?? null,
+          tournamentTeamId,
+          input.note ?? null,
+        ],
+      );
+      if (input.team_id) {
+        await this.grantToRoster(
+          client,
+          occurrence.id,
+          input.team_id,
+          tournamentTeamId,
+        );
+      }
+      return grantedResult.rows[0];
+    });
   }
   public assertSingleScope(input: {
     tournament_id?: string | null;
@@ -307,10 +317,44 @@ export class AwardsService {
     }
   }
 
+  public async requireTournamentSlotAward(
+    awardId: string,
+    tournamentId: string,
+  ): Promise<void> {
+    const award = await this.requireAward(awardId);
+    if (award.archived_at) {
+      throw new BadRequestException("Archived awards cannot be selected");
+    }
+    if (
+      award.event_id ||
+      award.elo_season_id ||
+      award.league_season_id ||
+      (award.tournament_id && award.tournament_id !== tournamentId)
+    ) {
+      throw new ForbiddenException(
+        "This award is not available to this tournament",
+      );
+    }
+  }
+
+  public async requireAwardManager(awardId: string, user: User): Promise<void> {
+    if (user.role === "administrator") {
+      return;
+    }
+    const award = await this.requireAward(awardId);
+    if (!award.tournament_id) {
+      throw new ForbiddenException(
+        "Only administrators can manage shared awards",
+      );
+    }
+    await this.requireOrganizer(award.tournament_id, user);
+  }
+
   public async getRecipient(recipientId: string) {
     const [recipient] = await this.postgres.query<
       Array<{
         id: string;
+        award_id: string;
         source: string;
         tournament_id: string | null;
         event_id: string | null;
@@ -318,7 +362,7 @@ export class AwardsService {
         league_season_id: string | null;
       }>
     >(
-      `SELECT r.id,o.source,o.tournament_id,o.event_id,o.elo_season_id,o.league_season_id
+      `SELECT r.id,o.award_id,o.source,o.tournament_id,o.event_id,o.elo_season_id,o.league_season_id
        FROM public.award_recipients r JOIN public.award_occurrences o ON o.id=r.occurrence_id
        WHERE r.id=$1 LIMIT 1`,
       [recipientId],
@@ -359,7 +403,10 @@ export class AwardsService {
       throw new BadRequestException("Invalid silhouette");
     }
     if (input.award_id) {
-      await this.requireAward(input.award_id);
+      await this.requireTournamentSlotAward(
+        input.award_id,
+        input.tournament_id,
+      );
     }
 
     const [config] = await this.postgres.query<TournamentAwardRow[]>(
@@ -398,15 +445,19 @@ export class AwardsService {
     const path = this.buildPath(awardId, mimetype);
 
     await this.s3.put(path, buffer);
+    try {
+      await this.postgres.query(
+        `UPDATE public.awards SET image_url = $1, updated_at = now() WHERE id = $2`,
+        [path, awardId],
+      );
+    } catch (error) {
+      await this.s3.remove(path);
+      throw error;
+    }
 
     if (award.image_url && award.image_url !== path) {
       await this.s3.remove(award.image_url);
     }
-
-    await this.postgres.query(
-      `UPDATE public.awards SET image_override = $1, updated_at = now() WHERE id = $2`,
-      [path, awardId],
-    );
 
     this.logger.log(`Uploaded award ${awardId} image to ${path}`);
     return path;
@@ -418,11 +469,11 @@ export class AwardsService {
       return;
     }
 
-    await this.s3.remove(award.image_url);
     await this.postgres.query(
       `UPDATE public.awards SET image_url = NULL, updated_at = now() WHERE id = $1`,
       [awardId],
     );
+    await this.s3.remove(award.image_url);
   }
 
   public async uploadTournamentAwardImage(
@@ -439,25 +490,29 @@ export class AwardsService {
     const path = this.buildPath(`${tournamentId}-${placement}`, mimetype);
 
     await this.s3.put(path, buffer);
+    try {
+      if (existing) {
+        await this.postgres.query(
+          `UPDATE public.tournament_award_slots
+              SET image_override = $1, updated_at = now()
+            WHERE id = $2`,
+          [path, existing.id],
+        );
+      } else {
+        await this.postgres.query(
+          `INSERT INTO public.tournament_award_slots
+              (tournament_id, slot, award_id, image_override)
+            VALUES ($1, $2, public.resolve_tournament_award($1, $4), $3)`,
+          [tournamentId, this.slotForPlacement(placement), path, placement],
+        );
+      }
+    } catch (error) {
+      await this.s3.remove(path);
+      throw error;
+    }
 
     if (existing?.image_url && existing.image_url !== path) {
       await this.s3.remove(existing.image_url);
-    }
-
-    if (existing) {
-      await this.postgres.query(
-        `UPDATE public.tournament_award_slots
-            SET image_override = $1, updated_at = now()
-          WHERE id = $2`,
-        [path, existing.id],
-      );
-    } else {
-      await this.postgres.query(
-        `INSERT INTO public.tournament_award_slots
-            (tournament_id, slot, award_id, image_override)
-          VALUES (, , public.resolve_tournament_award(, ), )`,
-        [tournamentId, this.slotForPlacement(placement), path, placement],
-      );
     }
 
     this.logger.log(
@@ -479,16 +534,15 @@ export class AwardsService {
       return;
     }
 
-    if (existing.image_url) {
-      await this.s3.remove(existing.image_url);
-    }
-
     await this.postgres.query(
       `UPDATE public.tournament_award_slots
-          SET image_url = NULL, updated_at = now()
+          SET image_override = NULL, updated_at = now()
         WHERE id = $1`,
       [existing.id],
     );
+    if (existing.image_url) {
+      await this.s3.remove(existing.image_url);
+    }
   }
 
   public async getStream(
@@ -591,16 +645,32 @@ export class AwardsService {
   // to ON CONFLICT: tbi_award_recipients raises on a duplicate instead of
   // conflicting, so one existing holder would otherwise fail the whole grant.
   private async grantToRoster(
+    client: PoolClient,
     occurrenceId: string,
     teamId: string,
     tournamentTeamId: string | null,
   ): Promise<void> {
-    await this.postgres.query(
+    await client.query(
       `INSERT INTO public.award_recipients
         (occurrence_id,player_steam_id,tournament_team_id)
        SELECT $1, roster.player_steam_id, $2
        FROM public.team_roster roster
-       WHERE roster.team_id=$3 AND roster.role <> 'Invite'
+       JOIN public.award_occurrences target ON target.id=$1
+       WHERE roster.team_id=$3
+         AND roster.role <> 'Invite'
+         AND NOT EXISTS (
+           SELECT 1
+             FROM public.award_recipients held
+             JOIN public.award_occurrences held_occurrence
+               ON held_occurrence.id=held.occurrence_id
+            WHERE held.player_steam_id=roster.player_steam_id
+              AND held.revoked_at IS NULL
+              AND held_occurrence.award_id=target.award_id
+              AND held_occurrence.tournament_id IS NOT DISTINCT FROM target.tournament_id
+              AND held_occurrence.event_id IS NOT DISTINCT FROM target.event_id
+              AND held_occurrence.elo_season_id IS NOT DISTINCT FROM target.elo_season_id
+              AND held_occurrence.league_season_id IS NOT DISTINCT FROM target.league_season_id
+         )
        ON CONFLICT DO NOTHING`,
       [occurrenceId, tournamentTeamId, teamId],
     );

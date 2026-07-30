@@ -2,6 +2,9 @@ import { Logger } from "@nestjs/common";
 import { PostgresService } from "./../src/postgres/postgres.service";
 import { AwardsService } from "./../src/awards/awards.service";
 import { AwardsController } from "./../src/awards/awards.controller";
+import { TrophiesLegacyController } from "./../src/awards/trophies-legacy.controller";
+import { METHOD_METADATA, PATH_METADATA } from "@nestjs/common/constants";
+import { RequestMethod } from "@nestjs/common";
 import { Fixtures } from "./utils/fixtures";
 import { TournamentFixtures } from "./utils/tournament-fixtures";
 import {
@@ -184,6 +187,42 @@ describe("awards (SQL-driven)", () => {
         [awardId],
       );
       expect(Number(c)).toBe(0);
+    });
+
+    it("keeps league divisions attached to their league season scope", async () => {
+      const [constraint] = await postgres.query<Array<{ definition: string }>>(
+        `SELECT pg_get_constraintdef(oid) AS definition
+           FROM pg_constraint
+          WHERE conrelid = 'award_occurrences'::regclass
+            AND conname = 'award_occurrences_single_scope'`,
+      );
+      expect(constraint.definition).toContain(
+        "league_season_division_id IS NULL",
+      );
+      expect(constraint.definition).toContain("league_season_id IS NOT NULL");
+    });
+
+    it("returns generated ids from both legacy compatibility views", async () => {
+      const steamId = await fx.player();
+      const awardId = await createAward("Legacy ID");
+      const [recipient] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO tournament_trophies
+            (award_id, player_steam_id)
+          VALUES ($1, $2)
+          RETURNING id`,
+        [awardId, steamId],
+      );
+      expect(recipient.id).toBeTruthy();
+
+      const t = await tfx.createTournament(SE4);
+      const [config] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO tournament_trophy_configs
+            (tournament_id, placement, custom_name)
+          VALUES ($1, 1, 'Legacy config')
+          RETURNING id`,
+        [t.id],
+      );
+      expect(config.id).toBeTruthy();
     });
   });
 
@@ -467,6 +506,71 @@ describe("awards (SQL-driven)", () => {
       expect(Number(counts.manual)).toBe(1);
     });
 
+    it("excludes roster substitutes who never appeared in a completed match", async () => {
+      const t = await playedOutCup();
+      const [winner] = await postgres.query<
+        Array<{ tournament_team_id: string }>
+      >(
+        `SELECT tournament_team_id
+           FROM tournament_trophies
+          WHERE tournament_id=$1 AND placement=1
+            AND tournament_team_id IS NOT NULL
+          LIMIT 1`,
+        [t.id],
+      );
+      const substitute = await fx.player();
+      const [replaced] = await postgres.query<
+        Array<{ player_steam_id: string }>
+      >(
+        `DELETE FROM tournament_team_roster
+          WHERE ctid IN (
+            SELECT ctid
+              FROM tournament_team_roster
+             WHERE tournament_id=$1 AND tournament_team_id=$2
+             LIMIT 1
+          )
+          RETURNING player_steam_id`,
+        [t.id, winner.tournament_team_id],
+      );
+      expect(replaced.player_steam_id).toBeTruthy();
+      await postgres.query(
+        `INSERT INTO tournament_team_roster
+            (tournament_id, tournament_team_id, player_steam_id)
+          VALUES ($1, $2, $3)`,
+        [t.id, winner.tournament_team_id, substitute],
+      );
+
+      await postgres.query("SELECT calculate_tournament_awards($1)", [t.id]);
+
+      const [{ c }] = await postgres.query<Array<{ c: string }>>(
+        `SELECT count(*) AS c
+           FROM tournament_trophies
+          WHERE tournament_id=$1 AND player_steam_id=$2`,
+        [t.id, substitute],
+      );
+      expect(Number(c)).toBe(0);
+    });
+
+    it("removes obsolete calculated occurrences that have no recipients", async () => {
+      const t = await playedOutCup();
+      const awardId = await systemAward("tournament_bronze");
+      const [obsolete] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO award_occurrences
+            (award_id,tournament_id,placement,source,calculation_key)
+          VALUES ($1,$2,3,'tournament_calculated',$3)
+          RETURNING id`,
+        [awardId, t.id, `tournament:${t.id}:obsolete`],
+      );
+
+      await postgres.query("SELECT calculate_tournament_awards($1)", [t.id]);
+
+      const [{ c }] = await postgres.query<Array<{ c: string }>>(
+        "SELECT count(*) AS c FROM award_occurrences WHERE id=$1",
+        [obsolete.id],
+      );
+      expect(Number(c)).toBe(0);
+    });
+
     it("keeps hand-granted awards out of the medal leaderboard", async () => {
       const t = await playedOutCup();
       const awardId = await createAward("Community MVP");
@@ -538,6 +642,12 @@ describe("awards (SQL-driven)", () => {
   // constraints exercised above.
   describe("actions", () => {
     let controller: AwardsController;
+    let service: AwardsService;
+    let s3: {
+      put: jest.Mock;
+      remove: jest.Mock;
+      has: jest.Mock;
+    };
     let createFloor: string;
     let grantFloor: string;
 
@@ -545,14 +655,14 @@ describe("awards (SQL-driven)", () => {
       createFloor = "administrator";
       grantFloor = "administrator";
 
-      const service = new AwardsService(
+      s3 = {
+        put: jest.fn(),
+        remove: jest.fn(),
+        has: jest.fn().mockResolvedValue(false),
+      };
+      service = new AwardsService(
         new Logger("AwardsActionTest"),
-        // No test touches artwork, so a stub that fails loudly is enough.
-        {
-          put: jest.fn(),
-          remove: jest.fn(),
-          has: jest.fn().mockResolvedValue(false),
-        } as never,
+        s3 as never,
         postgres,
       );
 
@@ -642,6 +752,28 @@ describe("awards (SQL-driven)", () => {
         });
         expect(award.elo_season_id).toBe(season);
       });
+
+      it("prevents a non-admin from taking over another tournament's award", async () => {
+        const owned = await tfx.createTournament(SE4);
+        const other = await tfx.createTournament(SE4);
+        const [award] = await postgres.query<Array<{ id: string }>>(
+          `INSERT INTO awards (name,tier,tournament_id)
+            VALUES ('Owned award','special',$1)
+            RETURNING id`,
+          [owned.id],
+        );
+        createFloor = "user";
+
+        await expect(
+          controller.saveAward({
+            id: award.id,
+            name: "Taken over",
+            tier: "special",
+            tournament_id: other.id,
+            user: user(other.organizer, "user"),
+          }),
+        ).rejects.toThrow("Not the tournament organizer");
+      });
     });
 
     describe("deleteAward", () => {
@@ -652,6 +784,57 @@ describe("awards (SQL-driven)", () => {
             user: user(await fx.player(), "administrator"),
           }),
         ).rejects.toThrow("cannot be deleted");
+      });
+
+      it("prevents a non-admin from archiving or deleting an unrelated award", async () => {
+        const owned = await tfx.createTournament(SE4);
+        const other = await tfx.createTournament(SE4);
+        const [award] = await postgres.query<Array<{ id: string }>>(
+          `INSERT INTO awards (name,tier,tournament_id)
+            VALUES ('Protected','special',$1)
+            RETURNING id`,
+          [owned.id],
+        );
+        createFloor = "user";
+        const outsider = user(other.organizer, "user");
+
+        await expect(
+          controller.archiveAward({
+            id: award.id,
+            archived: true,
+            user: outsider,
+          }),
+        ).rejects.toThrow("Not the tournament organizer");
+        await expect(
+          controller.deleteAward({ id: award.id, user: outsider }),
+        ).rejects.toThrow("Not the tournament organizer");
+      });
+
+      it("archives custom awards but never built-in definitions", async () => {
+        const custom = await createAward("Archivable");
+        const administrator = user(await fx.player(), "administrator");
+
+        const archived = await controller.archiveAward({
+          id: custom,
+          archived: true,
+          user: administrator,
+        });
+        expect(archived.archived_at).not.toBeNull();
+        await expect(
+          controller.grantAward({
+            award_id: custom,
+            player_steam_id: await fx.player(),
+            user: administrator,
+          }),
+        ).rejects.toThrow("Archived awards cannot be granted");
+
+        await expect(
+          controller.archiveAward({
+            id: await systemAward("tournament_gold"),
+            archived: true,
+            user: administrator,
+          }),
+        ).rejects.toThrow("cannot be archived");
       });
     });
 
@@ -745,6 +928,164 @@ describe("awards (SQL-driven)", () => {
         );
         expect(row.elo_season_id).toBe(season);
       });
+
+      it("runs occurrence creation and recipient fan-out in one transaction", async () => {
+        const transaction = jest.spyOn(postgres, "transaction");
+        const awardId = await createAward("Transactional");
+
+        await controller.grantAward({
+          award_id: awardId,
+          player_steam_id: await fx.player(),
+          user: user(await fx.player(), "administrator"),
+        });
+
+        expect(transaction).toHaveBeenCalledTimes(1);
+        transaction.mockRestore();
+      });
+    });
+
+    describe("setTournamentAward", () => {
+      it("rejects archived and foreign-scoped award definitions", async () => {
+        const tournament = await tfx.createTournament(SE4);
+        const other = await tfx.createTournament(SE4);
+        const [archived] = await postgres.query<Array<{ id: string }>>(
+          `INSERT INTO awards (name,tier,archived_at)
+            VALUES ('Archived','special',now())
+            RETURNING id`,
+        );
+        const [foreign] = await postgres.query<Array<{ id: string }>>(
+          `INSERT INTO awards (name,tier,tournament_id)
+            VALUES ('Foreign','special',$1)
+            RETURNING id`,
+          [other.id],
+        );
+        const organizer = user(tournament.organizer, "user");
+
+        await expect(
+          controller.setTournamentAward({
+            tournament_id: tournament.id,
+            placement: 1,
+            award_id: archived.id,
+            user: organizer,
+          }),
+        ).rejects.toThrow("Archived awards cannot be selected");
+
+        await expect(
+          controller.setTournamentAward({
+            tournament_id: tournament.id,
+            placement: 1,
+            award_id: foreign.id,
+            user: organizer,
+          }),
+        ).rejects.toThrow("not available to this tournament");
+      });
+    });
+
+    describe("artwork", () => {
+      it("keeps the legacy tournament artwork routes", () => {
+        const upload = TrophiesLegacyController.prototype.upload;
+        const remove = TrophiesLegacyController.prototype.remove;
+        expect(Reflect.getMetadata(PATH_METADATA, upload)).toBe(
+          ":tournamentId/:placement",
+        );
+        expect(Reflect.getMetadata(METHOD_METADATA, upload)).toBe(
+          RequestMethod.POST,
+        );
+        expect(Reflect.getMetadata(PATH_METADATA, remove)).toBe(
+          ":tournamentId/:placement",
+        );
+        expect(Reflect.getMetadata(METHOD_METADATA, remove)).toBe(
+          RequestMethod.DELETE,
+        );
+      });
+
+      it("persists award and tournament-slot images in the correct columns", async () => {
+        const awardId = await createAward("Artwork");
+        const awardPath = await service.uploadAwardImage(
+          awardId,
+          Buffer.from("image"),
+          "image/png",
+        );
+        const [award] = await postgres.query<Array<{ image_url: string }>>(
+          "SELECT image_url FROM awards WHERE id=$1",
+          [awardId],
+        );
+        expect(award.image_url).toBe(awardPath);
+        await service.removeAwardImage(awardId);
+        const [clearedAward] = await postgres.query<
+          Array<{ image_url: string | null }>
+        >("SELECT image_url FROM awards WHERE id=$1", [awardId]);
+        expect(clearedAward.image_url).toBeNull();
+
+        const tournament = await tfx.createTournament(SE4);
+        const slotPath = await service.uploadTournamentAwardImage(
+          tournament.id,
+          1,
+          Buffer.from("image"),
+          "image/png",
+        );
+        const [slot] = await postgres.query<Array<{ image_override: string }>>(
+          `SELECT image_override
+             FROM tournament_award_slots
+            WHERE tournament_id=$1 AND slot='champion'`,
+          [tournament.id],
+        );
+        expect(slot.image_override).toBe(slotPath);
+
+        await service.removeTournamentAwardImage(tournament.id, 1);
+        const [cleared] = await postgres.query<
+          Array<{ image_override: string | null }>
+        >(
+          `SELECT image_override
+             FROM tournament_award_slots
+            WHERE tournament_id=$1 AND slot='champion'`,
+          [tournament.id],
+        );
+        expect(cleared.image_override).toBeNull();
+      });
+
+      it("removes a newly uploaded object when database persistence fails", async () => {
+        const awardId = await createAward("Cleanup");
+        const originalQuery = postgres.query.bind(postgres);
+        const query = jest
+          .spyOn(postgres, "query")
+          .mockImplementationOnce((sql, bindings) =>
+            originalQuery(sql, bindings),
+          )
+          .mockRejectedValueOnce(new Error("database unavailable"));
+
+        await expect(
+          service.uploadAwardImage(awardId, Buffer.from("image"), "image/png"),
+        ).rejects.toThrow("database unavailable");
+        expect(s3.remove).toHaveBeenCalledWith(
+          expect.stringMatching(/^awards\//),
+        );
+        query.mockRestore();
+      });
+
+      it("cleans up a new tournament image when slot persistence fails", async () => {
+        const tournament = await tfx.createTournament(SE4);
+        const originalQuery = postgres.query.bind(postgres);
+        const query = jest
+          .spyOn(postgres, "query")
+          .mockImplementationOnce((sql, bindings) =>
+            originalQuery(sql, bindings),
+          )
+          .mockRejectedValueOnce(new Error("database unavailable"));
+
+        await expect(
+          service.uploadTournamentAwardImage(
+            tournament.id,
+            1,
+            Buffer.from("image"),
+            "image/png",
+          ),
+        ).rejects.toThrow("database unavailable");
+        expect(s3.remove).toHaveBeenCalledWith(
+          expect.stringMatching(/^awards\//),
+        );
+        query.mockRestore();
+      });
     });
 
     describe("revokeAward", () => {
@@ -775,7 +1116,7 @@ describe("awards (SQL-driven)", () => {
 
         await controller.revokeAward({
           id: granted.id,
-            reason: "test revocation",
+          reason: "test revocation",
           user: user(await fx.player(), "administrator"),
         });
 
@@ -784,6 +1125,35 @@ describe("awards (SQL-driven)", () => {
           [granted.id],
         );
         expect(rows).toHaveLength(0);
+      });
+
+      it("lets the owning organizer soft-revoke a manual tournament award", async () => {
+        const t = await playedOutCup();
+        const awardId = await createAward("Organizer revocation");
+        const roster = await rosterOf(t.id);
+        const granted = await controller.grantAward({
+          award_id: awardId,
+          player_steam_id: roster.player_steam_id,
+          tournament_id: t.id,
+          user: user(t.organizer, "user"),
+        });
+
+        await controller.revokeAward({
+          id: granted.id,
+          reason: "Granted in error",
+          user: user(t.organizer, "user"),
+        });
+
+        const [stored] = await postgres.query<
+          Array<{ revoked_at: string | null; revocation_reason: string | null }>
+        >(
+          `SELECT revoked_at,revocation_reason
+             FROM award_recipients
+            WHERE id=$1`,
+          [granted.id],
+        );
+        expect(stored.revoked_at).not.toBeNull();
+        expect(stored.revocation_reason).toBe("Granted in error");
       });
     });
   });

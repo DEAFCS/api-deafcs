@@ -51,6 +51,9 @@ export class AwardsController {
     user?: User;
   }) {
     const user = await this.assertCanCreate(data.user);
+    if (data.id) {
+      await this.awards.requireAwardManager(data.id, user);
+    }
     // Scoping an award stamps ownership, so a tournament's bespoke awards do
     // not clutter every other picker. Only a tournament has a delegated
     // organizer role; the platform-wide scopes stay administrator-only.
@@ -65,12 +68,18 @@ export class AwardsController {
         "Only administrators can scope an award to an event, season or league",
       );
     }
+    if (!data.tournament_id && user.role !== "administrator") {
+      throw new ForbiddenException(
+        "Only administrators can manage shared awards",
+      );
+    }
     return await this.awards.saveAward(data, user.steam_id);
   }
 
   @HasuraAction()
   public async deleteAward(data: { id: string; user?: User }) {
-    await this.assertCanCreate(data.user);
+    const user = await this.assertCanCreate(data.user);
+    await this.awards.requireAwardManager(data.id, user);
     await this.awards.deleteAward(data.id);
     return { success: true };
   }
@@ -82,6 +91,7 @@ export class AwardsController {
     user?: User;
   }) {
     const user = await this.assertCanCreate(data.user);
+    await this.awards.requireAwardManager(data.id, user);
     return this.awards.archiveAward(data.id, data.archived, user.steam_id);
   }
   @HasuraAction()
@@ -129,6 +139,12 @@ export class AwardsController {
   }) {
     const user = this.requireUser(data.user);
     await this.awards.requireOrganizer(data.tournament_id, user);
+    if (data.award_id) {
+      await this.awards.requireTournamentSlotAward(
+        data.award_id,
+        data.tournament_id,
+      );
+    }
     return await this.awards.setTournamentAward(data);
   }
 
@@ -147,7 +163,8 @@ export class AwardsController {
     )
     file: Express.Multer.File,
   ) {
-    await this.assertCanCreate(request.user as User | undefined);
+    const user = await this.assertCanCreate(request.user as User | undefined);
+    await this.awards.requireAwardManager(awardId, user);
     const path = await this.awards.uploadAwardImage(
       awardId,
       file.buffer,
@@ -161,7 +178,8 @@ export class AwardsController {
     @Req() request: Request,
     @Param("awardId") awardId: string,
   ) {
-    await this.assertCanCreate(request.user as User | undefined);
+    const user = await this.assertCanCreate(request.user as User | undefined);
+    await this.awards.requireAwardManager(awardId, user);
     await this.awards.removeAwardImage(awardId);
     return { success: true };
   }

@@ -1,6 +1,11 @@
 DO $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM public.award_occurrences WHERE source <> 'migration') THEN
+  IF EXISTS (
+    SELECT 1
+    FROM public.award_occurrences
+    WHERE calculation_key IS NULL
+       OR calculation_key NOT LIKE 'migration:tournament:%:legacy:%'
+  ) THEN
     RAISE EXCEPTION 'Awards Phase A rollback aborted: post-migration award history exists and must be exported explicitly';
   END IF;
 END $$;

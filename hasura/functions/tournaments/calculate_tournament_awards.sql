@@ -43,6 +43,13 @@ BEGIN
       AND o.source = 'tournament_calculated';
 
     IF _awards_enabled IS DISTINCT FROM true THEN
+        DELETE FROM public.award_occurrences o
+        WHERE o.tournament_id = _tournament_id
+          AND o.source = 'tournament_calculated'
+          AND NOT EXISTS (
+              SELECT 1 FROM public.award_recipients r
+              WHERE r.occurrence_id = o.id
+          );
         RETURN;
     END IF;
 
@@ -57,6 +64,13 @@ BEGIN
     LIMIT 1;
 
     IF _final_stage_id IS NULL THEN
+        DELETE FROM public.award_occurrences o
+        WHERE o.tournament_id = _tournament_id
+          AND o.source = 'tournament_calculated'
+          AND NOT EXISTS (
+              SELECT 1 FROM public.award_recipients r
+              WHERE r.occurrence_id = o.id
+          );
         RETURN;
     END IF;
 
@@ -197,5 +211,13 @@ BEGIN
         VALUES(_final_stage_id,_mvp_steam_id,_winning_team_id) ON CONFLICT DO NOTHING;
       END IF;
     END IF;
+
+    DELETE FROM public.award_occurrences o
+    WHERE o.tournament_id = _tournament_id
+      AND o.source = 'tournament_calculated'
+      AND NOT EXISTS (
+          SELECT 1 FROM public.award_recipients r
+          WHERE r.occurrence_id = o.id
+      );
 END;
 $$;
