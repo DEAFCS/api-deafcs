@@ -72,6 +72,11 @@ BEGIN
         WHERE table_schema = 'public'
           AND table_name = 'tournaments'
           AND column_name = 'trophies_enabled'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'tournaments'
+          AND column_name = 'awards_enabled'
     ) THEN
         ALTER TABLE public.tournaments RENAME COLUMN trophies_enabled TO awards_enabled;
     END IF;
@@ -421,7 +426,9 @@ BEGIN
 END $$;
 
 ALTER TABLE public.tournaments ADD COLUMN IF NOT EXISTS trophies_enabled boolean;
-UPDATE public.tournaments SET trophies_enabled = awards_enabled WHERE trophies_enabled IS NULL;
+UPDATE public.tournaments
+SET trophies_enabled = awards_enabled
+WHERE trophies_enabled IS DISTINCT FROM awards_enabled;
 ALTER TABLE public.tournaments ALTER COLUMN trophies_enabled SET DEFAULT true;
 ALTER TABLE public.tournaments ALTER COLUMN trophies_enabled SET NOT NULL;
 

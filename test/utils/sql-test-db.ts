@@ -1,4 +1,7 @@
 import { randomBytes } from "crypto";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Client } from "pg";
@@ -27,13 +30,16 @@ export interface SqlTestDb {
   stop(): Promise<void>;
 }
 
-function makeServices(connection: {
-  host: string;
-  port: number;
-  user: string;
-  password: string;
-  database: string;
-}, loggerName: string): { postgres: PostgresService; hasura: HasuraService } {
+function makeServices(
+  connection: {
+    host: string;
+    port: number;
+    user: string;
+    password: string;
+    database: string;
+  },
+  loggerName: string,
+): { postgres: PostgresService; hasura: HasuraService } {
   const configService = new ConfigService({
     postgres: { connections: { default: { ...connection, max: 5 } } },
     app: { demosDomain: "demos.test", relayDomain: "relay.test" },
@@ -65,6 +71,10 @@ export async function endPool(postgres: PostgresService): Promise<void> {
 // trigger/function behavior under test matches a fresh install exactly.
 export async function bootContainerAndMigrate(
   loggerName: string,
+  beforeMigration?: {
+    version: string;
+    prepare(postgres: PostgresService): Promise<void>;
+  },
 ): Promise<SqlTestDb> {
   const container = await new PostgreSqlContainer(IMAGE)
     .withDatabase(TEMPLATE_DB)
@@ -114,6 +124,40 @@ export async function bootContainerAndMigrate(
     loggerName,
   );
   await postgres.query("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE");
+
+  if (beforeMigration) {
+    await postgres.query("CREATE SCHEMA IF NOT EXISTS hdb_catalog");
+    await postgres.query(
+      "CREATE TABLE IF NOT EXISTS hdb_catalog.schema_migrations (version bigint NOT NULL, dirty boolean NOT NULL)",
+    );
+
+    const source = path.resolve("./hasura/migrations/default");
+    const staged = fs.mkdtempSync(
+      path.join(os.tmpdir(), "deafcs-migrations-before-"),
+    );
+    try {
+      for (const directory of fs.readdirSync(source)) {
+        const version = directory.split("_").shift();
+        if (!version || version >= beforeMigration.version) {
+          continue;
+        }
+        const destination = path.join(staged, directory);
+        fs.mkdirSync(destination);
+        fs.copyFileSync(
+          path.join(source, directory, "up.sql"),
+          path.join(destination, "up.sql"),
+        );
+      }
+      await (
+        hasura as unknown as {
+          applyMigrations(directory: string): Promise<number>;
+        }
+      ).applyMigrations(staged);
+      await beforeMigration.prepare(postgres);
+    } finally {
+      fs.rmSync(staged, { recursive: true, force: true });
+    }
+  }
 
   await hasura.setup();
 
