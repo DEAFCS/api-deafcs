@@ -280,9 +280,11 @@ array_relationships:
           schema: public
   - name: tournament_trophies
     using:
-      foreign_key_constraint_on:
-        column: player_steam_id
-        table:
+      manual_configuration:
+        column_mapping:
+          steam_id: player_steam_id
+        insertion_order: null
+        remote_table:
           name: tournament_trophies
           schema: public
   - name: tournaments
