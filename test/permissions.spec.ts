@@ -2,9 +2,11 @@ import { PostgresService } from "./../src/postgres/postgres.service";
 import { Fixtures } from "./utils/fixtures";
 import {
   bootMigratedDb,
+  runAsUser,
   seedRegionWithServer,
   SqlTestDb,
 } from "./utils/sql-test-db";
+import { TournamentFixtures } from "./utils/tournament-fixtures";
 
 // Exercises the Hasura permission functions — the layer that decides what a
 // session may do. These run as plain SELECTs with an explicit session JSON,
@@ -328,6 +330,98 @@ describe("permission functions (SQL-driven)", () => {
           session(outsider, "administrator"),
         ),
       ).toBe(true);
+    });
+  });
+
+  describe("can_manage_tournament_team", () => {
+    const canManage = (
+      tournamentTeamId: string,
+      steamId: string,
+      role = "user",
+    ) =>
+      boolFn(
+        "can_manage_tournament_team",
+        "tournament_teams",
+        tournamentTeamId,
+        "id",
+        session(steamId, role),
+      );
+
+    const joinAsFreeAgent = async (tournamentId: string) => {
+      const player = await fx.player();
+      const id = await runAsUser(postgres, player, "user", async (query) => {
+        const [entry] = (await query(
+          `INSERT INTO tournament_teams (tournament_id, name, owner_steam_id)
+           VALUES ($1, 'Free agent', $2) RETURNING id`,
+          [tournamentId, player],
+        )) as Array<{ id: string }>;
+        await query(
+          `INSERT INTO tournament_team_roster
+             (tournament_id, tournament_team_id, player_steam_id, role)
+           VALUES ($1, $2, $3, 'Admin')`,
+          [tournamentId, entry.id, player],
+        );
+        return entry.id;
+      });
+      return { id, player };
+    };
+
+    it("scopes free-agent management to the exact tournament entry", async () => {
+      const tournaments = new TournamentFixtures(postgres, fx);
+      const tournament = await tournaments.createTournament([]);
+      await tournaments.setStatus(
+        tournament.id,
+        tournament.organizer,
+        "RegistrationOpen",
+      );
+      const entryA = await joinAsFreeAgent(tournament.id);
+      const entryB = await joinAsFreeAgent(tournament.id);
+
+      expect(await canManage(entryA.id, entryA.player)).toBe(true);
+      expect(await canManage(entryB.id, entryA.player)).toBe(false);
+      expect(await canManage(entryA.id, entryB.player)).toBe(false);
+      expect(
+        await canManage(entryA.id, tournament.organizer, "tournament_organizer"),
+      ).toBe(true);
+    });
+
+    it("allows the registered-team owner, captain, and admin only for their entry", async () => {
+      const tournaments = new TournamentFixtures(postgres, fx);
+      const tournament = await tournaments.createTournament([]);
+      await tournaments.setStatus(
+        tournament.id,
+        tournament.organizer,
+        "RegistrationOpen",
+      );
+      const teamA = await fx.team(2);
+      const teamB = await fx.team(1);
+      const entryA = await tournaments.registerTeam(tournament.id, teamA);
+      const entryB = await tournaments.registerTeam(tournament.id, teamB);
+      const members = await postgres.query<Array<{ player_steam_id: string }>>(
+        `SELECT player_steam_id FROM team_roster
+         WHERE team_id = $1 AND player_steam_id != $2
+         ORDER BY player_steam_id`,
+        [teamA.id, teamA.owner],
+      );
+      const captain = members[0].player_steam_id;
+      const rosterAdmin = members[1].player_steam_id;
+      await postgres.query(
+        "UPDATE teams SET captain_steam_id = $1 WHERE id = $2",
+        [captain, teamA.id],
+      );
+      await postgres.query(
+        `UPDATE team_roster SET role = 'Admin'
+         WHERE team_id = $1 AND player_steam_id = $2`,
+        [teamA.id, rosterAdmin],
+      );
+
+      expect(await canManage(entryA, teamA.owner)).toBe(true);
+      expect(await canManage(entryA, captain)).toBe(true);
+      expect(await canManage(entryA, rosterAdmin)).toBe(true);
+      expect(await canManage(entryB, rosterAdmin)).toBe(false);
+
+      const outsider = await fx.player();
+      expect(await canManage(entryA, outsider)).toBe(false);
     });
   });
 });
