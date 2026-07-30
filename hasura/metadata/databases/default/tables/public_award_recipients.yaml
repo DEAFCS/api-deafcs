@@ -1,0 +1,20 @@
+table:
+  name: award_recipients
+  schema: public
+object_relationships:
+  - name: occurrence
+    using: {foreign_key_constraint_on: occurrence_id}
+  - name: player
+    using: {foreign_key_constraint_on: player_steam_id}
+  - name: team
+    using: {foreign_key_constraint_on: team_id}
+  - name: tournament_team
+    using: {foreign_key_constraint_on: tournament_team_id}
+  - name: league_team_season
+    using: {foreign_key_constraint_on: league_team_season_id}
+select_permissions:
+  - role: guest
+    permission:
+      columns: [id, occurrence_id, player_steam_id, team_id, tournament_team_id, league_team_season_id, recipient_note, revoked_at, revoked_by, revocation_reason, created_at]
+      filter: {}
+      allow_aggregations: true

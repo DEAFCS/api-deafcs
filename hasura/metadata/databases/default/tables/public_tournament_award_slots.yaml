@@ -1,0 +1,13 @@
+table:
+  name: tournament_award_slots
+  schema: public
+object_relationships:
+  - name: award
+    using: {foreign_key_constraint_on: award_id}
+  - name: tournament
+    using: {foreign_key_constraint_on: tournament_id}
+select_permissions:
+  - role: guest
+    permission:
+      columns: [id, tournament_id, slot, award_id, custom_name, silhouette_override, image_override, created_at, updated_at]
+      filter: {}

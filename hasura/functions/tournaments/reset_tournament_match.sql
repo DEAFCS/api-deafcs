@@ -233,8 +233,7 @@ BEGIN
 
         IF FOUND THEN
             -- Rewinding a finished tournament invalidates awarded placements.
-            DELETE FROM tournament_trophies
-            WHERE tournament_id = source_tournament_id;
+            PERFORM public.clear_tournament_calculated_awards(source_tournament_id);
         END IF;
 
     END IF;

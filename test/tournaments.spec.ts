@@ -29,6 +29,8 @@ describe("tournaments (SQL-driven)", () => {
   });
 
   beforeEach(async () => {
+    await postgres.query("DELETE FROM award_recipients");
+    await postgres.query("DELETE FROM award_occurrences");
     // Matches must go before tournaments: deleting a bracket deletes its match,
     // whose after-delete trigger updates sibling brackets that are mid-cascade
     // ("tuple to be deleted was already modified") if the tournament goes first.

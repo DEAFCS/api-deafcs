@@ -1,0 +1,34 @@
+table:
+  name: award_occurrences
+  schema: public
+object_relationships:
+  - name: award
+    using:
+      foreign_key_constraint_on: award_id
+  - name: tournament
+    using:
+      foreign_key_constraint_on: tournament_id
+  - name: event
+    using:
+      foreign_key_constraint_on: event_id
+  - name: elo_season
+    using:
+      foreign_key_constraint_on: elo_season_id
+  - name: league_season
+    using:
+      foreign_key_constraint_on: league_season_id
+  - name: league_season_division
+    using:
+      foreign_key_constraint_on: league_season_division_id
+array_relationships:
+  - name: recipients
+    using:
+      foreign_key_constraint_on:
+        column: occurrence_id
+        table: {name: award_recipients, schema: public}
+select_permissions:
+  - role: guest
+    permission:
+      columns: [id, award_id, tournament_id, event_id, elo_season_id, league_season_id, league_season_division_id, placement, source, effective_at, calculation_key, created_at, updated_at]
+      filter: {}
+      allow_aggregations: true

@@ -14,4 +14,6 @@ export enum SystemSettingName {
   LeaguesEnabled = "public.leagues_enabled",
   GameServerPluginRuntime = "public.game_server_plugin_runtime",
   GameServerPluginRuntimeLocked = "game_server_plugin_runtime_locked",
+  CreateAwardsRole = "public.create_awards_role",
+  GrantAwardsRole = "public.grant_awards_role",
 }

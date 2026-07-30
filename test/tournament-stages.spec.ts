@@ -30,6 +30,8 @@ describe("tournament stages: Swiss and RoundRobin (SQL-driven)", () => {
   });
 
   beforeEach(async () => {
+    await postgres.query("DELETE FROM award_recipients");
+    await postgres.query("DELETE FROM award_occurrences");
     // Matches before tournaments: bracket cascade triggers touch sibling
     // brackets mid-delete otherwise.
     await postgres.query("DELETE FROM matches");

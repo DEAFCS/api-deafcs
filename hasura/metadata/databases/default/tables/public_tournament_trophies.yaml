@@ -4,16 +4,40 @@ table:
 object_relationships:
   - name: player
     using:
-      foreign_key_constraint_on: player_steam_id
+      manual_configuration:
+        column_mapping:
+          player_steam_id: steam_id
+        insertion_order: null
+        remote_table:
+          name: players
+          schema: public
   - name: team
     using:
-      foreign_key_constraint_on: team_id
+      manual_configuration:
+        column_mapping:
+          team_id: id
+        insertion_order: null
+        remote_table:
+          name: teams
+          schema: public
   - name: tournament
     using:
-      foreign_key_constraint_on: tournament_id
+      manual_configuration:
+        column_mapping:
+          tournament_id: id
+        insertion_order: null
+        remote_table:
+          name: tournaments
+          schema: public
   - name: tournament_team
     using:
-      foreign_key_constraint_on: tournament_team_id
+      manual_configuration:
+        column_mapping:
+          tournament_team_id: id
+        insertion_order: null
+        remote_table:
+          name: tournament_teams
+          schema: public
   - name: trophy_config
     using:
       manual_configuration:

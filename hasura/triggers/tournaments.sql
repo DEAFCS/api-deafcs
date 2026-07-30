@@ -216,22 +216,20 @@ CREATE OR REPLACE FUNCTION public.tau_tournaments_trophies() RETURNS TRIGGER
     AS $$
 BEGIN
     IF NEW.status = 'Finished' AND OLD.status IS DISTINCT FROM 'Finished' THEN
-        PERFORM public.calculate_tournament_trophies(NEW.id);
+        PERFORM public.calculate_tournament_awards(NEW.id);
     ELSIF OLD.status = 'Finished' AND NEW.status IS DISTINCT FROM 'Finished' THEN
         -- Manual awards survive status rollbacks; only the auto-calculated
         -- placements drop so recalc can reseat them on the next finish.
-        DELETE FROM public.tournament_trophies
-        WHERE tournament_id = OLD.id AND manual = false;
+        PERFORM public.clear_tournament_calculated_awards(OLD.id);
     END IF;
 
     -- Trophies toggle: clearing it wipes the auto placements; turning it
     -- back on for a finished tournament rebuilds them.
     IF NEW.trophies_enabled IS DISTINCT FROM OLD.trophies_enabled THEN
         IF NEW.trophies_enabled = false THEN
-            DELETE FROM public.tournament_trophies
-            WHERE tournament_id = NEW.id AND manual = false;
+            PERFORM public.clear_tournament_calculated_awards(NEW.id);
         ELSIF NEW.status = 'Finished' THEN
-            PERFORM public.calculate_tournament_trophies(NEW.id);
+            PERFORM public.calculate_tournament_awards(NEW.id);
         END IF;
     END IF;
 

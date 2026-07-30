@@ -1586,3 +1586,92 @@ type SteamPresenceAdminStatusOutput {
   pool: SteamPresencePool!
   bots: [SteamPresenceBot!]!
 }
+
+type Mutation {
+  saveAward(
+    id: uuid
+    name: String!
+    description: String
+    tier: String!
+    silhouette: Int
+    allow_multiple: Boolean
+    tournament_id: uuid
+    event_id: uuid
+    elo_season_id: uuid
+    league_season_id: uuid
+  ): Award
+}
+
+type Mutation {
+  deleteAward(id: uuid!): SuccessOutput
+}
+
+type Mutation {
+  archiveAward(id: uuid!, archived: Boolean!): Award
+}
+
+type Mutation {
+  grantAward(
+    award_id: uuid!
+    player_steam_id: String
+    team_id: uuid
+    tournament_id: uuid
+    event_id: uuid
+    elo_season_id: uuid
+    league_season_id: uuid
+    note: String
+  ): AwardRecipient
+}
+
+type Mutation {
+  revokeAward(id: uuid!, reason: String!): SuccessOutput
+}
+
+type Mutation {
+  setTournamentAward(
+    tournament_id: uuid!
+    placement: Int!
+    award_id: uuid
+    custom_name: String
+    silhouette: Int
+  ): TournamentAward
+}
+
+type Award {
+  id: uuid!
+  tournament_id: uuid
+  event_id: uuid
+  elo_season_id: uuid
+  league_season_id: uuid
+  name: String!
+  description: String
+  tier: String!
+  silhouette: Int
+  image_url: String
+  system_key: String
+  allow_multiple: Boolean!
+  created_by_steam_id: String
+  created_at: String!
+  updated_at: String!
+}
+
+type AwardRecipient {
+  id: uuid!
+  occurrence_id: uuid
+  tournament_team_id: uuid
+  team_id: uuid
+  player_steam_id: String
+  recipient_note: String
+  revoked_at: String
+  created_at: String!
+}
+
+type TournamentAward {
+  id: uuid!
+  tournament_id: uuid!
+  placement: Int!
+  award_id: uuid
+  custom_name: String
+  silhouette: Int
+  image_url: String
+}

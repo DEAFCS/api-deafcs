@@ -30,6 +30,8 @@ describe("tournament match reset (SQL-driven)", () => {
   });
 
   beforeEach(async () => {
+    await postgres.query("DELETE FROM award_recipients");
+    await postgres.query("DELETE FROM award_occurrences");
     await postgres.query("DELETE FROM matches");
     await postgres.query("DELETE FROM tournaments");
     await postgres.query("DELETE FROM match_options");
