@@ -7,6 +7,8 @@
 -- actually re-run this cleanup against an already-broken database.
 DROP FUNCTION IF EXISTS public._leaderboard_trophies(INT);
 DROP FUNCTION IF EXISTS public._leaderboard_trophies(INT, TEXT);                     -- pre-_season 2-arg
+DROP FUNCTION IF EXISTS public._leaderboard_trophies(INT, TEXT, UUID);               -- current exact signature, return type may be stale
+DROP FUNCTION IF EXISTS public._leaderboard_awards(INT, TEXT, UUID);                 -- Phase A pre-compatibility name
 DROP FUNCTION IF EXISTS public.get_leaderboard(TEXT, INT, TEXT, BOOLEAN);            -- pre-_role 4-arg
 DROP FUNCTION IF EXISTS public.get_leaderboard(TEXT, INT, TEXT, BOOLEAN, TEXT);      -- pre-_season 5-arg
 DROP FUNCTION IF EXISTS public.get_player_leaderboard_rank(TEXT, INT, TEXT, TEXT, BOOLEAN); -- pre-_season 5-arg

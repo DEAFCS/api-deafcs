@@ -18,6 +18,10 @@ AS $$
     );
 $$;
 
+-- Exact-signature cleanup keeps canonical reapplication safe if an interrupted
+-- rollout left an incompatible result contract behind.
+DROP FUNCTION IF EXISTS public.calculate_tournament_awards(uuid);
+
 CREATE OR REPLACE FUNCTION public.calculate_tournament_awards(_tournament_id uuid)
 RETURNS void
 LANGUAGE plpgsql

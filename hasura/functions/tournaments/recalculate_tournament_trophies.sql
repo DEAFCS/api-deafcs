@@ -1,3 +1,7 @@
+-- The compatibility view is rebuilt by Phase A, so its composite row type can
+-- have a different OID/shape even though the SQL signature is unchanged.
+DROP FUNCTION IF EXISTS public.recalculate_tournament_trophies(uuid);
+
 CREATE OR REPLACE FUNCTION public.recalculate_tournament_trophies(_tournament_id uuid)
 RETURNS SETOF public.tournament_trophies LANGUAGE plpgsql AS $$
 BEGIN

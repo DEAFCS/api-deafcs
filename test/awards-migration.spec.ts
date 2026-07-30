@@ -11,6 +11,16 @@ const TROPHY_ID = "33333333-3333-4333-8333-333333333333";
 const CONFIG_ID = "44444444-4444-4444-8444-444444444444";
 const TARGET_TROPHY_ID = "55555555-5555-4555-8555-555555555555";
 const TARGET_CONFIG_ID = "66666666-6666-4666-8666-666666666666";
+const CANONICAL_AWARD_FILES = [
+  "hasura/functions/leaderboard/get_leaderboard.sql",
+  "hasura/functions/tournaments/calculate_tournament_awards.sql",
+  "hasura/functions/tournaments/calculate_tournament_trophies.sql",
+  "hasura/functions/tournaments/recalculate_tournament_awards.sql",
+  "hasura/functions/tournaments/recalculate_tournament_trophies.sql",
+  "hasura/triggers/award_recipients.sql",
+  "hasura/triggers/awards.sql",
+  "hasura/triggers/tournaments.sql",
+];
 
 describe("awards Phase A migration upgrade compatibility", () => {
   let db: SqlTestDb;
@@ -308,7 +318,7 @@ describe("awards Phase A exact hybrid-production repair", () => {
             ('manual','Granted by hand'), ('season','Calculated from a season standing');
 
           CREATE TABLE public.awards (
-            id uuid PRIMARY KEY,
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
             name text NOT NULL,
             description text,
             tier text NOT NULL DEFAULT 'special' REFERENCES public.e_award_tiers(value),
@@ -347,19 +357,16 @@ describe("awards Phase A exact hybrid-production repair", () => {
             ON public.award_recipients(award_id);
           CREATE INDEX idx_award_recipients_source
             ON public.award_recipients(tournament_id, source);
+
+          CREATE FUNCTION public.calculate_tournament_awards(uuid)
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+
+          CREATE FUNCTION public.recalculate_tournament_awards(uuid)
+          RETURNS SETOF public.award_recipients
+          LANGUAGE sql AS 'SELECT * FROM public.award_recipients';
         `);
 
-        const canonicalFiles = [
-          "hasura/functions/leaderboard/get_leaderboard.sql",
-          "hasura/functions/tournaments/calculate_tournament_awards.sql",
-          "hasura/functions/tournaments/calculate_tournament_trophies.sql",
-          "hasura/functions/tournaments/recalculate_tournament_awards.sql",
-          "hasura/functions/tournaments/recalculate_tournament_trophies.sql",
-          "hasura/triggers/award_recipients.sql",
-          "hasura/triggers/awards.sql",
-          "hasura/triggers/tournaments.sql",
-        ];
-        for (const file of canonicalFiles) {
+        for (const file of CANONICAL_AWARD_FILES) {
           const digest = createHash("sha256")
             .update(fs.readFileSync(path.resolve(file), "utf8"))
             .digest("base64");
@@ -455,9 +462,37 @@ describe("awards Phase A exact hybrid-production repair", () => {
         ORDER BY tgname`,
     );
     expect(triggerNames).toHaveLength(7);
+
+    const [returnTypes] = await db.postgres.query<
+      Array<{
+        calculate_awards: string;
+        recalculate_awards: string;
+        calculate_trophies: string;
+        recalculate_trophies: string;
+        leaderboard: string;
+      }>
+    >(`SELECT
+      pg_get_function_result('public.calculate_tournament_awards(uuid)'::regprocedure) AS calculate_awards,
+      pg_get_function_result('public.recalculate_tournament_awards(uuid)'::regprocedure) AS recalculate_awards,
+      pg_get_function_result('public.calculate_tournament_trophies(uuid)'::regprocedure) AS calculate_trophies,
+      pg_get_function_result('public.recalculate_tournament_trophies(uuid)'::regprocedure) AS recalculate_trophies,
+      pg_get_function_result('public._leaderboard_trophies(integer,text,uuid)'::regprocedure) AS leaderboard`);
+    expect(returnTypes).toEqual({
+      calculate_awards: "void",
+      recalculate_awards: "SETOF award_occurrences",
+      calculate_trophies: "void",
+      recalculate_trophies: "SETOF tournament_trophies",
+      leaderboard: "SETOF leaderboard_entries",
+    });
   });
 
-  it("records 0700 once and skips a second setup execution", async () => {
+  it("reapplies canonical SQL once, then skips an unchanged second pass", async () => {
+    await db.postgres.query(
+      `DELETE FROM migration_hashes.hashes
+        WHERE replace(name, E'\\\\', '/') = ANY($1::text[])`,
+      [CANONICAL_AWARD_FILES.map((file) => file.replace(".sql", ""))],
+    );
+    await db.hasura.setup();
     await db.hasura.setup();
     const [{ count }] = await db.postgres.query<Array<{ count: string }>>(
       `SELECT count(*)::text AS count
