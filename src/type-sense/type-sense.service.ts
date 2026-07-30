@@ -58,6 +58,23 @@ export class TypeSenseService {
       },
       { name: "steam_id", type: "string", index: true },
       { name: "teams", type: "string[]", optional: true },
+      // Unified ratings follow the general player display priority:
+      // competitive when available, otherwise wingman, otherwise duel.
+      // They remain null when the player has no rating in any mode.
+      {
+        name: "elo",
+        type: "int32",
+        optional: true,
+        sort: true,
+        index: true,
+      },
+      {
+        name: "tournament_elo",
+        type: "int32",
+        optional: true,
+        sort: true,
+        index: true,
+      },
       {
         name: "elo_competitive",
         type: "int32",
@@ -105,6 +122,9 @@ export class TypeSenseService {
       { name: "deaths", type: "int32", optional: true },
       { name: "wins", type: "int32", optional: true },
       { name: "losses", type: "int32", optional: true },
+      // Counts all distinct 5stack matches across every mode; zero means the
+      // player has no indexed panel matches.
+      { name: "total_matches", type: "int32", optional: true, index: true },
       { name: "country", type: "string", optional: true, index: true },
       { name: "sanctions", type: "int32", optional: true, index: true },
       { name: "is_banned", type: "bool", optional: true, index: true },
@@ -308,6 +328,7 @@ export class TypeSenseService {
         last_sign_in_at: true,
         wins: true,
         losses: true,
+        total_matches: true,
         stats: {
           kills: true,
           deaths: true,
@@ -360,24 +381,20 @@ export class TypeSenseService {
     player.last_sign_in_at = player.last_sign_in_at || "~~";
 
     const elo = {
-      elo_competitive: player.elo["competitive"]
-        ? parseInt(String(player.elo["competitive"]), 10)
-        : null,
-      elo_wingman: player.elo["wingman"]
-        ? parseInt(String(player.elo["wingman"]), 10)
-        : null,
-      elo_duel: player.elo["duel"]
-        ? parseInt(String(player.elo["duel"]), 10)
-        : null,
-      tournament_elo_competitive: player.elo["tournament_competitive"]
-        ? parseInt(String(player.elo["tournament_competitive"]), 10)
-        : null,
-      tournament_elo_wingman: player.elo["tournament_wingman"]
-        ? parseInt(String(player.elo["tournament_wingman"]), 10)
-        : null,
-      tournament_elo_duel: player.elo["tournament_duel"]
-        ? parseInt(String(player.elo["tournament_duel"]), 10)
-        : null,
+      elo_competitive: TypeSenseService.optionalInteger(
+        player.elo["competitive"],
+      ),
+      elo_wingman: TypeSenseService.optionalInteger(player.elo["wingman"]),
+      elo_duel: TypeSenseService.optionalInteger(player.elo["duel"]),
+      tournament_elo_competitive: TypeSenseService.optionalInteger(
+        player.elo["tournament_competitive"],
+      ),
+      tournament_elo_wingman: TypeSenseService.optionalInteger(
+        player.elo["tournament_wingman"],
+      ),
+      tournament_elo_duel: TypeSenseService.optionalInteger(
+        player.elo["tournament_duel"],
+      ),
     };
 
     delete player.elo;
@@ -389,6 +406,18 @@ export class TypeSenseService {
         Object.assign({}, player, elo, {
           id: steamId,
           steam_id: steamId,
+          elo: TypeSenseService.primaryElo(
+            elo.elo_competitive,
+            elo.elo_wingman,
+            elo.elo_duel,
+          ),
+          tournament_elo: TypeSenseService.primaryElo(
+            elo.tournament_elo_competitive,
+            elo.tournament_elo_wingman,
+            elo.tournament_elo_duel,
+          ),
+          total_matches:
+            TypeSenseService.optionalInteger(player.total_matches) ?? 0,
           kills: player.stats?.kills
             ? parseInt(String(player.stats.kills), 10)
             : 0,
@@ -406,6 +435,21 @@ export class TypeSenseService {
           is_muted: player.is_muted,
         }),
       );
+  }
+
+  private static optionalInteger(value: unknown): number | null {
+    if (value === null || value === undefined || value === "") {
+      return null;
+    }
+
+    const parsed = parseInt(String(value), 10);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+
+  // Mirrors the general PlayerElo display order. A real zero is retained;
+  // null means no rating is available in any mode (there is no 5000 fallback).
+  private static primaryElo(...values: Array<number | null>): number | null {
+    return values.find((value) => value !== null) ?? null;
   }
 
   public async removePlayer(steamId: string) {
