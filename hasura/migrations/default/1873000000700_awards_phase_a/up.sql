@@ -53,15 +53,96 @@ DROP FUNCTION IF EXISTS public.recalculate_tournament_trophies(uuid);
 DROP FUNCTION IF EXISTS public._leaderboard_trophies(INT, TEXT, UUID);
 
 DO $$
+DECLARE
+    v_source_kind "char";
+    v_target_kind "char";
 BEGIN
-    IF to_regclass('public.tournament_trophies') IS NOT NULL
-       AND to_regclass('public.award_recipients') IS NULL THEN
-        ALTER TABLE public.tournament_trophies RENAME TO award_recipients;
+    IF to_regclass('public.tournament_trophies') IS NOT NULL THEN
+        IF to_regclass('public.award_recipients') IS NULL THEN
+            ALTER TABLE public.tournament_trophies RENAME TO award_recipients;
+        ELSE
+            SELECT relkind INTO v_source_kind
+            FROM pg_class
+            WHERE oid = 'public.tournament_trophies'::regclass;
+
+            SELECT relkind INTO v_target_kind
+            FROM pg_class
+            WHERE oid = 'public.award_recipients'::regclass;
+
+            IF v_source_kind NOT IN ('r', 'p') OR v_target_kind NOT IN ('r', 'p') THEN
+                RAISE EXCEPTION
+                    'Cannot merge tournament_trophies (%) into award_recipients (%)',
+                    v_source_kind, v_target_kind;
+            END IF;
+
+            INSERT INTO public.award_recipients (
+                id,
+                tournament_id,
+                tournament_team_id,
+                player_steam_id,
+                team_id,
+                placement,
+                manual,
+                created_at
+            )
+            SELECT
+                id,
+                tournament_id,
+                tournament_team_id,
+                player_steam_id,
+                team_id,
+                placement,
+                manual,
+                created_at
+            FROM public.tournament_trophies
+            ON CONFLICT (id) DO NOTHING;
+
+            DROP TABLE public.tournament_trophies;
+        END IF;
     END IF;
 
-    IF to_regclass('public.tournament_trophy_configs') IS NOT NULL
-       AND to_regclass('public.tournament_awards') IS NULL THEN
-        ALTER TABLE public.tournament_trophy_configs RENAME TO tournament_awards;
+    IF to_regclass('public.tournament_trophy_configs') IS NOT NULL THEN
+        IF to_regclass('public.tournament_awards') IS NULL THEN
+            ALTER TABLE public.tournament_trophy_configs RENAME TO tournament_awards;
+        ELSE
+            SELECT relkind INTO v_source_kind
+            FROM pg_class
+            WHERE oid = 'public.tournament_trophy_configs'::regclass;
+
+            SELECT relkind INTO v_target_kind
+            FROM pg_class
+            WHERE oid = 'public.tournament_awards'::regclass;
+
+            IF v_source_kind NOT IN ('r', 'p') OR v_target_kind NOT IN ('r', 'p') THEN
+                RAISE EXCEPTION
+                    'Cannot merge tournament_trophy_configs (%) into tournament_awards (%)',
+                    v_source_kind, v_target_kind;
+            END IF;
+
+            INSERT INTO public.tournament_awards (
+                id,
+                tournament_id,
+                placement,
+                custom_name,
+                silhouette,
+                image_url,
+                created_at,
+                updated_at
+            )
+            SELECT
+                id,
+                tournament_id,
+                placement,
+                custom_name,
+                silhouette,
+                image_url,
+                created_at,
+                updated_at
+            FROM public.tournament_trophy_configs
+            ON CONFLICT (id) DO NOTHING;
+
+            DROP TABLE public.tournament_trophy_configs;
+        END IF;
     END IF;
 END $$;
 
@@ -404,8 +485,9 @@ CREATE TABLE public.tournament_award_slots (
   UNIQUE (tournament_id, slot)
 );
 
-INSERT INTO public.tournament_award_slots (tournament_id, slot, award_id, custom_name, silhouette_override, image_override)
-SELECT ta.tournament_id,
+INSERT INTO public.tournament_award_slots (id, tournament_id, slot, award_id, custom_name, silhouette_override, image_override)
+SELECT ta.id,
+       ta.tournament_id,
        CASE ta.placement WHEN 0 THEN 'mvp' WHEN 1 THEN 'champion' WHEN 2 THEN 'runner_up' WHEN 3 THEN 'third_place' END,
        COALESCE(ta.award_id, a.id), ta.custom_name, ta.silhouette, ta.image_url
 FROM public.tournament_awards ta
@@ -420,8 +502,8 @@ BEGIN
     VALUES (r.award_id,r.tournament_id,r.placement,CASE WHEN r.source='manual' THEN 'manual' ELSE 'migration' END,r.created_at,r.note,r.awarded_by_steam_id,
       'migration:tournament:'||COALESCE(r.tournament_id::text,'global')||':legacy:'||r.id)
     RETURNING id INTO occurrence;
-    INSERT INTO public.award_recipients(occurrence_id,player_steam_id,team_id,tournament_team_id,created_at)
-    VALUES (occurrence,r.player_steam_id,r.team_id,r.tournament_team_id,r.created_at);
+    INSERT INTO public.award_recipients(id,occurrence_id,player_steam_id,team_id,tournament_team_id,created_at)
+    VALUES (r.id,occurrence,r.player_steam_id,r.team_id,r.tournament_team_id,r.created_at);
   END LOOP;
 END $$;
 
@@ -441,7 +523,7 @@ SELECT r.id,o.award_id,o.tournament_id,r.tournament_team_id,r.player_steam_id,r.
 FROM public.award_recipients r JOIN public.award_occurrences o ON o.id=r.occurrence_id
 WHERE r.revoked_at IS NULL;
 
-CREATE FUNCTION public.sync_tournament_awards_enabled() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION public.sync_tournament_awards_enabled() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF NEW.awards_enabled IS DISTINCT FROM OLD.awards_enabled THEN
     NEW.trophies_enabled:=NEW.awards_enabled;
@@ -450,11 +532,12 @@ BEGIN
   END IF;
   RETURN NEW;
 END $$;
+DROP TRIGGER IF EXISTS sync_tournament_awards_enabled ON public.tournaments;
 CREATE TRIGGER sync_tournament_awards_enabled
 BEFORE UPDATE OF awards_enabled,trophies_enabled ON public.tournaments
 FOR EACH ROW EXECUTE FUNCTION public.sync_tournament_awards_enabled();
 
-CREATE FUNCTION public.tournament_trophies_compat_write() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION public.tournament_trophies_compat_write() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE occurrence uuid; definition uuid;
 BEGIN
   IF TG_OP='DELETE' THEN
@@ -501,13 +584,14 @@ BEGIN
   VALUES(NEW.id,occurrence,NEW.tournament_team_id,NEW.player_steam_id,NEW.team_id);
   RETURN NEW;
 END $$;
+DROP TRIGGER IF EXISTS tournament_trophies_compat_write ON public.tournament_trophies;
 CREATE TRIGGER tournament_trophies_compat_write INSTEAD OF INSERT OR DELETE ON public.tournament_trophies FOR EACH ROW EXECUTE FUNCTION public.tournament_trophies_compat_write();
 
 CREATE VIEW public.tournament_trophy_configs AS
 SELECT id,tournament_id,CASE slot WHEN 'mvp' THEN 0 WHEN 'champion' THEN 1 WHEN 'runner_up' THEN 2 ELSE 3 END AS placement,
  custom_name,silhouette_override AS silhouette,image_override AS image_url,created_at,updated_at
 FROM public.tournament_award_slots;
-CREATE FUNCTION public.tournament_trophy_configs_compat_write() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION public.tournament_trophy_configs_compat_write() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE slot_name text; definition uuid;
 BEGIN
   slot_name:=CASE COALESCE(NEW.placement,OLD.placement) WHEN 0 THEN 'mvp' WHEN 1 THEN 'champion' WHEN 2 THEN 'runner_up' ELSE 'third_place' END;
@@ -519,4 +603,5 @@ BEGIN
   RETURNING id INTO NEW.id;
   RETURN NEW;
 END $$;
+DROP TRIGGER IF EXISTS tournament_trophy_configs_compat_write ON public.tournament_trophy_configs;
 CREATE TRIGGER tournament_trophy_configs_compat_write INSTEAD OF INSERT OR UPDATE OR DELETE ON public.tournament_trophy_configs FOR EACH ROW EXECUTE FUNCTION public.tournament_trophy_configs_compat_write();
