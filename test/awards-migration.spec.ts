@@ -1,3 +1,6 @@
+import { createHash } from "crypto";
+import fs from "fs";
+import path from "path";
 import { bootContainerAndMigrate, SqlTestDb } from "./utils/sql-test-db";
 
 const VERSION = "1873000000700";
@@ -262,4 +265,205 @@ describe("awards Phase A migration upgrade compatibility", () => {
       },
     ]);
   });
+});
+
+describe("awards Phase A exact hybrid-production repair", () => {
+  let db: SqlTestDb;
+
+  const AWARD_IDS = [
+    "70000000-0000-4000-8000-000000000001",
+    "70000000-0000-4000-8000-000000000002",
+    "70000000-0000-4000-8000-000000000003",
+    "70000000-0000-4000-8000-000000000004",
+    "70000000-0000-4000-8000-000000000005",
+    "70000000-0000-4000-8000-000000000006",
+    "70000000-0000-4000-8000-000000000007",
+    "70000000-0000-4000-8000-000000000008",
+  ];
+
+  beforeAll(async () => {
+    db = await bootContainerAndMigrate("AwardsMigrationHybridProductionTest", {
+      version: VERSION,
+      prepare: async (postgres) => {
+        await postgres.query(
+          `ALTER TABLE public.tournaments
+             ADD COLUMN awards_enabled boolean NOT NULL DEFAULT true`,
+        );
+        await postgres.query(`
+          CREATE TABLE public.e_award_tiers (
+            value text PRIMARY KEY,
+            description text NOT NULL
+          );
+          INSERT INTO public.e_award_tiers(value, description) VALUES
+            ('mvp','Most valuable player'), ('gold','First place'),
+            ('silver','Second place'), ('bronze','Third place'),
+            ('special','Standalone award');
+
+          CREATE TABLE public.e_award_sources (
+            value text PRIMARY KEY,
+            description text NOT NULL
+          );
+          INSERT INTO public.e_award_sources(value, description) VALUES
+            ('tournament','Calculated from a tournament placement'),
+            ('manual','Granted by hand'), ('season','Calculated from a season standing');
+
+          CREATE TABLE public.awards (
+            id uuid PRIMARY KEY,
+            name text NOT NULL,
+            description text,
+            tier text NOT NULL DEFAULT 'special' REFERENCES public.e_award_tiers(value),
+            silhouette int,
+            image_url text,
+            system_key text UNIQUE,
+            allow_multiple boolean NOT NULL DEFAULT false,
+            created_by_steam_id bigint REFERENCES public.players(steam_id) ON DELETE SET NULL,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now()
+          );
+          INSERT INTO public.awards(id, name, tier, system_key, allow_multiple) VALUES
+            ('${AWARD_IDS[0]}','Tournament MVP','mvp','tournament_mvp',true),
+            ('${AWARD_IDS[1]}','Tournament Champion','gold','tournament_gold',true),
+            ('${AWARD_IDS[2]}','Tournament Runner-Up','silver','tournament_silver',true),
+            ('${AWARD_IDS[3]}','Tournament Third Place','bronze','tournament_bronze',true),
+            ('${AWARD_IDS[4]}','Season MVP','mvp','season_mvp',true),
+            ('${AWARD_IDS[5]}','Season Champion','gold','season_gold',true),
+            ('${AWARD_IDS[6]}','Season Runner-Up','silver','season_silver',true),
+            ('${AWARD_IDS[7]}','Season Third Place','bronze','season_bronze',true);
+
+          CREATE TABLE public.award_recipients (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            tournament_id uuid NOT NULL REFERENCES public.tournaments(id) ON DELETE CASCADE,
+            tournament_team_id uuid NOT NULL REFERENCES public.tournament_teams(id) ON DELETE CASCADE,
+            player_steam_id bigint REFERENCES public.players(steam_id) ON DELETE CASCADE,
+            team_id uuid REFERENCES public.teams(id) ON DELETE CASCADE,
+            placement int NOT NULL CHECK (placement IN (0,1,2,3)),
+            award_id uuid REFERENCES public.awards(id) ON DELETE CASCADE,
+            source text REFERENCES public.e_award_sources(value),
+            awarded_by_steam_id bigint REFERENCES public.players(steam_id) ON DELETE SET NULL,
+            note text,
+            created_at timestamptz NOT NULL DEFAULT now()
+          );
+          CREATE INDEX idx_award_recipients_award
+            ON public.award_recipients(award_id);
+          CREATE INDEX idx_award_recipients_source
+            ON public.award_recipients(tournament_id, source);
+        `);
+
+        const canonicalFiles = [
+          "hasura/functions/leaderboard/get_leaderboard.sql",
+          "hasura/functions/tournaments/calculate_tournament_awards.sql",
+          "hasura/functions/tournaments/calculate_tournament_trophies.sql",
+          "hasura/functions/tournaments/recalculate_tournament_awards.sql",
+          "hasura/functions/tournaments/recalculate_tournament_trophies.sql",
+          "hasura/triggers/award_recipients.sql",
+          "hasura/triggers/awards.sql",
+          "hasura/triggers/tournaments.sql",
+        ];
+        for (const file of canonicalFiles) {
+          const digest = createHash("sha256")
+            .update(fs.readFileSync(path.resolve(file), "utf8"))
+            .digest("base64");
+          await postgres.query(
+            `INSERT INTO migration_hashes.hashes(name, hash)
+             VALUES ($1, $2)
+             ON CONFLICT (name) DO UPDATE SET hash=excluded.hash`,
+            [file.replace(".sql", ""), digest],
+          );
+        }
+
+        // Match the observed partial psql output: these canonical objects were
+        // dropped while their migration_hashes rows remained current.
+        await postgres.query(`
+          DROP TRIGGER IF EXISTS tau_tournaments_trophies ON public.tournaments;
+          DROP FUNCTION IF EXISTS public.tau_tournaments_trophies();
+          DROP FUNCTION IF EXISTS public.calculate_tournament_trophies(uuid);
+          DROP FUNCTION IF EXISTS public.recalculate_tournament_trophies(uuid);
+          DROP FUNCTION IF EXISTS public._leaderboard_trophies(int, text, uuid);
+        `);
+      },
+    });
+  }, 600_000);
+
+  afterAll(async () => {
+    await db?.stop();
+  });
+
+  it("matches and repairs the four-table, two-column, no-manual hybrid", async () => {
+    const [awardState] = await db.postgres.query<
+      Array<{ count: string; ids: string[] }>
+    >(
+      `SELECT count(*)::text AS count, array_agg(id::text ORDER BY id) AS ids
+         FROM public.awards
+        WHERE id = ANY($1::uuid[])`,
+      [AWARD_IDS],
+    );
+    expect(awardState).toEqual({ count: "8", ids: [...AWARD_IDS].sort() });
+
+    const [legacyCount] = await db.postgres.query<Array<{ count: string }>>(
+      `SELECT count(*)::text AS count
+         FROM public.legacy_award_recipients_phase_a`,
+    );
+    expect(legacyCount.count).toBe("0");
+
+    const columns = await db.postgres.query<Array<{ column_name: string }>>(
+      `SELECT column_name
+         FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='tournaments'
+          AND column_name IN ('awards_enabled','trophies_enabled')
+        ORDER BY column_name`,
+    );
+    expect(columns.map(({ column_name }) => column_name)).toEqual([
+      "awards_enabled",
+      "trophies_enabled",
+    ]);
+  });
+
+  it("restores canonical routines, triggers, and compatibility views", async () => {
+    const [objects] = await db.postgres.query<
+      Array<{
+        calculate_awards: string;
+        calculate_trophies: string;
+        recalculate_awards: string;
+        recalculate_trophies: string;
+        leaderboard: string;
+        trophy_view: string;
+        config_view: string;
+      }>
+    >(`SELECT
+      to_regprocedure('public.calculate_tournament_awards(uuid)')::text AS calculate_awards,
+      to_regprocedure('public.calculate_tournament_trophies(uuid)')::text AS calculate_trophies,
+      to_regprocedure('public.recalculate_tournament_awards(uuid)')::text AS recalculate_awards,
+      to_regprocedure('public.recalculate_tournament_trophies(uuid)')::text AS recalculate_trophies,
+      to_regprocedure('public._leaderboard_trophies(integer,text,uuid)')::text AS leaderboard,
+      to_regclass('public.tournament_trophies')::text AS trophy_view,
+      to_regclass('public.tournament_trophy_configs')::text AS config_view`);
+    expect(Object.values(objects).every(Boolean)).toBe(true);
+
+    const triggerNames = await db.postgres.query<Array<{ tgname: string }>>(
+      `SELECT tgname
+         FROM pg_trigger
+        WHERE NOT tgisinternal
+          AND tgname IN (
+            'tau_tournaments_trophies',
+            'sync_tournament_awards_enabled',
+            'tournament_trophies_compat_write',
+            'tournament_trophy_configs_compat_write',
+            'tbu_awards_guard',
+            'tbd_awards_guard',
+            'tbu_award_recipients_guard'
+          )
+        ORDER BY tgname`,
+    );
+    expect(triggerNames).toHaveLength(7);
+  });
+
+  it("records 0700 once and skips a second setup execution", async () => {
+    await db.hasura.setup();
+    const [{ count }] = await db.postgres.query<Array<{ count: string }>>(
+      `SELECT count(*)::text AS count
+         FROM hdb_catalog.schema_migrations
+        WHERE version = ${VERSION}`,
+    );
+    expect(count).toBe("1");
+  }, 600_000);
 });

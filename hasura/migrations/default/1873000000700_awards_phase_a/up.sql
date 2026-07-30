@@ -75,27 +75,33 @@ BEGIN
                     v_source_kind, v_target_kind;
             END IF;
 
-            INSERT INTO public.award_recipients (
-                id,
-                tournament_id,
-                tournament_team_id,
-                player_steam_id,
-                team_id,
-                placement,
-                manual,
-                created_at
-            )
-            SELECT
-                id,
-                tournament_id,
-                tournament_team_id,
-                player_steam_id,
-                team_id,
-                placement,
-                manual,
-                created_at
-            FROM public.tournament_trophies
-            ON CONFLICT (id) DO NOTHING;
+            -- Hybrid deployments can contain either generation of each table.
+            -- Build the merge from columns present on both sides; in
+            -- particular, `manual` was already removed in the failed normal
+            -- migration seen in production.
+            EXECUTE (
+                SELECT format(
+                    'INSERT INTO public.award_recipients (%1$s) ' ||
+                    'SELECT %1$s FROM public.tournament_trophies ' ||
+                    'ON CONFLICT (id) DO NOTHING',
+                    string_agg(format('%I', source.column_name), ', '
+                               ORDER BY source.ordinal_position)
+                )
+                FROM information_schema.columns source
+                JOIN information_schema.columns target
+                  ON target.table_schema = 'public'
+                 AND target.table_name = 'award_recipients'
+                 AND target.column_name = source.column_name
+                WHERE source.table_schema = 'public'
+                  AND source.table_name = 'tournament_trophies'
+                  AND source.column_name IN (
+                      'id', 'tournament_id', 'tournament_team_id',
+                      'player_steam_id', 'team_id', 'placement', 'manual',
+                      'award_id', 'source', 'awarded_by_steam_id', 'note',
+                      'created_at'
+                  )
+                HAVING bool_or(source.column_name = 'id')
+            );
 
             DROP TABLE public.tournament_trophies;
         END IF;
@@ -119,27 +125,28 @@ BEGIN
                     v_source_kind, v_target_kind;
             END IF;
 
-            INSERT INTO public.tournament_awards (
-                id,
-                tournament_id,
-                placement,
-                custom_name,
-                silhouette,
-                image_url,
-                created_at,
-                updated_at
-            )
-            SELECT
-                id,
-                tournament_id,
-                placement,
-                custom_name,
-                silhouette,
-                image_url,
-                created_at,
-                updated_at
-            FROM public.tournament_trophy_configs
-            ON CONFLICT (id) DO NOTHING;
+            EXECUTE (
+                SELECT format(
+                    'INSERT INTO public.tournament_awards (%1$s) ' ||
+                    'SELECT %1$s FROM public.tournament_trophy_configs ' ||
+                    'ON CONFLICT (id) DO NOTHING',
+                    string_agg(format('%I', source.column_name), ', '
+                               ORDER BY source.ordinal_position)
+                )
+                FROM information_schema.columns source
+                JOIN information_schema.columns target
+                  ON target.table_schema = 'public'
+                 AND target.table_name = 'tournament_awards'
+                 AND target.column_name = source.column_name
+                WHERE source.table_schema = 'public'
+                  AND source.table_name = 'tournament_trophy_configs'
+                  AND source.column_name IN (
+                      'id', 'tournament_id', 'placement', 'award_id',
+                      'custom_name', 'silhouette', 'image_url',
+                      'created_at', 'updated_at'
+                  )
+                HAVING bool_or(source.column_name = 'id')
+            );
 
             DROP TABLE public.tournament_trophy_configs;
         END IF;
@@ -605,3 +612,22 @@ BEGIN
 END $$;
 DROP TRIGGER IF EXISTS tournament_trophy_configs_compat_write ON public.tournament_trophy_configs;
 CREATE TRIGGER tournament_trophy_configs_compat_write INSTEAD OF INSERT OR UPDATE OR DELETE ON public.tournament_trophy_configs FOR EACH ROW EXECUTE FUNCTION public.tournament_trophy_configs_compat_write();
+
+-- The interrupted psql run happened outside Hasura's canonical-SQL runner.
+-- Its DROP statements therefore left valid hashes behind for missing objects,
+-- which would make setup skip their files. Invalidate every canonical file
+-- that owns an awards/trophies permanent routine or trigger. The normal
+-- post-migration apply pass recreates them from their source files and records
+-- their current SHA-256 digests; compatibility views/functions above are
+-- migration-owned and have already been recreated in this transaction.
+DELETE FROM migration_hashes.hashes
+WHERE replace(name, E'\\', '/') IN (
+  'hasura/functions/leaderboard/get_leaderboard',
+  'hasura/functions/tournaments/calculate_tournament_awards',
+  'hasura/functions/tournaments/calculate_tournament_trophies',
+  'hasura/functions/tournaments/recalculate_tournament_awards',
+  'hasura/functions/tournaments/recalculate_tournament_trophies',
+  'hasura/triggers/award_recipients',
+  'hasura/triggers/awards',
+  'hasura/triggers/tournaments'
+);
