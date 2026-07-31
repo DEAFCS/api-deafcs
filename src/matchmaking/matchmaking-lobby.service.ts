@@ -429,7 +429,7 @@ export class MatchmakingLobbyService {
       return true;
     }
 
-    if (type === e_match_types_enum.Duel) {
+    if (type === "Duel") {
       return partySize === 1;
     }
 
@@ -446,7 +446,7 @@ export class MatchmakingLobbyService {
 
     const expected = ExpectedPlayers[type];
 
-    if (type === e_match_types_enum.Duel) {
+    if (type === "Duel") {
       return `To join a ${type} match, your lobby must be solo. You have ${partySize}.`;
     }
 
