@@ -35,6 +35,7 @@
 - "!include public_e_match_clip_visibility.yaml"
 - "!include public_e_match_map_status.yaml"
 - "!include public_e_match_mode.yaml"
+- "!include public_e_match_party_sources.yaml"
 - "!include public_e_match_status.yaml"
 - "!include public_e_match_types.yaml"
 - "!include public_e_notification_types.yaml"
