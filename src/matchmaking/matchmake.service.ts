@@ -433,13 +433,6 @@ export class MatchmakeService {
         totalPlayerNotQueued = team1.players.length + team2.players.length;
       }
     } else {
-      if (selectedPlayerCount === requiredPlayers) {
-        this.logger.warn(
-          `${type}/${region}: ${selectedPlayerCount} queued but party sizes ` +
-            `(${selectedLobbies.map((lobby) => lobby.players.length).join(",")}) ` +
-            `cannot fill two even teams of ${playersPerTeam} - requeuing`,
-        );
-      }
       totalPlayerNotQueued = selectedPlayerCount;
       // Release all acquired locks since we can't create a match
       for (const lobby of selectedLobbies) {
