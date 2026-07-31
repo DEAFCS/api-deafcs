@@ -415,13 +415,22 @@ export class MatchmakingLobbyService {
    * match on its own (both lineups, split in-house). Anything between those two
    * — or anything above the full match size — cannot be placed.
    *
-   * Duel (2): 1 or 2 · Wingman (4): 1-2 or 4 · Competitive (10): 1-5 or 10
+   * Duel is the one exception: a full-size (2) party filling both lineups
+   * would just be the two of them dueling each other, which isn't a real
+   * match — unlike Wingman/Competitive, there's no useful "scrim your own
+   * party" case for a 1v1. Solo queue only for Duel.
+   *
+   * Wingman (4): 1-2 or 4 · Competitive (10): 1-5 or 10 · Duel (2): 1
    */
   private canPartyQueue(type: e_match_types_enum, partySize: number): boolean {
     const expected = ExpectedPlayers[type];
 
     if (!expected) {
       return true;
+    }
+
+    if (type === e_match_types_enum.Duel) {
+      return partySize === 1;
     }
 
     return partySize <= expected / 2 || partySize === expected;
@@ -436,6 +445,10 @@ export class MatchmakingLobbyService {
     }
 
     const expected = ExpectedPlayers[type];
+
+    if (type === e_match_types_enum.Duel) {
+      return `To join a ${type} match, your lobby must be solo. You have ${partySize}.`;
+    }
 
     return `To join a ${type} match, your lobby must have ${expected / 2} or fewer players, or exactly ${expected} players. You have ${partySize}.`;
   }
