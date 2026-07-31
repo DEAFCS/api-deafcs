@@ -118,7 +118,10 @@ export class MatchmakingLobbyService {
       throw new JoinQueueError(`you are not the captain of this lobby`);
     }
 
-    const partySizeError = this.getPartySizeError(type, lobby.players.length);
+    const partySizeError = await this.getPartySizeError(
+      type,
+      lobby.players.length,
+    );
 
     if (partySizeError) {
       throw new JoinQueueError(partySizeError);
@@ -416,29 +419,68 @@ export class MatchmakingLobbyService {
    * but that let a party guarantee its own match outcome (ELO farming), so
    * it's disallowed entirely regardless of match type.
    *
-   * Wingman (4): 1-2 · Competitive (10): 1-5 · Duel (2): 1
+   * Competitive additionally has its own admin-configurable cap (default 5,
+   * i.e. the half-lineup limit above still applies) — letting a full 5-stack
+   * of strong players queue together against a non-full-stack team is unfair,
+   * so admins can lower how many can party up for Competitive specifically.
+   *
+   * Wingman (4): 1-2 · Competitive (10): 1-5 (admin-configurable) · Duel (2): 1
    */
-  private canPartyQueue(type: e_match_types_enum, partySize: number): boolean {
+  private canPartyQueue(
+    type: e_match_types_enum,
+    partySize: number,
+    maxCompetitivePartySize: number,
+  ): boolean {
     const expected = ExpectedPlayers[type];
 
     if (!expected) {
       return true;
     }
 
-    return partySize <= expected / 2;
+    const limit =
+      type === "Competitive"
+        ? Math.min(expected / 2, maxCompetitivePartySize)
+        : expected / 2;
+
+    return partySize <= limit;
   }
 
-  private getPartySizeError(
+  private async getMaxCompetitivePartySize(): Promise<number> {
+    const { settings } = await this.hasura.query({
+      settings: {
+        __args: {
+          where: {
+            name: {
+              _eq: "public.matchmaking_max_party_size_competitive",
+            },
+          },
+        },
+        value: true,
+      },
+    });
+
+    const parsed = parseInt(settings[0]?.value ?? "", 10);
+
+    return parsed >= 1 && parsed <= 5 ? parsed : 5;
+  }
+
+  private async getPartySizeError(
     type: e_match_types_enum,
     partySize: number,
-  ): string | undefined {
-    if (this.canPartyQueue(type, partySize)) {
+  ): Promise<string | undefined> {
+    const maxCompetitivePartySize = await this.getMaxCompetitivePartySize();
+
+    if (this.canPartyQueue(type, partySize, maxCompetitivePartySize)) {
       return;
     }
 
     const expected = ExpectedPlayers[type];
+    const limit =
+      type === "Competitive"
+        ? Math.min(expected / 2, maxCompetitivePartySize)
+        : expected / 2;
 
-    return `To join a ${type} match, your lobby must have ${expected / 2} or fewer players. You have ${partySize}.`;
+    return `To join a ${type} match, your lobby must have ${limit} or fewer players. You have ${partySize}.`;
   }
 
   private async verifyPlayer(
