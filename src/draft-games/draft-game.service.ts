@@ -1414,7 +1414,9 @@ export class DraftGameService {
       draft_order: draft_games_by_pk.draft_order,
       min_elo: draft_games_by_pk.min_elo,
       max_elo: draft_games_by_pk.max_elo,
-      elo_enabled: draft_games_by_pk.elo_enabled,
+      // generated/ Zeus types predate this column (needs a live-Hasura
+      // codegen run to pick it up) — cast until then.
+      elo_enabled: draft_games_by_pk.elo_enabled as boolean,
       capacity: draft_games_by_pk.capacity,
       require_approval: draft_games_by_pk.require_approval,
       match_id: draft_games_by_pk.match_id,
