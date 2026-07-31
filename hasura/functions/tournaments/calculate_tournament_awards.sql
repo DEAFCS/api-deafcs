@@ -193,8 +193,16 @@ BEGIN
         AND r.tournament_team_id IN (b.tournament_team_id_1,b.tournament_team_id_2)
     ) ON CONFLICT DO NOTHING;
 
-    -- MVP is an individual occurrence chosen from players who actually appeared for the winning entry.
-    IF _winning_team_id IS NOT NULL THEN
+    -- MVP is reserved for 5v5 tournaments and is chosen from players who
+    -- actually appeared for the winning entry. Recalculation already clears
+    -- all calculated recipients above, so changing a tournament away from 5v5
+    -- also removes its former calculated MVP without touching manual awards.
+    IF _winning_team_id IS NOT NULL
+       AND (
+         SELECT public.tournament_min_players_per_lineup(t)
+         FROM public.tournaments t
+         WHERE t.id = _tournament_id
+       ) = 5 THEN
       SELECT pe.steam_id INTO _mvp_steam_id
       FROM public.player_elo pe
       JOIN public.tournament_brackets b ON b.match_id=pe.match_id

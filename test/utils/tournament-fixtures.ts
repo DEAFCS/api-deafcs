@@ -10,6 +10,7 @@ export type StageSpec = {
   order: number;
   minTeams: number;
   maxTeams: number;
+  thirdPlaceMatch?: boolean;
 };
 
 export type BracketRow = {
@@ -29,7 +30,10 @@ export class TournamentFixtures {
     private readonly fx: Fixtures,
   ) {}
 
-  async createTournament(stages: Array<StageSpec>): Promise<{
+  async createTournament(
+    stages: Array<StageSpec>,
+    matchType = "Wingman",
+  ): Promise<{
     id: string;
     organizer: string;
     stageIds: Array<string>;
@@ -37,8 +41,9 @@ export class TournamentFixtures {
     const organizer = await this.fx.player();
     const [options] = await this.postgres.query<Array<{ id: string }>>(
       `INSERT INTO match_options (mr, best_of, type, map_pool_id, map_veto, region_veto, regions)
-       SELECT 8, 1, 'Wingman', id, false, true, '{TestA}'
-       FROM map_pools WHERE type = 'Wingman' AND seed = true RETURNING id`,
+       SELECT 8, 1, $1, id, false, true, '{TestA}'
+       FROM map_pools WHERE type = $1 AND seed = true RETURNING id`,
+      [matchType],
     );
     const [tournament] = await this.postgres.query<Array<{ id: string }>>(
       `INSERT INTO tournaments (name, start, organizer_steam_id, match_options_id, status)
@@ -48,9 +53,17 @@ export class TournamentFixtures {
     const stageIds: Array<string> = [];
     for (const stage of stages) {
       const [row] = await this.postgres.query<Array<{ id: string }>>(
-        `INSERT INTO tournament_stages (tournament_id, type, "order", min_teams, max_teams)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-        [tournament.id, stage.type, stage.order, stage.minTeams, stage.maxTeams],
+        `INSERT INTO tournament_stages
+            (tournament_id, type, "order", min_teams, max_teams, third_place_match)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [
+          tournament.id,
+          stage.type,
+          stage.order,
+          stage.minTeams,
+          stage.maxTeams,
+          stage.thirdPlaceMatch ?? false,
+        ],
       );
       stageIds.push(row.id);
     }
@@ -84,16 +97,22 @@ export class TournamentFixtures {
     });
   }
 
-  // Registers `teamCount` Wingman-sized teams (owner + one mate) and walks the
-  // tournament to Live, at which point stage 1 is seeded and scheduled.
+  // Registers `teamCount` correctly sized teams and walks the tournament to
+  // Live, at which point stage 1 is seeded and scheduled.
   async launch(
     stages: Array<StageSpec>,
     teamCount: number,
+    matchType = "Wingman",
   ): Promise<{ id: string; organizer: string; stageIds: Array<string> }> {
-    const tournament = await this.createTournament(stages);
+    const tournament = await this.createTournament(stages, matchType);
+    const teammateCount =
+      matchType === "Duel" ? 0 : matchType === "Wingman" ? 1 : 4;
     await this.setStatus(tournament.id, tournament.organizer, "RegistrationOpen");
     for (let i = 0; i < teamCount; i++) {
-      await this.registerTeam(tournament.id, await this.fx.team(1));
+      await this.registerTeam(
+        tournament.id,
+        await this.fx.team(teammateCount),
+      );
     }
     await this.setStatus(
       tournament.id,

@@ -51,6 +51,15 @@ describe("awards (SQL-driven)", () => {
   const SE4 = [
     { type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 },
   ];
+  const SE4_WITH_THIRD = [
+    {
+      type: "SingleElimination",
+      order: 1,
+      minTeams: 4,
+      maxTeams: 8,
+      thirdPlaceMatch: true,
+    },
+  ];
 
   const playedOutCup = async () => {
     const t = await tfx.launch(SE4, 4);
@@ -59,6 +68,64 @@ describe("awards (SQL-driven)", () => {
     expect(await tfx.tournamentStatus(t.id)).toBe("Finished");
     return t;
   };
+
+  const playedOutCupWithThirdPlace = async (matchType = "Wingman") => {
+    const t = await tfx.launch(SE4_WITH_THIRD, 4, matchType);
+    await tfx.playRound(t.stageIds[0], 1);
+    await tfx.playRound(t.stageIds[0], 2);
+    expect(await tfx.tournamentStatus(t.id)).toBe("Finished");
+    return t;
+  };
+
+  const setTournamentMatchType = (tournamentId: string, type: string) =>
+    postgres.query(
+      `UPDATE match_options mo
+          SET type = $2
+         FROM tournaments t
+        WHERE t.id = $1 AND mo.id = t.match_options_id`,
+      [tournamentId, type],
+    );
+
+  const calculatedPlacements = async (tournamentId: string) =>
+    (
+      await postgres.query<Array<{ placement: number }>>(
+        `SELECT placement
+           FROM award_occurrences
+          WHERE tournament_id = $1 AND source = 'tournament_calculated'
+          ORDER BY placement`,
+        [tournamentId],
+      )
+    ).map((row) => row.placement);
+
+  const seedWinningRosterImpact = (tournamentId: string) =>
+    postgres.query(
+      `WITH winner AS (
+         SELECT ar.tournament_team_id
+           FROM award_occurrences ao
+           JOIN award_recipients ar ON ar.occurrence_id = ao.id
+          WHERE ao.tournament_id = $1
+            AND ao.source = 'tournament_calculated'
+            AND ao.placement = 1
+          LIMIT 1
+       )
+       INSERT INTO player_elo
+         (steam_id, match_id, type, "current", change, impact, created_at)
+       SELECT lp.steam_id, b.match_id, 'Competitive', 5000, 0, 2.0, now()
+         FROM winner w
+         JOIN tournament_brackets b
+           ON w.tournament_team_id IN
+              (b.tournament_team_id_1, b.tournament_team_id_2)
+         JOIN matches m ON m.id = b.match_id
+         JOIN match_lineup_players lp
+           ON lp.match_lineup_id = CASE
+             WHEN b.tournament_team_id_1 = w.tournament_team_id
+               THEN m.lineup_1_id
+             ELSE m.lineup_2_id
+           END
+        WHERE b.finished
+        LIMIT 1`,
+      [tournamentId],
+    );
 
   const createAward = async (
     name: string,
@@ -417,6 +484,63 @@ describe("awards (SQL-driven)", () => {
   });
 
   describe("tournament calculation", () => {
+    it.each([
+      ["Duel", "1v1"],
+      ["Wingman", "2v2"],
+    ])("does not calculate MVP for a %s (%s) tournament", async (type) => {
+      const t = await playedOutCupWithThirdPlace(type);
+      await postgres.query("SELECT calculate_tournament_awards($1)", [t.id]);
+
+      expect(await calculatedPlacements(t.id)).toEqual([1, 2, 3]);
+    });
+
+    it("calculates MVP for 5v5 and remains idempotent", async () => {
+      const t = await playedOutCupWithThirdPlace("Competitive");
+
+      await seedWinningRosterImpact(t.id);
+      await postgres.query("SELECT calculate_tournament_awards($1)", [t.id]);
+      expect(await calculatedPlacements(t.id)).toEqual([0, 1, 2, 3]);
+
+      await postgres.query("SELECT calculate_tournament_awards($1)", [t.id]);
+      expect(await calculatedPlacements(t.id)).toEqual([0, 1, 2, 3]);
+    });
+
+    it("removes an invalid calculated MVP on recalc without touching manual grants", async () => {
+      const t = await playedOutCupWithThirdPlace("Competitive");
+      await seedWinningRosterImpact(t.id);
+      await postgres.query("SELECT calculate_tournament_awards($1)", [t.id]);
+      expect(await calculatedPlacements(t.id)).toEqual([0, 1, 2, 3]);
+
+      const awardId = await createAward("Organizer's Pick");
+      const [seat] = await postgres.query<
+        Array<{ tournament_team_id: string; player_steam_id: string }>
+      >(
+        `SELECT tournament_team_id, player_steam_id
+           FROM tournament_trophies
+          WHERE tournament_id = $1 AND player_steam_id IS NOT NULL
+          LIMIT 1`,
+        [t.id],
+      );
+      await postgres.query(
+        `INSERT INTO tournament_trophies
+            (award_id, tournament_id, tournament_team_id, player_steam_id, source)
+          VALUES ($1, $2, $3, $4, 'manual')`,
+        [awardId, t.id, seat.tournament_team_id, seat.player_steam_id],
+      );
+
+      await setTournamentMatchType(t.id, "Wingman");
+      await postgres.query("SELECT calculate_tournament_awards($1)", [t.id]);
+
+      expect(await calculatedPlacements(t.id)).toEqual([1, 2, 3]);
+      const [{ manual }] = await postgres.query<Array<{ manual: string }>>(
+        `SELECT count(*) AS manual
+           FROM tournament_trophies
+          WHERE tournament_id = $1 AND source = 'manual'`,
+        [t.id],
+      );
+      expect(Number(manual)).toBe(1);
+    });
+
     it("falls back to the system award for each placement", async () => {
       const t = await playedOutCup();
 
