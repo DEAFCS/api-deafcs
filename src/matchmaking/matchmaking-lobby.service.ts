@@ -410,17 +410,13 @@ export class MatchmakingLobbyService {
   }
 
   /**
-   * A party may queue a match type when it either fits inside a single lineup
-   * (half the match, matchmaking fills the other half) or fills the entire
-   * match on its own (both lineups, split in-house). Anything between those two
-   * — or anything above the full match size — cannot be placed.
+   * A party may only queue a match type if it fits inside a single lineup
+   * (half the match, matchmaking fills the other half). A full-size party
+   * filling both lineups on its own used to be allowed as an "in-house scrim",
+   * but that let a party guarantee its own match outcome (ELO farming), so
+   * it's disallowed entirely regardless of match type.
    *
-   * Duel is the one exception: a full-size (2) party filling both lineups
-   * would just be the two of them dueling each other, which isn't a real
-   * match — unlike Wingman/Competitive, there's no useful "scrim your own
-   * party" case for a 1v1. Solo queue only for Duel.
-   *
-   * Wingman (4): 1-2 or 4 · Competitive (10): 1-5 or 10 · Duel (2): 1
+   * Wingman (4): 1-2 · Competitive (10): 1-5 · Duel (2): 1
    */
   private canPartyQueue(type: e_match_types_enum, partySize: number): boolean {
     const expected = ExpectedPlayers[type];
@@ -429,11 +425,7 @@ export class MatchmakingLobbyService {
       return true;
     }
 
-    if (type === "Duel") {
-      return partySize === 1;
-    }
-
-    return partySize <= expected / 2 || partySize === expected;
+    return partySize <= expected / 2;
   }
 
   private getPartySizeError(
@@ -446,11 +438,7 @@ export class MatchmakingLobbyService {
 
     const expected = ExpectedPlayers[type];
 
-    if (type === "Duel") {
-      return `To join a ${type} match, your lobby must be solo. You have ${partySize}.`;
-    }
-
-    return `To join a ${type} match, your lobby must have ${expected / 2} or fewer players, or exactly ${expected} players. You have ${partySize}.`;
+    return `To join a ${type} match, your lobby must have ${expected / 2} or fewer players. You have ${partySize}.`;
   }
 
   private async verifyPlayer(
