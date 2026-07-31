@@ -392,8 +392,21 @@ export class MatchmakeService {
     let team1: MatchmakingTeam = { players: [], lobbies: [], avgRank: 0 };
     let team2: MatchmakingTeam = { players: [], lobbies: [], avgRank: 0 };
 
-    // check if we have a full match's worth of players
-    if (selectedPlayerCount === requiredPlayers) {
+    // check if we have a full match's worth of players, AND those players
+    // can actually be split into two even teams. Parties are atomic (never
+    // split across teams), so player count alone isn't enough — e.g. five
+    // 2-player parties total 10 (a full Competitive match) but can never
+    // form two teams of 5, since 5 isn't reachable by summing 2s. Without
+    // this check that case fell through to splitIntoBalancedTeams, which
+    // assumed a split always exists and silently produced a broken 0v10
+    // match instead.
+    if (
+      selectedPlayerCount === requiredPlayers &&
+      this.canFillTeams(
+        selectedLobbies.map((lobby) => lobby.players.length),
+        playersPerTeam,
+      )
+    ) {
       const { teamA, teamB } = this.splitIntoBalancedTeams(
         selectedLobbies,
         playersPerTeam,
@@ -420,6 +433,13 @@ export class MatchmakeService {
         totalPlayerNotQueued = team1.players.length + team2.players.length;
       }
     } else {
+      if (selectedPlayerCount === requiredPlayers) {
+        this.logger.warn(
+          `${type}/${region}: ${selectedPlayerCount} queued but party sizes ` +
+            `(${selectedLobbies.map((lobby) => lobby.players.length).join(",")}) ` +
+            `cannot fill two even teams of ${playersPerTeam} - requeuing`,
+        );
+      }
       totalPlayerNotQueued = selectedPlayerCount;
       // Release all acquired locks since we can't create a match
       for (const lobby of selectedLobbies) {
@@ -460,6 +480,25 @@ export class MatchmakeService {
           players.length
         : 0,
     };
+  }
+
+  // Whether some subset of `partySizes` (each atomic — a party never splits
+  // across teams) sums to exactly `teamSize`. Since the caller only checks
+  // this once the total is exactly 2 * teamSize, a subset hitting teamSize
+  // guarantees the complement does too, so checking for one reachable value
+  // is enough. Subset-sum via a small reachable-sums DP — the pool is at
+  // most one match's worth of parties, so this is cheap.
+  private canFillTeams(partySizes: number[], teamSize: number): boolean {
+    const reachable = new Set<number>([0]);
+    for (const size of partySizes) {
+      for (const sum of [...reachable]) {
+        const next = sum + size;
+        if (next <= teamSize) {
+          reachable.add(next);
+        }
+      }
+    }
+    return reachable.has(teamSize);
   }
 
   // Finds the exact split of `lobbies` into two teams (of `teamSize` players
