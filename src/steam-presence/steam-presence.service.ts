@@ -716,7 +716,7 @@ export class SteamPresenceService
       const message =
         `Your ${safeType} match on ${safeMap} was imported — ` +
         `you went ${stats.kills}/${stats.deaths}. ` +
-        `<a href="${safeUrl}">View it on 5stack</a>.`;
+        `<a href="${safeUrl}">View it on DEAFCS</a>.`;
       await this.postgres
         .query(
           `INSERT INTO public.notifications (title, message, steam_id, role, type, entity_id)

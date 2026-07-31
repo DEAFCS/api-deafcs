@@ -62,7 +62,7 @@ export class DiscordBotOverviewService {
 
     const matchControls = {
       ViewMatch: new ButtonBuilder()
-        .setLabel(`View on 5Stack`)
+        .setLabel(`View on DEAFCS`)
         .setStyle(ButtonStyle.Link)
         .setURL(matchLink),
       JoinMatch: new ButtonBuilder()
