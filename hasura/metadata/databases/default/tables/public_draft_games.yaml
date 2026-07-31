@@ -117,6 +117,165 @@ select_permissions:
                         _eq: X-Hasura-User-Id
       allow_aggregations: true
     comment: ""
+  - role: match_organizer
+    permission:
+      computed_fields:
+        - is_organizer
+        - pattern
+      columns:
+        - id
+        - host_steam_id
+        - status
+        - type
+        - access
+        - invite_code
+        - regions
+        - map_pool_id
+        - match_options_id
+        - team_1_id
+        - team_2_id
+        - captain_selection
+        - draft_order
+        - mode
+        - require_approval
+        - min_elo
+        - max_elo
+        - capacity
+        - inner_squad
+        - match_id
+        - current_pick_lineup
+        - pick_deadline
+        - expires_at
+        - created_at
+        - updated_at
+        - elo_enabled
+      filter:
+        _or:
+          - access:
+              _eq: Open
+          - host_steam_id:
+              _eq: X-Hasura-User-Id
+          - is_organizer:
+              _eq: true
+          - players:
+              steam_id:
+                _eq: X-Hasura-User-Id
+          - _and:
+              - access:
+                  _eq: Friends
+              - players:
+                  player:
+                    friends:
+                      steam_id:
+                        _eq: X-Hasura-User-Id
+      allow_aggregations: true
+    comment: "Same as user, plus elo_enabled — only roles that can toggle it may see it."
+  - role: tournament_organizer
+    permission:
+      computed_fields:
+        - is_organizer
+        - pattern
+      columns:
+        - id
+        - host_steam_id
+        - status
+        - type
+        - access
+        - invite_code
+        - regions
+        - map_pool_id
+        - match_options_id
+        - team_1_id
+        - team_2_id
+        - captain_selection
+        - draft_order
+        - mode
+        - require_approval
+        - min_elo
+        - max_elo
+        - capacity
+        - inner_squad
+        - match_id
+        - current_pick_lineup
+        - pick_deadline
+        - expires_at
+        - created_at
+        - updated_at
+        - elo_enabled
+      filter:
+        _or:
+          - access:
+              _eq: Open
+          - host_steam_id:
+              _eq: X-Hasura-User-Id
+          - is_organizer:
+              _eq: true
+          - players:
+              steam_id:
+                _eq: X-Hasura-User-Id
+          - _and:
+              - access:
+                  _eq: Friends
+              - players:
+                  player:
+                    friends:
+                      steam_id:
+                        _eq: X-Hasura-User-Id
+      allow_aggregations: true
+    comment: "Same as user, plus elo_enabled — only roles that can toggle it may see it."
+  - role: administrator
+    permission:
+      computed_fields:
+        - is_organizer
+        - pattern
+      columns:
+        - id
+        - host_steam_id
+        - status
+        - type
+        - access
+        - invite_code
+        - regions
+        - map_pool_id
+        - match_options_id
+        - team_1_id
+        - team_2_id
+        - captain_selection
+        - draft_order
+        - mode
+        - require_approval
+        - min_elo
+        - max_elo
+        - capacity
+        - inner_squad
+        - match_id
+        - current_pick_lineup
+        - pick_deadline
+        - expires_at
+        - created_at
+        - updated_at
+        - elo_enabled
+      filter:
+        _or:
+          - access:
+              _eq: Open
+          - host_steam_id:
+              _eq: X-Hasura-User-Id
+          - is_organizer:
+              _eq: true
+          - players:
+              steam_id:
+                _eq: X-Hasura-User-Id
+          - _and:
+              - access:
+                  _eq: Friends
+              - players:
+                  player:
+                    friends:
+                      steam_id:
+                        _eq: X-Hasura-User-Id
+      allow_aggregations: true
+    comment: "Same as user, plus elo_enabled — only roles that can toggle it may see it."
   - role: guest
     permission:
       computed_fields:

@@ -38,6 +38,9 @@ export interface CreateDraftGameSettings {
   roster?: Array<DraftRosterEntry>;
   keep_lobby_together?: boolean;
   host_joins?: boolean;
+  // Admin/match organizer/tournament organizer only — silently ignored for
+  // everyone else (see createDraftGame/updateDraftSettings).
+  elo_enabled?: boolean;
   options?: Record<string, unknown>;
 }
 
@@ -120,6 +123,11 @@ export class DraftGameService {
         ? "TopEloTwo"
         : settings.captain_selection;
 
+    const eloEnabled =
+      settings.elo_enabled === false && isRoleAbove(user.role, "match_organizer")
+        ? false
+        : true;
+
     const draftGameId = await this.playerLock(user.steam_id, async () => {
       if (hostJoins) {
         await this.verifyPlayerEligible(user.steam_id);
@@ -166,6 +174,7 @@ export class DraftGameService {
                 draft_order: settings.draft_order,
                 min_elo: settings.min_elo,
                 max_elo: settings.max_elo,
+                elo_enabled: eloEnabled,
                 capacity,
                 ...(hostJoins
                   ? {
@@ -1201,6 +1210,14 @@ export class DraftGameService {
       _set.map_pool_id = mapPoolId;
       _set.min_elo = settings.min_elo ?? null;
       _set.max_elo = settings.max_elo ?? null;
+      // Silently ignored for anyone below match organizer — same as
+      // createDraftGame, so a crafted request can't flip it either.
+      if (
+        settings.elo_enabled !== undefined &&
+        isRoleAbove(user.role, "match_organizer")
+      ) {
+        _set.elo_enabled = settings.elo_enabled;
+      }
 
       if (nextMode === "Teams" && nextTeam1 && nextTeam2) {
         _set.access = "Private";
@@ -1352,6 +1369,7 @@ export class DraftGameService {
         draft_order: true,
         min_elo: true,
         max_elo: true,
+        elo_enabled: true,
         capacity: true,
         require_approval: true,
         match_id: true,
@@ -1396,6 +1414,7 @@ export class DraftGameService {
       draft_order: draft_games_by_pk.draft_order,
       min_elo: draft_games_by_pk.min_elo,
       max_elo: draft_games_by_pk.max_elo,
+      elo_enabled: draft_games_by_pk.elo_enabled,
       capacity: draft_games_by_pk.capacity,
       require_approval: draft_games_by_pk.require_approval,
       match_id: draft_games_by_pk.match_id,

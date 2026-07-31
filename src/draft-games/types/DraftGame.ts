@@ -36,6 +36,7 @@ export interface DraftGame {
   draft_order: e_draft_game_draft_order_enum;
   min_elo?: number;
   max_elo?: number;
+  elo_enabled?: boolean;
   capacity: number;
   require_approval: boolean;
   match_id?: string;

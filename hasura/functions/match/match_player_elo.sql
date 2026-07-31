@@ -414,6 +414,20 @@ BEGIN
         RETURN 0;
     END IF;
 
+    -- Scrims never affect ELO — permanent, no per-scrim toggle.
+    IF EXISTS (SELECT 1 FROM team_scrim_requests WHERE match_id = _match_id) THEN
+        RETURN 0;
+    END IF;
+
+    -- Draft hosts (admin/match organizer/tournament organizer) can opt a
+    -- draft game out of ELO via draft_games.elo_enabled.
+    IF EXISTS (
+        SELECT 1 FROM draft_games
+        WHERE match_id = _match_id AND elo_enabled = false
+    ) THEN
+        RETURN 0;
+    END IF;
+
     -- Skip matches without a winning_lineup_id
     IF match_record.winning_lineup_id IS NULL THEN
         RAISE NOTICE 'Skipping match % as it has no winning_lineup_id', _match_id;
