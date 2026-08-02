@@ -78,3 +78,42 @@ describe("MatchesController", () => {
     expect(matchAssistant.rebootOnDemandServer).toHaveBeenCalledWith("match-1");
   });
 });
+
+describe("MatchesController cancellation action", () => {
+  it("rejects a direct unauthorized cancellation request", async () => {
+    const controller = Object.create(MatchesController.prototype) as any;
+    controller.matchAssistant = {
+      canCancel: jest.fn().mockResolvedValue(false),
+      updateMatchStatus: jest.fn(),
+    };
+
+    await expect(
+      controller.cancelMatch({
+        match_id: "match-1",
+        user: { steam_id: "200", role: "verified_user" },
+      }),
+    ).rejects.toThrow("you are not authorized to cancel this match");
+
+    expect(controller.matchAssistant.updateMatchStatus).not.toHaveBeenCalled();
+  });
+
+  it("updates the match only after authorization succeeds", async () => {
+    const controller = Object.create(MatchesController.prototype) as any;
+    controller.matchAssistant = {
+      canCancel: jest.fn().mockResolvedValue(true),
+      updateMatchStatus: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(
+      controller.cancelMatch({
+        match_id: "match-1",
+        user: { steam_id: "200", role: "match_organizer" },
+      }),
+    ).resolves.toEqual({ success: true });
+
+    expect(controller.matchAssistant.updateMatchStatus).toHaveBeenCalledWith(
+      "match-1",
+      "Canceled",
+    );
+  });
+});

@@ -1661,9 +1661,7 @@ export class MatchesController {
     const { match_id, user } = data;
 
     if (!(await this.matchAssistant.canCancel(match_id, user))) {
-      throw Error(
-        "you are not a match organizer or the match is waiting for players to check in",
-      );
+      throw Error("you are not authorized to cancel this match");
     }
 
     await this.matchAssistant.updateMatchStatus(match_id, "Canceled");

@@ -450,4 +450,142 @@ describe("MatchAssistantService", () => {
       }),
     );
   });
+
+  describe("canCancel", () => {
+    const user = (steamId: string, role = "user") =>
+      ({ steam_id: steamId, role }) as any;
+
+    const cancellableMatch = {
+      status: "WaitingForCheckIn",
+      ended_at: null,
+      winning_lineup_id: null,
+      is_tournament_match: false,
+      draft_games: [],
+    };
+
+    const mockCancellationQueries = (
+      match: Record<string, unknown>,
+      isOrganizer = false,
+    ) => {
+      hasura.query
+        .mockResolvedValueOnce({
+          matches_by_pk: { is_organizer: isOrganizer },
+        })
+        .mockResolvedValueOnce({ matches_by_pk: match });
+    };
+
+    it("allows the creator of their own non-ELO draft match", async () => {
+      mockCancellationQueries({
+        ...cancellableMatch,
+        draft_games: [
+          {
+            match_id: "match-1",
+            host_steam_id: "100",
+            status: "Completed",
+            elo_enabled: false,
+          },
+        ],
+      });
+
+      await expect(service.canCancel("match-1", user("100"))).resolves.toBe(
+        true,
+      );
+    });
+
+    it("rejects another Verified user from someone else's draft", async () => {
+      mockCancellationQueries({
+        ...cancellableMatch,
+        draft_games: [
+          {
+            match_id: "match-1",
+            host_steam_id: "100",
+            status: "Completed",
+            elo_enabled: false,
+          },
+        ],
+      });
+
+      await expect(
+        service.canCancel("match-1", user("200", "verified_user")),
+      ).resolves.toBe(false);
+    });
+
+    it.each([
+      ["a participant", "user"],
+      ["a team captain", "verified_user"],
+      ["an ordinary ranked user", "user"],
+    ])("rejects %s without organizer permission", async (_label, role) => {
+      mockCancellationQueries({ ...cancellableMatch });
+
+      await expect(
+        service.canCancel("match-1", user("200", role)),
+      ).resolves.toBe(false);
+    });
+
+    it.each(["tournament", "league", "cup"])(
+      "rejects a Verified user from a %s match",
+      async () => {
+        mockCancellationQueries({
+          ...cancellableMatch,
+          is_tournament_match: true,
+        });
+
+        await expect(
+          service.canCancel("match-1", user("200", "verified_user")),
+        ).resolves.toBe(false);
+      },
+    );
+
+    it("preserves cancellation for an assigned organizer", async () => {
+      mockCancellationQueries({ ...cancellableMatch }, true);
+
+      await expect(service.canCancel("match-1", user("200"))).resolves.toBe(
+        true,
+      );
+    });
+
+    it("preserves cancellation for authorized staff", async () => {
+      mockCancellationQueries({ ...cancellableMatch }, true);
+
+      await expect(
+        service.canCancel("match-1", user("200", "administrator")),
+      ).resolves.toBe(true);
+    });
+
+    it("rejects a completed or resulted match even for an organizer", async () => {
+      mockCancellationQueries(
+        {
+          ...cancellableMatch,
+          status: "Finished",
+          ended_at: "2026-08-02T00:00:00.000Z",
+          winning_lineup_id: "lineup-1",
+        },
+        true,
+      );
+
+      await expect(
+        service.canCancel("match-1", user("200", "administrator")),
+      ).resolves.toBe(false);
+    });
+
+    it("rejects a draft creator when ELO is enabled or unknown", async () => {
+      for (const eloEnabled of [true, undefined]) {
+        mockCancellationQueries({
+          ...cancellableMatch,
+          draft_games: [
+            {
+              match_id: "match-1",
+              host_steam_id: "100",
+              status: "Completed",
+              elo_enabled: eloEnabled,
+            },
+          ],
+        });
+
+        await expect(service.canCancel("match-1", user("100"))).resolves.toBe(
+          false,
+        );
+      }
+    });
+  });
 });

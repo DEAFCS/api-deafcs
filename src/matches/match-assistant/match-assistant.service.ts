@@ -46,6 +46,14 @@ export class MatchAssistantService {
     ];
   private static readonly TERMINAL_MATCH_STATUSES: readonly e_match_status_enum[] =
     ["Finished", "Canceled", "Forfeit", "Tie", "Surrendered"];
+  private static readonly DRAFT_CANCELLABLE_STATUSES: readonly e_match_status_enum[] =
+    [
+      "Scheduled",
+      "WaitingForCheckIn",
+      "WaitingForServer",
+      "Veto",
+      "PickingPlayers",
+    ];
   public static readonly ON_DEMAND_SERVER_BOOT_CHECK_DELAY_MS = 15 * 1000;
   private static readonly INITIAL_BOOT_STATUS_DETAIL =
     "Waiting for Kubernetes to create the match server pod.";
@@ -1390,19 +1398,91 @@ export class MatchAssistantService {
   }
 
   public async canCancel(matchId: string, user: User) {
-    const { matches_by_pk } = await this.hasura.query(
+    type CancellationMatch = {
+      status?: e_match_status_enum | null;
+      ended_at?: string | null;
+      winning_lineup_id?: string | null;
+      is_tournament_match?: boolean | null;
+      draft_games?: Array<{
+        match_id?: string | null;
+        host_steam_id?: string | number | null;
+        status?: string | null;
+        type?: string | null;
+        elo_enabled?: boolean | null;
+      }>;
+    };
+
+    // Keep the existing session-aware organizer predicate for authorization,
+    // but read the cancellation facts from an admin-backed query. The user
+    // role intentionally cannot select draft_games.elo_enabled.
+    const organizerQuery = this.hasura.query(
       {
         matches_by_pk: {
-          __args: {
-            id: matchId,
-          },
-          can_cancel: true,
+          __args: { id: matchId },
+          is_organizer: true,
         },
       },
       user.steam_id,
     );
+    const matchQuery = this.hasura.query({
+      matches_by_pk: {
+        __args: { id: matchId },
+        status: true,
+        ended_at: true,
+        winning_lineup_id: true,
+        is_tournament_match: true,
+        source: true,
+        options: { type: true },
+        // elo_enabled exists in the live Hasura schema, but the checked-in
+        // generated types predate that column. Keep the cast local rather
+        // than changing the API schema or generated schema artifacts.
+        draft_games: {
+          match_id: true,
+          host_steam_id: true,
+          status: true,
+          type: true,
+          elo_enabled: true,
+        } as any,
+      } as any,
+    }) as Promise<{ matches_by_pk: CancellationMatch | null }>;
 
-    return matches_by_pk.can_cancel;
+    const [{ matches_by_pk: organizerMatch }, { matches_by_pk: match }] =
+      await Promise.all([organizerQuery, matchQuery]);
+
+    if (!match || !match.status) {
+      return false;
+    }
+
+    if (
+      MatchAssistantService.TERMINAL_MATCH_STATUSES.includes(match.status) ||
+      match.ended_at != null ||
+      match.winning_lineup_id != null
+    ) {
+      return false;
+    }
+
+    // This preserves the existing explicit match-management permission model:
+    // assigned organizers, tournament organizers, match organizers, and
+    // administrators are authorized by is_match_organizer().
+    if (organizerMatch?.is_organizer === true) {
+      return true;
+    }
+
+    const draftGame = match.draft_games?.find(
+      (draft) => String(draft.match_id) === String(matchId),
+    );
+
+    // The creator exception is deliberately narrow. A linked, completed draft
+    // must explicitly opt out of ELO, must not be in a tournament bracket, and
+    // must still be in a pre-live cancellable state.
+    return Boolean(
+      draftGame &&
+      draftGame.status === "Completed" &&
+      draftGame.elo_enabled === false &&
+      match.is_tournament_match !== true &&
+      MatchAssistantService.DRAFT_CANCELLABLE_STATUSES.includes(match.status) &&
+      String(draftGame.host_steam_id) === String(user.steam_id),
+    );
   }
 
   public async canStart(matchId: string, user: User) {
