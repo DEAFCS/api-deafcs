@@ -34,6 +34,14 @@ export class FriendsService {
             steam_id: {
               _in: friends,
             },
+            // Only auto-add Steam friends who have actually signed in on
+            // deafcs.net themselves — otherwise being Steam friends with
+            // someone the panel merely knows about (e.g. a shadow player
+            // row from an imported match) wrongly shows them as an
+            // "Accepted" in-app friend.
+            last_sign_in_at: {
+              _is_null: false,
+            },
           },
         },
         steam_id: true,

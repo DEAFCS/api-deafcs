@@ -138,6 +138,18 @@ export class TypeSenseService {
         sort: true,
         index: true,
       },
+      // Whether the player has ever signed in on the site, as opposed to a
+      // Steam account the panel merely knows about (e.g. looked up via
+      // another player's friend list). A dedicated bool field instead of
+      // filtering last_sign_in_at != "~~" directly — that string-inequality
+      // filter proved unreliable for timestamp values containing ":"/"+"/".",
+      // which silently excluded some registered players from search.
+      {
+        name: "is_registered",
+        type: "bool",
+        optional: true,
+        index: true,
+      },
       { name: "avatar_url", type: "string", optional: true, index: false },
       {
         name: "custom_avatar_url",
@@ -377,6 +389,8 @@ export class TypeSenseService {
       }
     }
 
+    const isRegistered = !!player.last_sign_in_at;
+
     // this is to allow filtering
     player.last_sign_in_at = player.last_sign_in_at || "~~";
 
@@ -406,6 +420,7 @@ export class TypeSenseService {
         Object.assign({}, player, elo, {
           id: steamId,
           steam_id: steamId,
+          is_registered: isRegistered,
           elo: TypeSenseService.primaryElo(
             elo.elo_competitive,
             elo.elo_wingman,
