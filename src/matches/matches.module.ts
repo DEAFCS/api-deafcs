@@ -243,12 +243,20 @@ export class MatchesModule implements NestModule {
       },
     );
 
+    // Previously ran once a minute (cron pattern), so a match could sit up
+    // to ~59s past its displayed cancels_at countdown before actually being
+    // canceled. Removing the old cron schedule and switching to a fixed
+    // 15s interval keeps the frontend countdown and the actual cancellation
+    // closely in sync.
+    void scheduleMatchQueue.removeRepeatable(CancelExpiredMatches.name, {
+      pattern: "* * * * *",
+    });
     void scheduleMatchQueue.add(
       CancelExpiredMatches.name,
       {},
       {
         repeat: {
-          pattern: "* * * * *",
+          every: 15_000,
         },
       },
     );
