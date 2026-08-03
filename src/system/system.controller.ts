@@ -8,7 +8,7 @@ import { HasuraService } from "src/hasura/hasura.service";
 import { NotificationsService } from "src/notifications/notifications.service";
 import { HasuraEvent } from "src/hasura/hasura.controller";
 import { HasuraEventData } from "src/hasura/types/HasuraEventData";
-import { settings_set_input } from "generated/schema";
+import { settings_set_input, e_notification_types_enum } from "generated/schema";
 import { GameServerNodeService } from "src/game-server-node/game-server-node.service";
 import { GameStreamerService } from "src/matches/game-streamer/game-streamer.service";
 import { LoggingService } from "src/k8s/logging/logging.service";
@@ -198,6 +198,33 @@ export class SystemController {
       },
     });
 
+    await this.notifications.notifyPlayers(
+      "NameChangeApproved" as e_notification_types_enum,
+      {
+        title: "Name Change Approved",
+        message: `Your name change to ${NotificationsService.escapeHtml(data.name)} was approved.`,
+        role: "user",
+        steamIds: [data.steam_id],
+      },
+    );
+
+    return {
+      success: true,
+    };
+  }
+
+  @HasuraAction()
+  public async denyNameChange(data: { name: string; steam_id: string }) {
+    await this.notifications.notifyPlayers(
+      "NameChangeDenied" as e_notification_types_enum,
+      {
+        title: "Name Change Denied",
+        message: `Your request to change your name to ${NotificationsService.escapeHtml(data.name)} was denied.`,
+        role: "user",
+        steamIds: [data.steam_id],
+      },
+    );
+
     return {
       success: true,
     };
@@ -255,6 +282,20 @@ export class SystemController {
           graphql: {
             type: "mutation",
             action: "approveNameChange",
+            variables: {
+              name: data.name,
+              steam_id: data.steam_id,
+            },
+            selection: {
+              success: true,
+            },
+          },
+        },
+        {
+          label: "Deny",
+          graphql: {
+            type: "mutation",
+            action: "denyNameChange",
             variables: {
               name: data.name,
               steam_id: data.steam_id,

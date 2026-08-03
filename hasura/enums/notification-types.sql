@@ -3,6 +3,8 @@ INSERT INTO e_notification_types ("value", "description") VALUES
     ('MatchSupport', 'MatchSupport'),
     ('GameNodeStatus', 'GameNodeStatus'),
     ('NameChangeRequest', 'NameChangeRequest'),
+    ('NameChangeApproved', 'Your name change request was approved'),
+    ('NameChangeDenied', 'Your name change request was denied'),
     ('DedicatedServerStatus', 'DedicatedServerStatus'),
     ('DedicatedServerRconStatus', 'DedicatedServerRconStatus'),
     ('MatchStatusChange', 'Match Status Change Notification'),
