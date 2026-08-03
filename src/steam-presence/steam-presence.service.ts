@@ -733,7 +733,7 @@ export class SteamPresenceService
         continue;
       }
       const text =
-        `Your ${notice.matchType} match on ${mapLabel} was imported to 5stack` +
+        `Your ${notice.matchType} match on ${mapLabel} was imported to DEAFCS` +
         ` — you went ${stats.kills}/${stats.deaths}. ${url}`;
       await this.redis
         .publish(
