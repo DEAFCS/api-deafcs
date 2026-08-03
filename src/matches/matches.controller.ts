@@ -159,6 +159,7 @@ export class MatchesController {
         lineup_2_id: true,
         current_match_map_id: true,
         is_tournament_match: true,
+        cancels_at: true,
         server: {
           server_region: {
             is_lan: true,
