@@ -68,7 +68,6 @@ import { DemosModule } from "../demos/demos.module";
 import { ClipsModule } from "./clips/clips.module";
 import { SteamMatchHistoryModule } from "../steam-match-history/steam-match-history.module";
 import { LeaguesModule } from "../leagues/leagues.module";
-import { SanctionsModule } from "../sanctions/sanctions.module";
 import { DisconnectBudgetService } from "./disconnect-budget/disconnect-budget.service";
 
 @Module({
@@ -93,7 +92,6 @@ import { DisconnectBudgetService } from "./disconnect-budget/disconnect-budget.s
     ChatModule,
     LeaguesModule,
     PluginRuntimeModule,
-    forwardRef(() => SanctionsModule),
     BullModule.registerQueue(
       {
         name: MatchQueues.MatchServers,

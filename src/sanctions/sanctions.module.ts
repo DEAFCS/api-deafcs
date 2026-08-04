@@ -1,4 +1,5 @@
 import {
+  Global,
   Module,
   MiddlewareConsumer,
   RequestMethod,
@@ -13,6 +14,14 @@ import { MatchServerMiddlewareMiddleware } from "src/matches/match-server-middle
 import { SanctionsService } from "./sanctions.service";
 import { SanctionsController } from "./sanctions.controller";
 
+// Global: DisconnectBudgetService (in MatchesModule) needs SanctionsService,
+// but MatchesModule already sits in a require cycle with RconModule (see the
+// forwardRef(() => RconModule) below), and this module's own top-level
+// `import { RconModule }` means importing SanctionsModule from MatchesModule
+// pulls that cycle in again and leaves RconModule undefined at boot
+// (UndefinedModuleException). Going @Global() lets SanctionsService resolve
+// without adding a new module-to-module edge into that cycle.
+@Global()
 @Module({
   imports: [HasuraModule, PostgresModule, RconModule, DedicatedServersModule],
   providers: [SanctionsService, loggerFactory()],
