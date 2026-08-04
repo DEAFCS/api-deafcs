@@ -68,6 +68,8 @@ import { DemosModule } from "../demos/demos.module";
 import { ClipsModule } from "./clips/clips.module";
 import { SteamMatchHistoryModule } from "../steam-match-history/steam-match-history.module";
 import { LeaguesModule } from "../leagues/leagues.module";
+import { SanctionsModule } from "../sanctions/sanctions.module";
+import { DisconnectBudgetService } from "./disconnect-budget/disconnect-budget.service";
 
 @Module({
   imports: [
@@ -91,6 +93,7 @@ import { LeaguesModule } from "../leagues/leagues.module";
     ChatModule,
     LeaguesModule,
     PluginRuntimeModule,
+    SanctionsModule,
     BullModule.registerQueue(
       {
         name: MatchQueues.MatchServers,
@@ -154,6 +157,7 @@ import { LeaguesModule } from "../leagues/leagues.module";
   providers: [
     MatchEventsGateway,
     MatchAssistantService,
+    DisconnectBudgetService,
     MatchRelayService,
     CheckOnDemandServerJob,
     CheckOnDemandServerJobEvents,

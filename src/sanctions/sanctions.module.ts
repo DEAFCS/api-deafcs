@@ -17,6 +17,7 @@ import { SanctionsController } from "./sanctions.controller";
   imports: [HasuraModule, PostgresModule, RconModule, DedicatedServersModule],
   providers: [SanctionsService, loggerFactory()],
   controllers: [SanctionsController],
+  exports: [SanctionsService],
 })
 export class SanctionsModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {

@@ -21,5 +21,28 @@ export default class PlayerConnected extends MatchEventProcessor<{
       },
     });
     await this.chat.joinLobbyViaGame(this.matchId, this.data.steam_id);
+
+    await this.postgres.query(
+      `UPDATE public.match_player_disconnects
+          SET reconnected_at = now()
+        WHERE match_id = $1
+          AND steam_id = $2
+          AND reconnected_at IS NULL`,
+      [this.matchId, this.data.steam_id],
+    );
+
+    // First-ever connect for this player in this match — distinguishes a
+    // genuine no-show (connected_at still NULL when the match auto-cancels)
+    // from a player who joined and later disconnected.
+    await this.postgres.query(
+      `UPDATE public.match_lineup_players mlp
+          SET connected_at = now()
+         FROM public.matches m
+        WHERE (mlp.match_lineup_id = m.lineup_1_id OR mlp.match_lineup_id = m.lineup_2_id)
+          AND m.id = $1
+          AND mlp.steam_id = $2
+          AND mlp.connected_at IS NULL`,
+      [this.matchId, this.data.steam_id],
+    );
   }
 }

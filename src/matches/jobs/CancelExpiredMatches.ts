@@ -7,6 +7,7 @@ import { HasuraService } from "../../hasura/hasura.service";
 import { NotificationsService } from "../../notifications/notifications.service";
 import { AppConfig } from "../../configs/types/AppConfig";
 import { DISCORD_COLORS } from "../../notifications/utilities/constants";
+import { DisconnectBudgetService } from "../disconnect-budget/disconnect-budget.service";
 
 @UseQueue("Matches", MatchQueues.ScheduledMatches)
 export class CancelExpiredMatches extends WorkerHost {
@@ -17,37 +18,25 @@ export class CancelExpiredMatches extends WorkerHost {
     private readonly hasura: HasuraService,
     private readonly notifications: NotificationsService,
     private readonly configService: ConfigService,
+    private readonly disconnectBudget: DisconnectBudgetService,
   ) {
     super();
     this.appConfig = this.configService.get<AppConfig>("app");
   }
   async process(): Promise<number> {
+    const expiredMatches = await this.getExpiredNonTournamentMatches();
+
+    for (const match of expiredMatches) {
+      await this.banNoShows(match);
+    }
+
     const { update_matches } = await this.hasura.mutation({
       update_matches: {
         __args: {
           where: {
-            _and: [
-              {
-                status: {
-                  _neq: "Canceled",
-                },
-              },
-              {
-                is_tournament_match: {
-                  _eq: false,
-                },
-              },
-              {
-                cancels_at: {
-                  _is_null: false,
-                },
-              },
-              {
-                cancels_at: {
-                  _lte: new Date(),
-                },
-              },
-            ],
+            id: {
+              _in: expiredMatches.map((match) => match.id),
+            },
           },
           _set: {
             status: "Canceled",
@@ -214,5 +203,84 @@ export class CancelExpiredMatches extends WorkerHost {
     });
 
     return matches;
+  }
+
+  private async getExpiredNonTournamentMatches() {
+    const { matches } = await this.hasura.query({
+      matches: {
+        __args: {
+          where: {
+            _and: [
+              {
+                status: {
+                  _neq: "Canceled",
+                },
+              },
+              {
+                is_tournament_match: {
+                  _eq: false,
+                },
+              },
+              {
+                cancels_at: {
+                  _is_null: false,
+                },
+              },
+              {
+                cancels_at: {
+                  _lte: new Date(),
+                },
+              },
+            ],
+          },
+        },
+        id: true,
+        server_id: true,
+        lineup_1: {
+          lineup_players: {
+            steam_id: true,
+            connected_at: true,
+          },
+        },
+        lineup_2: {
+          lineup_players: {
+            steam_id: true,
+            connected_at: true,
+          },
+        },
+      },
+    });
+
+    return matches;
+  }
+
+  private async banNoShows(
+    match: Awaited<
+      ReturnType<typeof this.getExpiredNonTournamentMatches>
+    >[number],
+  ) {
+    const lineupPlayers = [
+      ...match.lineup_1.lineup_players,
+      ...match.lineup_2.lineup_players,
+    ];
+
+    const noShows = lineupPlayers.filter(
+      (player) => player.steam_id != null && player.connected_at == null,
+    );
+
+    for (const player of noShows) {
+      try {
+        await this.disconnectBudget.applyLeaverBan({
+          steamId: `${player.steam_id}`,
+          serverId: match.server_id,
+          violation: "no_show",
+        });
+      } catch (error) {
+        this.logger.error(
+          `failed to apply no-show ban match=${match.id} steam_id=${player.steam_id}`,
+          error,
+        );
+      }
+    }
   }
 }
