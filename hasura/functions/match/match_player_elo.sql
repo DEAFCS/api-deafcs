@@ -58,6 +58,10 @@ DECLARE
     _player_map_wins INT := 0;
     _player_map_losses INT := 0;
     _series_multiplier INT := 1;
+
+    -- Leaver escalation: forces this player to be scored as a loss below,
+    -- independent of their team's actual result.
+    _elo_penalty BOOLEAN := false;
 BEGIN
     SELECT "type" INTO match_type FROM match_options WHERE id = match_record.match_options_id;
 
@@ -119,6 +123,14 @@ BEGIN
     ELSE
         _opponent_lineup_id := match_record.lineup_1_id;
     END IF;
+
+    SELECT mlp.elo_penalty INTO _elo_penalty
+    FROM match_lineup_players mlp
+    WHERE mlp.steam_id = player_record.steam_id
+    AND mlp.match_lineup_id = _player_lineup_id
+    LIMIT 1;
+
+    _elo_penalty := COALESCE(_elo_penalty, false);
 
     -- Series multiplier: scale ELO by the net map differential for this player's team.
     -- BO1 win gives 1x, BO3 2-0 gives 2x, BO3 2-1 gives 1x, BO5 3-0 gives 3x, etc.
@@ -317,8 +329,9 @@ BEGIN
     _expected_score := 1.0 / (1.0 + POWER(10.0, (_opponent_team_elo_avg - _current_player_elo) / _scale_factor));
 
     -- Determine the actual score based on match result
-    -- 1.0 for a win, 0.0 for a loss
-    IF match_record.winning_lineup_id = _player_lineup_id THEN
+    -- 1.0 for a win, 0.0 for a loss. A player flagged for a leaver ELO
+    -- penalty is always scored as a loss here, even if their team won.
+    IF match_record.winning_lineup_id = _player_lineup_id AND NOT _elo_penalty THEN
         _actual_score := 1.0;
     ELSE
         _actual_score := 0.0;
@@ -327,6 +340,13 @@ BEGIN
         -- This creates a linear inverse relationship where better performance = less ELO loss
         _performance_multiplier := 0.9 - 2.125 * (_performance_multiplier - 0.8);
         _performance_multiplier := GREATEST(0.05, LEAST(1.0, _performance_multiplier));
+
+        -- A leaver penalty additionally floors the protective performance
+        -- multiplier so a strong scoreline before leaving can't blunt the
+        -- ELO loss the way it's meant to for a normal loss.
+        IF _elo_penalty THEN
+            _performance_multiplier := LEAST(_performance_multiplier, 0.3);
+        END IF;
     END IF;
 
     -- Calculate the elo change (round to nearest integer)
@@ -353,7 +373,8 @@ BEGIN
         'performance_multiplier', _performance_multiplier,
         'map_wins', _player_map_wins,
         'map_losses', _player_map_losses,
-        'series_multiplier', _series_multiplier
+        'series_multiplier', _series_multiplier,
+        'elo_penalty', _elo_penalty
     );
 END;
 $$ LANGUAGE plpgsql STABLE;

@@ -89,8 +89,12 @@ export class DisconnectBudgetService {
     steamId: string;
     serverId?: string | null;
     violation: LeaverViolationType;
+    // Present when the violation happened inside a specific match — required
+    // to flag the per-player ELO penalty for that match. No-show bans (the
+    // match never played) omit it since there's no ELO to affect.
+    matchId?: string | null;
   }): Promise<LeaverBanResult> {
-    const { steamId, serverId, violation } = params;
+    const { steamId, serverId, violation, matchId } = params;
 
     const [player] = await this.postgres.query<
       Array<{
@@ -138,6 +142,18 @@ export class DisconnectBudgetService {
       duration: durationMs,
       sanctionedBySteamId: SYSTEM_STEAM_ID,
     });
+
+    if (applyEloPenalty && matchId) {
+      await this.postgres.query(
+        `UPDATE public.match_lineup_players mlp
+            SET elo_penalty = true
+           FROM public.matches m
+          WHERE (mlp.match_lineup_id = m.lineup_1_id OR mlp.match_lineup_id = m.lineup_2_id)
+            AND m.id = $1
+            AND mlp.steam_id = $2`,
+        [matchId, steamId],
+      );
+    }
 
     this.logger.log(
       `Automated leaver ban applied steam_id=${steamId} stage=${nextStage} violation=${violation} elo_penalty=${applyEloPenalty}`,
