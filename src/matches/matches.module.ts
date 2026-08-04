@@ -93,7 +93,7 @@ import { DisconnectBudgetService } from "./disconnect-budget/disconnect-budget.s
     ChatModule,
     LeaguesModule,
     PluginRuntimeModule,
-    SanctionsModule,
+    forwardRef(() => SanctionsModule),
     BullModule.registerQueue(
       {
         name: MatchQueues.MatchServers,
