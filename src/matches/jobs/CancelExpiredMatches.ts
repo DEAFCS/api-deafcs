@@ -274,6 +274,7 @@ export class CancelExpiredMatches extends WorkerHost {
           steamId: `${player.steam_id}`,
           serverId: match.server_id,
           violation: "no_show",
+          matchId: match.id,
         });
       } catch (error) {
         this.logger.error(

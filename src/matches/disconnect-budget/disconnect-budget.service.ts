@@ -26,6 +26,9 @@ export interface LeaverBanResult {
   durationMs: number;
   applyEloPenalty: boolean;
   sanctionId: string | null;
+  // Non-zero only for a no_show violation with a matchId — see
+  // apply_no_show_elo_penalty.
+  eloChange: number;
 }
 
 @Injectable()
@@ -89,9 +92,10 @@ export class DisconnectBudgetService {
     steamId: string;
     serverId?: string | null;
     violation: LeaverViolationType;
-    // Present when the violation happened inside a specific match — required
-    // to flag the per-player ELO penalty for that match. No-show bans (the
-    // match never played) omit it since there's no ELO to affect.
+    // The match this violation happened in/around. A no_show uses it to
+    // apply a standalone ELO penalty for the no-show themself (see
+    // apply_no_show_elo_penalty); a disconnect_timeout uses it to flag the
+    // per-player ELO penalty once escalation reaches the top ban stage.
     matchId?: string | null;
   }): Promise<LeaverBanResult> {
     const { steamId, serverId, violation, matchId } = params;
@@ -155,8 +159,17 @@ export class DisconnectBudgetService {
       );
     }
 
+    let eloChange = 0;
+    if (violation === "no_show" && matchId) {
+      const [row] = await this.postgres.query<Array<{ change: number }>>(
+        `SELECT apply_no_show_elo_penalty($1, $2) AS change`,
+        [matchId, steamId],
+      );
+      eloChange = row?.change ?? 0;
+    }
+
     this.logger.log(
-      `Automated leaver ban applied steam_id=${steamId} stage=${nextStage} violation=${violation} elo_penalty=${applyEloPenalty}`,
+      `Automated leaver ban applied steam_id=${steamId} stage=${nextStage} violation=${violation} elo_penalty=${applyEloPenalty} elo_change=${eloChange}`,
     );
 
     return {
@@ -164,6 +177,7 @@ export class DisconnectBudgetService {
       durationMs,
       applyEloPenalty,
       sanctionId: id,
+      eloChange,
     };
   }
 }
