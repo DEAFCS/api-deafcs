@@ -4,6 +4,7 @@ import { MatchAssistantService } from "../../match-assistant/match-assistant.ser
 import { ChatService } from "../../../chat/chat.service";
 import { NotificationsService } from "../../../notifications/notifications.service";
 import { PostgresService } from "../../../postgres/postgres.service";
+import { DisconnectBudgetService } from "../../disconnect-budget/disconnect-budget.service";
 
 @Injectable({ scope: Scope.REQUEST })
 export default abstract class MatchEventProcessor<T> {
@@ -17,6 +18,7 @@ export default abstract class MatchEventProcessor<T> {
     protected readonly chat: ChatService,
     protected readonly notifications: NotificationsService,
     protected readonly postgres: PostgresService,
+    protected readonly disconnectBudget: DisconnectBudgetService,
   ) {}
 
   public setData(matchId: string, data: T) {

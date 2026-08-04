@@ -4,6 +4,7 @@ import MatchUpdatedLineupsEvent from "./MatchUpdatedLineupsEvent";
 import PlayerConnected from "./PlayerConnected";
 import PlayersConnected from "./PlayersConnected";
 import PlayerDisconnected from "./PlayerDisconnected";
+import LeaverTimeout from "./LeaverTimeout";
 import CaptainEvent from "./CaptainEvent";
 import KnifeSwitch from "./KnifeSwitch";
 import ScoreEvent from "./ScoreEvent";
@@ -33,6 +34,7 @@ export const MatchEvents = {
   ["player-connected"]: PlayerConnected,
   ["players-connected"]: PlayersConnected,
   ["player-disconnected"]: PlayerDisconnected,
+  ["leaver-timeout"]: LeaverTimeout,
   captain: CaptainEvent,
   abandoned: MatchAbandoned,
 
