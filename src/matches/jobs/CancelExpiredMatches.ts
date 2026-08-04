@@ -8,6 +8,7 @@ import { NotificationsService } from "../../notifications/notifications.service"
 import { AppConfig } from "../../configs/types/AppConfig";
 import { DISCORD_COLORS } from "../../notifications/utilities/constants";
 import { DisconnectBudgetService } from "../disconnect-budget/disconnect-budget.service";
+import { RconService } from "../../rcon/rcon.service";
 
 @UseQueue("Matches", MatchQueues.ScheduledMatches)
 export class CancelExpiredMatches extends WorkerHost {
@@ -19,6 +20,7 @@ export class CancelExpiredMatches extends WorkerHost {
     private readonly notifications: NotificationsService,
     private readonly configService: ConfigService,
     private readonly disconnectBudget: DisconnectBudgetService,
+    private readonly rconService: RconService,
   ) {
     super();
     this.appConfig = this.configService.get<AppConfig>("app");
@@ -26,8 +28,31 @@ export class CancelExpiredMatches extends WorkerHost {
   async process(): Promise<number> {
     const expiredMatches = await this.getExpiredNonTournamentMatches();
 
+    // A match where nobody ever connected is a genuine no-show -- cancel it
+    // and ban whoever never showed. But if at least one player already
+    // touched the server, the match "started" as far as the rules are
+    // concerned: don't cancel it, force it past warmup into the knife round
+    // instead, and let DisconnectBudgetSystem/TeamEmptyForfeitSystem (which
+    // only start enforcing from the knife round onward) take over from
+    // there for whoever's still missing.
+    const matchesToCancel: typeof expiredMatches = [];
+
     for (const match of expiredMatches) {
+      const lineupPlayers = [
+        ...match.lineup_1.lineup_players,
+        ...match.lineup_2.lineup_players,
+      ];
+      const anyoneConnected = lineupPlayers.some(
+        (player) => player.connected_at != null,
+      );
+
+      if (anyoneConnected) {
+        await this.forceStartMatch(match);
+        continue;
+      }
+
       await this.banNoShows(match);
+      matchesToCancel.push(match);
     }
 
     const { update_matches } = await this.hasura.mutation({
@@ -35,7 +60,7 @@ export class CancelExpiredMatches extends WorkerHost {
         __args: {
           where: {
             id: {
-              _in: expiredMatches.map((match) => match.id),
+              _in: matchesToCancel.map((match) => match.id),
             },
           },
           _set: {
@@ -252,6 +277,36 @@ export class CancelExpiredMatches extends WorkerHost {
     });
 
     return matches;
+  }
+
+  private async forceStartMatch(
+    match: Awaited<
+      ReturnType<typeof this.getExpiredNonTournamentMatches>
+    >[number],
+  ) {
+    if (!match.server_id) {
+      this.logger.warn(
+        `cannot force-start match=${match.id}, no server assigned`,
+      );
+      return;
+    }
+
+    try {
+      const rcon = await this.rconService.connect(match.server_id);
+
+      if (!rcon) {
+        this.logger.warn(
+          `cannot force-start match=${match.id}, unable to connect to server rcon`,
+        );
+        return;
+      }
+
+      await rcon.send("force_ready");
+    } catch (error) {
+      this.logger.error(`failed to force-start match=${match.id}`, error);
+    } finally {
+      await this.rconService.disconnect(match.server_id);
+    }
   }
 
   private async banNoShows(
