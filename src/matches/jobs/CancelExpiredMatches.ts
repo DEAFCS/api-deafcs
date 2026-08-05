@@ -28,13 +28,15 @@ export class CancelExpiredMatches extends WorkerHost {
   async process(): Promise<number> {
     const expiredMatches = await this.getExpiredNonTournamentMatches();
 
-    // A match where nobody ever connected is a genuine no-show -- cancel it
-    // and ban whoever never showed. But if at least one player already
-    // touched the server, the match "started" as far as the rules are
-    // concerned: don't cancel it, force it past warmup into the knife round
-    // instead, and let DisconnectBudgetSystem/TeamEmptyForfeitSystem (which
-    // only start enforcing from the knife round onward) take over from
-    // there for whoever's still missing.
+    // Whether to cancel or force-start depends on the specific player(s)
+    // still missing, not on whether *someone* in the match connected. A
+    // player who genuinely never touched the server is a no-show -- cancel
+    // the whole match and ban them. Only once every roster player has
+    // touched the server at least once (no no-shows left) does the match
+    // "started" as far as the rules are concerned: force it past warmup into
+    // the knife round instead, and let DisconnectBudgetSystem/
+    // TeamEmptyForfeitSystem (which only start enforcing from the knife
+    // round onward) take over from there for whoever's still missing.
     const matchesToCancel: typeof expiredMatches = [];
 
     for (const match of expiredMatches) {
@@ -42,11 +44,11 @@ export class CancelExpiredMatches extends WorkerHost {
         ...match.lineup_1.lineup_players,
         ...match.lineup_2.lineup_players,
       ];
-      const anyoneConnected = lineupPlayers.some(
-        (player) => player.connected_at != null,
+      const hasNoShow = lineupPlayers.some(
+        (player) => player.steam_id != null && player.connected_at == null,
       );
 
-      if (anyoneConnected) {
+      if (!hasNoShow) {
         await this.forceStartMatch(match);
         continue;
       }
