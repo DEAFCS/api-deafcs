@@ -859,7 +859,10 @@ export class MatchmakeService {
         best_of: 1,
         knife: true,
         overtime: true,
-        timeout_setting: "Admin",
+        // Matchmaking games have no meaningful "admin"/captain concept for
+        // most players -- .tac/.timeout must be usable by anyone on the
+        // team, not gated to a captain or admin-tagged account.
+        timeout_setting: "CoachAndPlayers",
         region,
       },
     );
