@@ -317,6 +317,11 @@ export class CancelExpiredMatches extends WorkerHost {
   // polling -- a plain DB status update never reaches an already-connected
   // server. This is what actually tells players in-game the match is gone,
   // instead of the server just silently dying once the pod gets torn down.
+  //
+  // Uses the console-only announce_no_show_cancel command instead of a raw
+  // RCON `say` -- `say` shows up as unstyled "Console: ..." text with no
+  // color support, while this routes through the plugin's own
+  // colored/localized message pipeline.
   private async announceCancellation(
     match: Awaited<
       ReturnType<typeof this.getExpiredNonTournamentMatches>
@@ -333,9 +338,7 @@ export class CancelExpiredMatches extends WorkerHost {
         return;
       }
 
-      await rcon.send(
-        "say [DEAFCS] Match canceled - player(s) did not join in time and have been banned",
-      );
+      await rcon.send("announce_no_show_cancel");
     } catch (error) {
       this.logger.error(`failed to announce cancellation match=${match.id}`, error);
     } finally {
