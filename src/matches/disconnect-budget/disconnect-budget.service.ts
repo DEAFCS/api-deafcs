@@ -10,13 +10,13 @@ const DISCONNECT_BUDGET_SECONDS = 5 * 60;
 
 const LEAVER_BAN_DECAY_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
-// stage index (1-based) -> ban duration in ms. Stage 4+ additionally carries
-// an ELO penalty (see LeaverBanResult.applyEloPenalty).
+// stage index (1-based) -> ban duration in ms. Whether ELO is also docked at
+// a given stage depends on the violation type -- see applyEloPenalty below.
 const LEAVER_BAN_STAGE_DURATIONS_MS = [
   30 * 60 * 1000, // stage 1: 30 min
   2 * 60 * 60 * 1000, // stage 2: 2h
   24 * 60 * 60 * 1000, // stage 3: 24h
-  24 * 60 * 60 * 1000, // stage 4+: 24h + ELO penalty
+  24 * 60 * 60 * 1000, // stage 4+
 ];
 
 export type LeaverViolationType = "no_show" | "disconnect_timeout";
@@ -24,6 +24,9 @@ export type LeaverViolationType = "no_show" | "disconnect_timeout";
 export interface LeaverBanResult {
   stage: number;
   durationMs: number;
+  // no_show: only true at the top stage (repeat pattern). disconnect_timeout
+  // (touched the server, then left before start or mid-match): always true,
+  // from stage 1.
   applyEloPenalty: boolean;
   sanctionId: string | null;
   // Non-zero only for a no_show violation with a matchId — see
@@ -93,9 +96,10 @@ export class DisconnectBudgetService {
     serverId?: string | null;
     violation: LeaverViolationType;
     // The match this violation happened in/around. A no_show uses it to
-    // apply a standalone ELO penalty for the no-show themself (see
-    // apply_no_show_elo_penalty); a disconnect_timeout uses it to flag the
-    // per-player ELO penalty once escalation reaches the top ban stage.
+    // apply a standalone flat ELO penalty for the no-show themself once it's
+    // a repeat pattern (see apply_no_show_elo_penalty); a disconnect_timeout
+    // uses it to flag the per-player ELO penalty from stage 1 onward, since
+    // they touched the server.
     matchId?: string | null;
   }): Promise<LeaverBanResult> {
     const { steamId, serverId, violation, matchId } = params;
@@ -123,7 +127,15 @@ export class DisconnectBudgetService {
       LEAVER_BAN_STAGE_DURATIONS_MS.length,
     );
     const durationMs = LEAVER_BAN_STAGE_DURATIONS_MS[nextStage - 1];
-    const applyEloPenalty = nextStage >= LEAVER_BAN_STAGE_DURATIONS_MS.length;
+    const isTopStage = nextStage >= LEAVER_BAN_STAGE_DURATIONS_MS.length;
+
+    // A no-show never touched the server -- mild, only costs ELO once it's
+    // a repeat pattern (top stage). Someone who *did* touch the server
+    // (left before start, or mid-match) had a real chance to play, so they
+    // lose ELO every single time, from stage 1, regardless of how the
+    // match turned out for their team.
+    const applyEloPenalty =
+      violation === "disconnect_timeout" ? true : isTopStage;
 
     await this.postgres.query(
       `UPDATE public.players
@@ -147,7 +159,11 @@ export class DisconnectBudgetService {
       sanctionedBySteamId: SYSTEM_STEAM_ID,
     });
 
-    if (applyEloPenalty && matchId) {
+    // Mid-match/touched-server leavers: flag the row now, forcing a flat
+    // penalty once the match actually finishes and generate_player_elo_for_match
+    // runs -- the match is still being played, so there's no final score to
+    // dock ELO from yet.
+    if (violation === "disconnect_timeout" && applyEloPenalty && matchId) {
       await this.postgres.query(
         `UPDATE public.match_lineup_players mlp
             SET elo_penalty = true
@@ -159,8 +175,11 @@ export class DisconnectBudgetService {
       );
     }
 
+    // No-shows: the match is already canceled with no winner, so there's
+    // nothing to defer to -- apply the flat penalty immediately, but only
+    // once it's a repeat pattern (top stage).
     let eloChange = 0;
-    if (violation === "no_show" && matchId) {
+    if (violation === "no_show" && applyEloPenalty && matchId) {
       const [row] = await this.postgres.query<Array<{ change: number }>>(
         `SELECT apply_no_show_elo_penalty($1, $2) AS change`,
         [matchId, steamId],

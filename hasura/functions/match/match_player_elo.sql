@@ -36,6 +36,7 @@ DECLARE
     _elo_change INTEGER;
     _scale_factor INTEGER := 4000;
     _default_elo INTEGER := 5000;
+    _leaver_elo_penalty INTEGER := 250;
 
     -- Performance metrics
     _player_kills INTEGER;
@@ -329,9 +330,8 @@ BEGIN
     _expected_score := 1.0 / (1.0 + POWER(10.0, (_opponent_team_elo_avg - _current_player_elo) / _scale_factor));
 
     -- Determine the actual score based on match result
-    -- 1.0 for a win, 0.0 for a loss. A player flagged for a leaver ELO
-    -- penalty is always scored as a loss here, even if their team won.
-    IF match_record.winning_lineup_id = _player_lineup_id AND NOT _elo_penalty THEN
+    -- 1.0 for a win, 0.0 for a loss.
+    IF match_record.winning_lineup_id = _player_lineup_id THEN
         _actual_score := 1.0;
     ELSE
         _actual_score := 0.0;
@@ -340,18 +340,21 @@ BEGIN
         -- This creates a linear inverse relationship where better performance = less ELO loss
         _performance_multiplier := 0.9 - 2.125 * (_performance_multiplier - 0.8);
         _performance_multiplier := GREATEST(0.05, LEAST(1.0, _performance_multiplier));
-
-        -- A leaver penalty additionally floors the protective performance
-        -- multiplier so a strong scoreline before leaving can't blunt the
-        -- ELO loss the way it's meant to for a normal loss.
-        IF _elo_penalty THEN
-            _performance_multiplier := LEAST(_performance_multiplier, 0.3);
-        END IF;
     END IF;
 
     -- Calculate the elo change (round to nearest integer)
     -- ELO change formula: New Rating = Old Rating + K * (Actual Score - Expected Score) * Performance Multiplier * Series Multiplier
     _elo_change := ROUND(_k_factor * (_actual_score - _expected_score) * _performance_multiplier * _series_multiplier);
+
+    -- A player flagged for a leaver ELO penalty always takes a flat hit
+    -- instead of the formula result, win or lose -- they touched the server
+    -- and then left, so ELO shouldn't ride on how the match happened to end
+    -- without them, and a formula-driven amount was producing inconsistent,
+    -- sometimes very mild results.
+    IF _elo_penalty THEN
+        _actual_score := 0.0;
+        _elo_change := -_leaver_elo_penalty;
+    END IF;
 
     -- Return the elo change as JSON with detailed information
     RETURN jsonb_build_object(
