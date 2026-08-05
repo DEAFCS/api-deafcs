@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { PostgresService } from "src/postgres/postgres.service";
 import { SanctionsService } from "src/sanctions/sanctions.service";
+import { NotificationsService } from "src/notifications/notifications.service";
 
 // Reserved player row (see migration 1877000000000_seed_system_player) used
 // as the sanctioner for bans issued automatically rather than by an admin.
@@ -40,6 +41,7 @@ export class DisconnectBudgetService {
     private readonly logger: Logger,
     private readonly postgres: PostgresService,
     private readonly sanctionsService: SanctionsService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   /**
@@ -158,6 +160,19 @@ export class DisconnectBudgetService {
       duration: durationMs,
       sanctionedBySteamId: SYSTEM_STEAM_ID,
     });
+
+    // Admins-only bell notification for automated bans -- deliberately not
+    // queueSanctionNotification/notifyMatchPlayersOfSanction, which would
+    // also broadcast "who got banned" to regular/verified users who happened
+    // to be in a recent match with them.
+    if (id) {
+      await this.notificationsService.notifyAdminsOfBan({
+        sanctionId: id,
+        steamId,
+        type: "ban",
+        reason,
+      });
+    }
 
     // Mid-match/touched-server leavers: flag the row now, forcing a flat
     // penalty once the match actually finishes and generate_player_elo_for_match
