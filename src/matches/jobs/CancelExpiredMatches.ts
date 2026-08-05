@@ -54,6 +54,7 @@ export class CancelExpiredMatches extends WorkerHost {
       }
 
       await this.banNoShows(match);
+      await this.announceCancellation(match);
       matchesToCancel.push(match);
     }
 
@@ -306,6 +307,37 @@ export class CancelExpiredMatches extends WorkerHost {
       await rcon.send("force_ready");
     } catch (error) {
       this.logger.error(`failed to force-start match=${match.id}`, error);
+    } finally {
+      await this.rconService.disconnect(match.server_id);
+    }
+  }
+
+  // The game-server client only learns about match state through pushed
+  // events (websocket, RCON get_match) or its own explicit triggers, not by
+  // polling -- a plain DB status update never reaches an already-connected
+  // server. This is what actually tells players in-game the match is gone,
+  // instead of the server just silently dying once the pod gets torn down.
+  private async announceCancellation(
+    match: Awaited<
+      ReturnType<typeof this.getExpiredNonTournamentMatches>
+    >[number],
+  ) {
+    if (!match.server_id) {
+      return;
+    }
+
+    try {
+      const rcon = await this.rconService.connect(match.server_id);
+
+      if (!rcon) {
+        return;
+      }
+
+      await rcon.send(
+        "say [DEAFCS] Match canceled - player(s) did not join in time and have been banned",
+      );
+    } catch (error) {
+      this.logger.error(`failed to announce cancellation match=${match.id}`, error);
     } finally {
       await this.rconService.disconnect(match.server_id);
     }
