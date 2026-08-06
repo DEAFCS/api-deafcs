@@ -107,6 +107,7 @@ DECLARE
   _to timestamptz;
   _use_peak boolean;
   _unbounded_current boolean;
+  _is_rolling_window boolean;
 BEGIN
   IF _elo_view IS NULL OR lower(_elo_view) NOT IN ('current', 'peak') THEN
     RAISE EXCEPTION 'Invalid ELO view: %. Must be one of: current, peak', _elo_view;
@@ -131,6 +132,15 @@ BEGIN
   END IF;
 
   _unbounded_current := NOT _use_peak AND _season_id IS NULL AND _window_days = 0;
+  -- Rolling windows (7/30 day, and any future positive window_days) must
+  -- report the SUM of every eligible match's change inside the window, not
+  -- "latest ELO minus the ELO immediately before the window's first row."
+  -- That baseline formula silently collapses to whatever happened right
+  -- before the window's first match — including a mid-window season reset
+  -- to 5000 — instead of the true rolling total. Named seasons, Peak/All
+  -- Time, and unbounded Current are unaffected and keep their existing
+  -- formulas below.
+  _is_rolling_window := NOT _use_peak AND _season_id IS NULL AND _window_days > 0;
 
   IF _exclude_tournaments THEN
     RETURN QUERY
@@ -163,6 +173,21 @@ BEGIN
         AND (_season_id IS NULL OR pe.season_id = _season_id)
         AND ((_from IS NULL OR pe.created_at >= _from) AND (_to IS NULL OR pe.created_at < _to))
         AND EXISTS (SELECT 1 FROM tournament_brackets tb WHERE tb.match_id = pe.match_id)
+      GROUP BY pe.steam_id
+    ),
+    -- Rolling-window ELO Change: the total of every eligible (non-tournament,
+    -- since tournaments are excluded here) match's own change inside the
+    -- window. Only used when _is_rolling_window is true; harmless to compute
+    -- otherwise (unused by the CASE below for peak/unbounded/named-season
+    -- calls).
+    rolling_change AS (
+      SELECT pe.steam_id, SUM(pe.change) as total_change
+      FROM player_elo pe
+      WHERE 1=1
+        AND (_match_type IS NULL OR pe.type = _match_type)
+        AND (_season_id IS NULL OR pe.season_id = _season_id)
+        AND ((_from IS NULL OR pe.created_at >= _from) AND (_to IS NULL OR pe.created_at < _to))
+        AND NOT EXISTS (SELECT 1 FROM tournament_brackets tb WHERE tb.match_id = pe.match_id)
       GROUP BY pe.steam_id
     ),
     first_elo AS (
@@ -221,6 +246,8 @@ BEGIN
         THEN 0::float
         WHEN _unbounded_current
         THEN le.latest_change::float
+        WHEN _is_rolling_window
+        THEN COALESCE(rc.total_change, 0)::float
         ELSE ((le.raw_current - COALESCE(ta.tourney_total, 0)) - fe.starting_elo)::float
       END                        as secondary_value,
       COALESCE(ws.streak, 0)::float as tertiary_value,
@@ -228,6 +255,7 @@ BEGIN
     FROM last_elo_raw le
     JOIN peak_elo pk_e ON pk_e.steam_id = le.steam_id
     LEFT JOIN tournament_adj ta ON ta.steam_id = le.steam_id
+    LEFT JOIN rolling_change rc ON rc.steam_id = le.steam_id
     JOIN first_elo fe ON fe.steam_id = le.steam_id
     LEFT JOIN match_counts mc ON mc.steam_id = le.steam_id
     LEFT JOIN win_streak ws ON ws.steam_id = le.steam_id
@@ -250,6 +278,19 @@ BEGIN
     ),
     peak_elo AS (
       SELECT pe.steam_id, MAX(pe.current) as peak_current
+      FROM player_elo pe
+      WHERE 1=1
+        AND (_match_type IS NULL OR pe.type = _match_type)
+        AND (_season_id IS NULL OR pe.season_id = _season_id)
+        AND ((_from IS NULL OR pe.created_at >= _from) AND (_to IS NULL OR pe.created_at < _to))
+      GROUP BY pe.steam_id
+    ),
+    -- Rolling-window ELO Change: the total of every eligible match's own
+    -- change inside the window, tournaments included (the toggle is off in
+    -- this branch). Only used when _is_rolling_window is true; harmless to
+    -- compute otherwise.
+    rolling_change AS (
+      SELECT pe.steam_id, SUM(pe.change) as total_change
       FROM player_elo pe
       WHERE 1=1
         AND (_match_type IS NULL OR pe.type = _match_type)
@@ -311,12 +352,15 @@ BEGIN
         THEN 0::float
         WHEN _unbounded_current
         THEN le.latest_change::float
+        WHEN _is_rolling_window
+        THEN COALESCE(rc.total_change, 0)::float
         ELSE (le.current_elo - fe.starting_elo)::float
       END                        as secondary_value,
       COALESCE(ws.streak, 0)::float as tertiary_value,
       mc.matches_played::int     as matches_played
     FROM last_elo le
     JOIN peak_elo pk_e ON pk_e.steam_id = le.steam_id
+    LEFT JOIN rolling_change rc ON rc.steam_id = le.steam_id
     JOIN first_elo fe ON fe.steam_id = le.steam_id
     JOIN match_counts mc ON mc.steam_id = le.steam_id
     LEFT JOIN win_streak ws ON ws.steam_id = le.steam_id

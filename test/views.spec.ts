@@ -550,6 +550,210 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       }
     });
 
+    // Rolling-window ELO Change must be the SUM of every eligible match's own
+    // change inside the window, not "latest ELO minus the ELO immediately
+    // before the window's first row." The old formula silently collapsed to
+    // whatever happened right before the window's first match, so a season
+    // reset to 5000 sitting inside the window made the 7-day and 30-day
+    // figures equal even though the 30-day window covered an extra,
+    // pre-reset match. These cases reproduce that production scenario
+    // (7 Days: +289, 30 Days: +544, matching the m0c1n Wingman evidence) and
+    // the surrounding edge cases called out in the fix's requirements.
+    describe("rolling-window ELO Change", () => {
+      it("sums changes across a mid-window season reset instead of collapsing to the post-reset baseline", async () => {
+        const [player] = await fx.players(1);
+        const seasonOne = await fx.season("2020-01-01", "2020-06-01");
+        const seasonTwo = await fx.season("2020-06-01", null);
+
+        const preResetMatch = await fx.bareMatch(T(60 * 24 * 10));
+        const resetMatchA = await fx.bareMatch(T(60 * 24 * 5));
+        const resetMatchB = await fx.bareMatch(T(60 * 24 * 1));
+
+        // Pre-reset: outside the 7-day window, inside the 30-day window.
+        await insertElo(
+          player,
+          preResetMatch.matchId,
+          "Wingman",
+          5255,
+          255,
+          10,
+          seasonOne,
+        );
+        // Post-reset: inside both windows.
+        await insertElo(
+          player,
+          resetMatchA.matchId,
+          "Wingman",
+          5100,
+          100,
+          5,
+          seasonTwo,
+        );
+        await insertElo(
+          player,
+          resetMatchB.matchId,
+          "Wingman",
+          5289,
+          189,
+          1,
+          seasonTwo,
+        );
+
+        const [sevenDay] = await eloLeaderboard(7, "Wingman");
+        const [thirtyDay] = await eloLeaderboard(30, "Wingman");
+
+        expect(Number(sevenDay.value)).toBe(5289);
+        expect(Number(sevenDay.secondary_value)).toBe(289);
+        expect(Number(thirtyDay.value)).toBe(5289);
+        expect(Number(thirtyDay.secondary_value)).toBe(544);
+        expect(Number(thirtyDay.secondary_value)).not.toBe(
+          Number(sevenDay.secondary_value),
+        );
+      });
+
+      it("sums positive and negative changes together", async () => {
+        const [player] = await fx.players(1);
+        const winMatch = await fx.bareMatch(T(60 * 24 * 4));
+        const lossMatch = await fx.bareMatch(T(60 * 24 * 2));
+
+        await insertElo(player, winMatch.matchId, "Duel", 5150, 150, 4);
+        await insertElo(player, lossMatch.matchId, "Duel", 5090, -60, 2);
+
+        const [row] = await eloLeaderboard(7, "Duel");
+        expect(Number(row.secondary_value)).toBe(90);
+      });
+
+      it("omits players with no matches in the window", async () => {
+        const [player] = await fx.players(1);
+        const oldMatch = await fx.bareMatch(T(60 * 24 * 20));
+        await insertElo(player, oldMatch.matchId, "Duel", 5300, 300, 20);
+
+        const rows = await eloLeaderboard(7, "Duel");
+        expect(rows.find((r) => r.player_steam_id === player)).toBeUndefined();
+      });
+
+      it("sums to exactly that match's own change when only one match falls in the window", async () => {
+        const [player] = await fx.players(1);
+        const match = await fx.bareMatch(T(60 * 24 * 2));
+        await insertElo(player, match.matchId, "Duel", 5075, 75, 2);
+
+        const [row] = await eloLeaderboard(30, "Duel");
+        expect(Number(row.secondary_value)).toBe(75);
+      });
+
+      it("keeps rolling sums isolated per match type", async () => {
+        const [player] = await fx.players(1);
+        const wingmanMatch = await fx.bareMatch(T(60 * 24 * 2));
+        const duelMatch = await fx.bareMatch(T(60 * 24 * 1));
+
+        await insertElo(player, wingmanMatch.matchId, "Wingman", 5200, 200, 2);
+        await insertElo(player, duelMatch.matchId, "Duel", 5040, 40, 1);
+
+        const [wingmanRow] = await eloLeaderboard(30, "Wingman");
+        const [duelRow] = await eloLeaderboard(30, "Duel");
+        expect(Number(wingmanRow.secondary_value)).toBe(200);
+        expect(Number(duelRow.secondary_value)).toBe(40);
+      });
+
+      it("includes tournament changes in the rolling sum when Exclude Tournaments is off, and excludes them when on", async () => {
+        const tournament = await tournamentFx.launch(
+          [{ type: "SingleElimination", order: 1, minTeams: 2, maxTeams: 2 }],
+          2,
+        );
+        const [bracket] = await tournamentFx.getBrackets(tournament.stageIds[0]);
+        expect(bracket.match_id).not.toBeNull();
+
+        const [player] = await fx.players(1);
+        const regularMatch = await fx.bareMatch(T(60 * 24 * 2));
+        await insertElo(player, regularMatch.matchId, "Wingman", 5050, 50, 2);
+        await insertElo(player, bracket.match_id!, "Wingman", 5150, 100, 1);
+
+        const [includedRow] = await eloLeaderboard(7, "Wingman", "current", false);
+        const [excludedRow] = await eloLeaderboard(7, "Wingman", "current", true);
+
+        expect(Number(includedRow.secondary_value)).toBe(150);
+        expect(Number(excludedRow.secondary_value)).toBe(50);
+        // Tournament rows carry no season_id, so the current-value baseline
+        // in the exclude branch is also tournament-adjusted; only the
+        // rolling-sum column is under test here.
+        expect(Number(excludedRow.value)).toBe(5050);
+      });
+
+      it("leaves named-season ELO Change on the existing final-minus-starting formula", async () => {
+        const [player] = await fx.players(1);
+        const seasonId = await fx.season("2021-01-01", null);
+        const first = await fx.bareMatch(T(60 * 24 * 3));
+        const second = await fx.bareMatch(T(60 * 24 * 1));
+
+        await insertElo(player, first.matchId, "Competitive", 5200, 200, 3, seasonId);
+        await insertElo(
+          player,
+          second.matchId,
+          "Competitive",
+          5150,
+          -50,
+          1,
+          seasonId,
+        );
+
+        const [row] = await postgres.query<Array<LeaderboardRow>>(
+          `SELECT * FROM get_leaderboard(
+             'elo', 0, 'Competitive', false, NULL, $1, 'current'
+           )`,
+          [seasonId],
+        );
+        // Season path: final (5150) minus starting-of-season (5200 - 200 =
+        // 5000) = 150 — unaffected by the rolling-window SUM change.
+        expect(Number(row.value)).toBe(5150);
+        expect(Number(row.secondary_value)).toBe(150);
+      });
+
+      it("leaves unbounded Current's secondary_value as the latest match's own change", async () => {
+        const [player] = await fx.players(1);
+        const first = await fx.bareMatch(T(60 * 24 * 3));
+        const second = await fx.bareMatch(T(60 * 24 * 1));
+        await insertElo(player, first.matchId, "Duel", 5200, 200, 3);
+        await insertElo(player, second.matchId, "Duel", 5150, -50, 1);
+
+        const [row] = await eloLeaderboard(0, "Duel");
+        expect(Number(row.value)).toBe(5150);
+        expect(Number(row.secondary_value)).toBe(-50);
+      });
+
+      it("leaves Peak's secondary_value at zero", async () => {
+        const [player] = await fx.players(1);
+        const match = await fx.bareMatch(T(60 * 24 * 2));
+        await insertElo(player, match.matchId, "Duel", 5300, 300, 2);
+
+        const [row] = await eloLeaderboard(0, "Duel", "peak");
+        expect(Number(row.value)).toBe(5300);
+        expect(Number(row.secondary_value)).toBe(0);
+      });
+
+      it("does not double-count when a player has several matches inside the window", async () => {
+        const [player] = await fx.players(1);
+        const matches = await Promise.all([
+          fx.bareMatch(T(60 * 24 * 6)),
+          fx.bareMatch(T(60 * 24 * 4)),
+          fx.bareMatch(T(60 * 24 * 2)),
+        ]);
+        const changes = [40, -15, 60]; // sum = 85
+        for (const [i, m] of matches.entries()) {
+          await insertElo(
+            player,
+            m.matchId,
+            "Duel",
+            5000 + changes.slice(0, i + 1).reduce((a, b) => a + b, 0),
+            changes[i],
+            6 - i * 2,
+          );
+        }
+
+        const [row] = await eloLeaderboard(30, "Duel");
+        expect(Number(row.secondary_value)).toBe(85);
+      });
+    });
+
     it("defaults omitted ELO view to current and validates unsupported views", async () => {
       const [player] = await fx.players(1);
       const match = await fx.bareMatch(T(60));
