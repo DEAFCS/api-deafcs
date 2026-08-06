@@ -637,6 +637,34 @@ export class AwardsService {
     return rows?.[0] || null;
   }
 
+  // Called from within TournamentsController's PostgresService.transaction
+  // block, immediately before the tournament row itself is deleted. Deletes
+  // are scoped strictly by tournament_id: recipients first (award_recipients
+  // -> award_occurrences is ON DELETE RESTRICT, so it must go first), then the
+  // occurrences themselves. This covers both tournament_calculated and manual
+  // occurrences tied to this tournament -- award_occurrences_calculated_tournament
+  // requires tournament_id IS NOT NULL for calculated rows, so leaving any
+  // tournament_calculated occurrence behind while nulling this column (which is
+  // what deleting the tournament via ON DELETE SET NULL would otherwise do)
+  // is exactly the violation this method exists to avoid. Reusable/unscoped
+  // award definitions in `awards` are never touched here.
+  public async deleteTournamentAwardRecords(
+    client: PoolClient,
+    tournamentId: string,
+  ): Promise<void> {
+    await client.query(
+      `DELETE FROM public.award_recipients
+        WHERE occurrence_id IN (
+          SELECT id FROM public.award_occurrences WHERE tournament_id = $1
+        )`,
+      [tournamentId],
+    );
+    await client.query(
+      `DELETE FROM public.award_occurrences WHERE tournament_id = $1`,
+      [tournamentId],
+    );
+  }
+
   // A team award has to reach the people on the team, otherwise it only ever
   // shows on the team page. Tournament placements already work this way — the
   // calculation writes one team row plus a row per roster player — so a
