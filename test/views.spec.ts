@@ -903,30 +903,34 @@ describe("read-side views and aggregations (SQL-driven)", () => {
         expect(Number(row.matches_played)).toBe(1);
       });
 
-      it("5. excludes an ELO-disabled tournament match (no player_elo row is ever generated for it)", async () => {
-        // There is no elo-enabled/rated flag on tournaments or tournament
-        // stages in the schema. In production, generate_player_elo_for_match
-        // simply never produces a player_elo row for a match ELO was
-        // disabled for (e.g. its draft_games.elo_enabled = false, or it
-        // never reached a winner). Eligibility here only ever reads EXISTING
-        // player_elo rows, so "ELO-disabled" is modeled the same way: a real
-        // tournament bracket match that has no player_elo row at all must
-        // contribute nothing, while a sibling bracket match that does have
-        // one contributes normally.
+      it("5. a tournament bracket match with no player_elo row contributes nothing", async () => {
+        // There is no elo-enabled/ranked/rated setting anywhere in the
+        // schema for tournaments or tournament_stages (verified by a full
+        // migration-history audit), and generate_player_elo_for_match has no
+        // tournament-specific skip condition -- a tournament player_elo row
+        // existing is unconditional proof ELO ran for that match, the same
+        // as any other match. So there is nothing to "disable": eligibility
+        // here only ever reads EXISTING player_elo rows, and a bracket match
+        // that simply has no row (e.g. because it hasn't been played, or
+        // because the row was never generated for any of the ordinary
+        // generic reasons -- no winner, non-5stack source) contributes
+        // nothing, without any extra predicate needed.
         const seasonId = await fx.season("2020-01-01", null);
         const tournament = await launchTournament("Wingman");
-        const brackets = await tournamentFx.getBrackets(tournament.stageIds[0]);
-        const [eloEnabled, eloDisabled] = brackets.filter((b) => b.round === 1);
-        expect(eloDisabled.match_id).not.toBeNull();
+        const brackets = (
+          await tournamentFx.getBrackets(tournament.stageIds[0])
+        ).filter((b) => b.round === 1);
+        const [withRow, withoutRow] = brackets;
+        expect(withoutRow.match_id).not.toBeNull();
 
         const [player] = await fx.players(1);
         const regularMatch = await fx.bareMatch();
         await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
-        await insertElo(player, eloEnabled.match_id!, "Wingman", 5300, 200, 1);
-        // Deliberately no insertElo call for eloDisabled.match_id.
+        await insertElo(player, withRow.match_id!, "Wingman", 5300, 200, 1);
+        // Deliberately no insertElo call for withoutRow.match_id.
 
         const [row] = await seasonElo(seasonId);
-        expect(Number(row.value)).toBe(5300); // 5100 + 200, eloDisabled contributes 0
+        expect(Number(row.value)).toBe(5300); // 5100 + 200; withoutRow contributes 0
         expect(Number(row.matches_played)).toBe(2);
       });
 
