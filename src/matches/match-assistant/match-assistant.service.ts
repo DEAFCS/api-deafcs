@@ -400,6 +400,22 @@ export class MatchAssistantService {
     await this.sendServerMatchId(matchId);
   }
 
+  // Temporary admin toggle (Settings -> Matchmaking -> Disable VAC) for
+  // testing on VAC-secured infra without shipping a code change each time.
+  // Meant to be flipped back off for real matches.
+  private async getVacInsecureFlag(): Promise<string> {
+    const { settings_by_pk: setting } = await this.hasura.query({
+      settings_by_pk: {
+        __args: {
+          name: "public.disable_vac",
+        },
+        value: true,
+      },
+    });
+
+    return setting?.value === "true" ? " -insecure" : "";
+  }
+
   public async reserveDedicatedServer(matchId: string) {
     const serverId = await this.isDedicatedServerAvailable(matchId);
     if (!serverId) {
@@ -791,6 +807,7 @@ export class MatchAssistantService {
             });
 
           const showEloRanks = fivestackRanksSetting?.value === "true";
+          const vacInsecureFlag = await this.getVacInsecureFlag();
 
           await batch.createNamespacedJob({
             namespace: this.namespace,
@@ -873,7 +890,7 @@ export class MatchAssistantService {
                           },
                           {
                             name: "EXTRA_GAME_PARAMS",
-                            value: `-maxplayers ${match.max_players_per_lineup * 2 + 3} ${map.workshop_map_id ? `+map de_inferno` : `+map ${map.name}`} +sv_password ${match.password}`,
+                            value: `-maxplayers ${match.max_players_per_lineup * 2 + 3} ${map.workshop_map_id ? `+map de_inferno` : `+map ${map.name}`} +sv_password ${match.password}${vacInsecureFlag}`,
                           },
                           { name: "SERVER_ID", value: server.id },
                           {

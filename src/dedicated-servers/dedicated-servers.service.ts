@@ -47,6 +47,22 @@ export class DedicatedServersService {
     this.apps = kc.makeApiClient(AppsV1Api);
   }
 
+  // Temporary admin toggle (Settings -> Matchmaking -> Disable VAC) for
+  // testing on VAC-secured infra without shipping a code change each time.
+  // Meant to be flipped back off for real matches.
+  private async getVacInsecureFlag(): Promise<string> {
+    const { settings_by_pk: setting } = await this.hasura.query({
+      settings_by_pk: {
+        __args: {
+          name: "public.disable_vac",
+        },
+        value: true,
+      },
+    });
+
+    return setting?.value === "true" ? " -insecure" : "";
+  }
+
   public async setupDedicatedServer(serverId: string): Promise<boolean> {
     this.logger.log(`[${serverId}] assigning dedicated server`);
 
@@ -85,6 +101,7 @@ export class DedicatedServersService {
 
       const gameServerNodeId = server.game_server_node?.id;
       const steamRelay = server.server_region?.steam_relay || false;
+      const vacInsecureFlag = await this.getVacInsecureFlag();
 
       let cpus: string;
       if (server.game_server_node?.supports_cpu_pinning) {
@@ -257,7 +274,7 @@ export class DedicatedServersService {
                       // TODO - number of players
                       {
                         name: "EXTRA_GAME_PARAMS",
-                        value: `-maxplayers ${server.type === "Ranked" ? 16 : server.max_players} +map de_dust2 +game_type ${this.getGameType(server.type)} +game_mode ${this.getGameMode(server.type)} +sv_skirmish_id ${this.getWarGameType(server.type)} ${server.connect_password ? ` +sv_password ${server.connect_password}` : ""}`,
+                        value: `-maxplayers ${server.type === "Ranked" ? 16 : server.max_players} +map de_dust2 +game_type ${this.getGameType(server.type)} +game_mode ${this.getGameMode(server.type)} +sv_skirmish_id ${this.getWarGameType(server.type)} ${server.connect_password ? ` +sv_password ${server.connect_password}` : ""}${vacInsecureFlag}`,
                       },
                       { name: "SERVER_ID", value: server.id },
                       {
