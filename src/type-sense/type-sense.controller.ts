@@ -194,24 +194,23 @@ export class TypeSenseController {
       for (const matchLineupPlayer of match_lineup_players) {
         switch (matchLineupPlayer.lineup.match.status) {
           case "Live":
-            await this.hasura.mutation({
-              update_matches_by_pk: {
-                __args: {
-                  pk_columns: {
-                    id: matchLineupPlayer.lineup.match.id,
-                  },
-                  _set: {
-                    status: "Forfeit",
-                    winning_lineup_id:
-                      matchLineupPlayer.lineup.id ===
-                      matchLineupPlayer.lineup.match.lineup_1_id
-                        ? matchLineupPlayer.lineup.match.lineup_2_id
-                        : matchLineupPlayer.lineup.match.lineup_1_id,
-                  },
-                },
-                __typename: true,
-              },
-            });
+            // Do NOT auto-forfeit here. This fires for every ban (manual
+            // admin action or the automated leaver/no-show system), and a
+            // banned player's teammates may still be actively playing (e.g.
+            // 2v2 down to 1v2) -- unconditionally forfeiting the whole match
+            // to the opposing lineup ended real, in-progress matches within
+            // seconds of a single teammate's ban, before the remaining
+            // player(s) had any chance to keep playing, and incorrectly
+            // triggered a full ELO recalculation for everyone in the match.
+            //
+            // The game server's own TeamEmptyForfeitSystem is the sole
+            // authority for "does this match actually need to forfeit" --
+            // it already handles the real case that matters here (the
+            // player's entire team has zero connected players) with a
+            // proper grace period and roster-aware checks, whether the
+            // player leaves live or gets kicked/banned while connected. If
+            // this lineup is genuinely down to nobody, that system will
+            // forfeit it correctly on its own.
             break;
           case "PickingPlayers":
             await this.hasura.mutation({
