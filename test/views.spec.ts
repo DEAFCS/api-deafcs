@@ -656,11 +656,17 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       });
 
       it("includes tournament changes in the rolling sum when Exclude Tournaments is off, and excludes them when on", async () => {
+        // A single-elimination stage needs at least 4 teams (see
+        // TournamentFixtures.createTournament's stage validation, exercised
+        // the same way in elo.spec.ts's tournament test) — 2 teams isn't a
+        // valid bracket size and the tournament never reaches Live.
         const tournament = await tournamentFx.launch(
-          [{ type: "SingleElimination", order: 1, minTeams: 2, maxTeams: 2 }],
-          2,
+          [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 }],
+          4,
         );
-        const [bracket] = await tournamentFx.getBrackets(tournament.stageIds[0]);
+        const bracket = (
+          await tournamentFx.getBrackets(tournament.stageIds[0])
+        ).find((b) => b.round === 1)!;
         expect(bracket.match_id).not.toBeNull();
 
         const [player] = await fx.players(1);
