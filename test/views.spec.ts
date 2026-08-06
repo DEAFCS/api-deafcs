@@ -686,19 +686,32 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       });
 
       it("leaves named-season ELO Change on the existing final-minus-starting formula", async () => {
+        // This must be unambiguously a COMPLETED season -- both starts_at
+        // and ends_at in the past -- not an open-ended/active one. An
+        // active named season now reports Last Match (the latest row's own
+        // change) for secondary_value; only a completed season keeps the
+        // final-minus-starting formula this test targets.
         const [player] = await fx.players(1);
-        const seasonId = await fx.season("2021-01-01", null);
-        const first = await fx.bareMatch(T(60 * 24 * 3));
-        const second = await fx.bareMatch(T(60 * 24 * 1));
+        const seasonStart = new Date(
+          Date.now() - 60 * 24 * 60 * 60 * 1000,
+        ).toISOString();
+        const seasonEnd = new Date(
+          Date.now() - 30 * 24 * 60 * 60 * 1000,
+        ).toISOString();
+        const seasonId = await fx.season(seasonStart, seasonEnd);
+        // Both matches fall inside [seasonStart, seasonEnd) -- 45 and 35
+        // days ago are both between the 60-day start and the 30-day end.
+        const first = await fx.bareMatch(T(60 * 24 * 45));
+        const second = await fx.bareMatch(T(60 * 24 * 35));
 
-        await insertElo(player, first.matchId, "Competitive", 5200, 200, 3, seasonId);
+        await insertElo(player, first.matchId, "Competitive", 5200, 200, 45, seasonId);
         await insertElo(
           player,
           second.matchId,
           "Competitive",
           5150,
           -50,
-          1,
+          35,
           seasonId,
         );
 
@@ -1249,7 +1262,7 @@ describe("read-side views and aggregations (SQL-driven)", () => {
         await insertEloAt(player, brackets[1].match_id!, "Wingman", 9999, 999, end);
 
         const [row] = await seasonElo(seasonId);
-        expect(Number(row.value)).toBe(5250); // 5100 + 50, not +999
+        expect(Number(row.value)).toBe(5150); // 5100 + 50, not +999
         expect(Number(row.matches_played)).toBe(2);
       });
     });
