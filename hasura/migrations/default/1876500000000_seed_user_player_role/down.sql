@@ -1,0 +1,6 @@
+-- Intentional no-op. By the time this migration could be rolled back,
+-- 1877000000000_seed_system_player's system player row (and potentially
+-- other players) may reference role = 'user'; deleting the e_player_roles
+-- row here would violate players_role_fkey for any such row (or silently
+-- orphan behavior if the FK were ever weakened, which it must not be).
+-- There is nothing else this migration owns to revert.
