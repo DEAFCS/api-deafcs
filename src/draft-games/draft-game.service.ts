@@ -14,12 +14,14 @@ import {
 } from "generated";
 import { HasuraService } from "src/hasura/hasura.service";
 import { CacheService } from "src/cache/cache.service";
+import { PostgresService } from "src/postgres/postgres.service";
 import { ExpectedPlayers } from "src/discord-bot/enums/ExpectedPlayers";
 import { isRoleAbove } from "src/utilities/isRoleAbove";
 import { DraftGame } from "./types/DraftGame";
 import { DraftGameError } from "./types/DraftGameError";
 import { DraftGameQueues } from "./enums/DraftGameQueues";
 import { DraftService } from "./draft.service";
+import { SYSTEM_STEAM_ID } from "../matches/disconnect-budget/disconnect-budget.service";
 
 export interface CreateDraftGameSettings {
   type: e_match_types_enum;
@@ -69,7 +71,32 @@ export class DraftGameService {
     @Inject(forwardRef(() => DraftService))
     private readonly draftService: DraftService,
     @InjectQueue(DraftGameQueues.DraftGames) private queue: Queue,
+    private readonly postgres: PostgresService,
   ) {}
+
+  // "Sanction" (admin-issued) bars draft eligibility -- "Abandoned"
+  // (system-issued leaver/no-show ban, see SYSTEM_STEAM_ID) only bars
+  // matchmaking, so it's deliberately excluded here.
+  private async getAdminSanctionedSteamIds(
+    steamIds: string[],
+  ): Promise<Set<string>> {
+    if (steamIds.length === 0) {
+      return new Set();
+    }
+
+    const rows = await this.postgres.query<Array<{ steam_id: string }>>(
+      `SELECT DISTINCT player_steam_id::text AS steam_id
+         FROM public.player_sanctions
+        WHERE type = 'ban'
+          AND deleted_at IS NULL
+          AND (remove_sanction_date IS NULL OR remove_sanction_date > now())
+          AND sanctioned_by_steam_id <> $1
+          AND player_steam_id = ANY($2::bigint[])`,
+      [SYSTEM_STEAM_ID, steamIds],
+    );
+
+    return new Set(rows.map((row) => row.steam_id));
+  }
 
   public static lockKey(draftGameId: string): string {
     return `draft-game:${draftGameId}`;
@@ -628,16 +655,18 @@ export class DraftGameService {
       players: {
         __args: { where: { steam_id: { _in: steamIds } } },
         steam_id: true,
-        is_banned: true,
         matchmaking_cooldown: true,
         is_in_another_match: true,
         elo: true,
       },
     });
 
+    const adminSanctionedSteamIds =
+      await this.getAdminSanctionedSteamIds(steamIds);
+
     for (const player of players) {
       const eligible =
-        !player.is_banned &&
+        !adminSanctionedSteamIds.has(player.steam_id) &&
         !player.matchmaking_cooldown &&
         !player.is_in_another_match;
 
@@ -1509,7 +1538,6 @@ export class DraftGameService {
           steam_id: steamId,
         },
         name: true,
-        is_banned: true,
         matchmaking_cooldown: true,
         is_in_another_match: true,
       },
@@ -1527,7 +1555,10 @@ export class DraftGameService {
       throw new DraftGameError(`${player.name} is in matchmaking cooldown`);
     }
 
-    if (player.is_banned) {
+    const adminSanctionedSteamIds = await this.getAdminSanctionedSteamIds([
+      steamId,
+    ]);
+    if (adminSanctionedSteamIds.has(steamId)) {
       throw new DraftGameError(`${player.name} is banned`);
     }
   }

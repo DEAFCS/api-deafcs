@@ -21,6 +21,7 @@ import { SteamBansService } from "src/steam-match-history/steam-bans.service";
 import { RedisManagerService } from "src/redis/redis-manager/redis-manager.service";
 import { PlayerReindexService } from "./player-reindex.service";
 import { PlayerEloRecomputeService } from "../matches/player-elo-recompute.service";
+import { SYSTEM_STEAM_ID } from "../matches/disconnect-budget/disconnect-budget.service";
 
 @Controller("type-sense")
 export class TypeSenseController {
@@ -186,12 +187,25 @@ export class TypeSenseController {
               status: true,
               lineup_1_id: true,
               lineup_2_id: true,
+              is_tournament_match: true,
             },
           },
         },
       });
 
+      // "Abandoned" (system-issued, leaver/no-show) vs "Sanction"
+      // (admin-issued) -- only a real admin sanction is allowed to touch a
+      // tournament match. An automated leaver ban bars someone from
+      // matchmaking, never from tournament, so leave any tournament match
+      // they're in completely alone here.
+      const isSystemIssuedBan =
+        `${data.new.sanctioned_by_steam_id}` === SYSTEM_STEAM_ID;
+
       for (const matchLineupPlayer of match_lineup_players) {
+        if (isSystemIssuedBan && matchLineupPlayer.lineup.match.is_tournament_match) {
+          continue;
+        }
+
         switch (matchLineupPlayer.lineup.match.status) {
           case "Live":
             // Do NOT auto-forfeit here. This fires for every ban (manual
