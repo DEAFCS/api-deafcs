@@ -47,6 +47,7 @@ import { isRoleAbove } from "../utilities/isRoleAbove";
 import { DemoMetadataService } from "../demos/demo-metadata.service";
 import { ClipsService } from "./clips/clips.service";
 import { ClipSpec } from "./clips/types/ClipSpec";
+import { SYSTEM_STEAM_ID } from "./disconnect-budget/disconnect-budget.service";
 
 @Controller("matches")
 export class MatchesController {
@@ -100,6 +101,34 @@ export class MatchesController {
     private readonly matchImport: MatchImportService,
   ) {
     this.appConfig = this.configService.get<AppConfig>("app");
+  }
+
+  // "Sanction" (admin-issued) bars a player from a tournament match --
+  // "Abandoned" (automatic leaver/no-show ban, see SYSTEM_STEAM_ID) only
+  // bars matchmaking. Used by current-match/:serverId to override the
+  // blanket is_banned computed field (which doesn't distinguish the two)
+  // for tournament matches specifically before it's sent to the game
+  // server, which otherwise kicks anyone with is_banned=true on connect
+  // regardless of match type.
+  private async getAdminSanctionedSteamIds(
+    steamIds: string[],
+  ): Promise<Set<string>> {
+    if (steamIds.length === 0) {
+      return new Set();
+    }
+
+    const rows = await this.postgres.query<Array<{ steam_id: string }>>(
+      `SELECT DISTINCT player_steam_id::text AS steam_id
+         FROM public.player_sanctions
+        WHERE type = 'ban'
+          AND deleted_at IS NULL
+          AND (remove_sanction_date IS NULL OR remove_sanction_date > now())
+          AND sanctioned_by_steam_id <> $1
+          AND player_steam_id = ANY($2::bigint[])`,
+      [SYSTEM_STEAM_ID, steamIds],
+    );
+
+    return new Set(rows.map((row) => row.steam_id));
   }
 
   @Get("stream-viewers")
@@ -384,6 +413,30 @@ export class MatchesController {
       return Number.isFinite(parsed) ? parsed : 5000;
     };
 
+    // Tournament matches only care about a real admin sanction, not an
+    // automatic leaver/no-show ban -- override the blanket is_banned
+    // computed field (which can't tell the two apart) before it reaches
+    // the game server, which otherwise kicks anyone with is_banned=true
+    // the moment they try to connect, regardless of match type.
+    const allRosterSteamIds = [
+      ...match.lineup_1.lineup_players,
+      ...match.lineup_2.lineup_players,
+    ]
+      .map((player) => player.steam_id)
+      .filter((steamId): steamId is string => !!steamId);
+
+    const adminSanctionedSteamIds = match.is_tournament_match
+      ? await this.getAdminSanctionedSteamIds(allRosterSteamIds)
+      : null;
+
+    const isBanned = (player: {
+      steam_id?: string | null;
+      player?: { is_banned?: boolean | null };
+    }): boolean =>
+      adminSanctionedSteamIds
+        ? adminSanctionedSteamIds.has(player.steam_id ?? "")
+        : player.player?.is_banned || false;
+
     const lineup1TeamId = match.lineup_1.team?.id;
     match.lineup_1.tag =
       lineup1TournamentTag || match.lineup_1.team?.short_name;
@@ -393,7 +446,7 @@ export class MatchesController {
         ...player,
         name: player.player?.name || player.placeholder_name,
         role: player.player?.role || "user",
-        is_banned: player.player?.is_banned || false,
+        is_banned: isBanned(player),
         is_gagged: player.player?.is_gagged || false,
         is_muted: player.player?.is_muted || false,
         elo: getPlayerElo(player.player?.elo as Record<string, unknown>),
@@ -417,7 +470,7 @@ export class MatchesController {
         ...player,
         name: player.player?.name || player.placeholder_name,
         role: player.player?.role || "user",
-        is_banned: player.player?.is_banned || false,
+        is_banned: isBanned(player),
         is_gagged: player.player?.is_gagged || false,
         is_muted: player.player?.is_muted || false,
         elo: getPlayerElo(player.player?.elo as Record<string, unknown>),
