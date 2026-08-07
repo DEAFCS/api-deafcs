@@ -219,8 +219,13 @@ describe("read-side views and aggregations (SQL-driven)", () => {
         [a],
       );
       expect(profile.elo.duel).toBeGreaterThan(5000);
-      // Unplayed types stay null rather than defaulting.
-      expect(profile.elo).toMatchObject({ competitive: null, wingman: null });
+      // Unplayed types default to the 5000 baseline (get_player_elo_by_type's
+      // COALESCE(elo_value, 5000)) rather than staying null -- intentional,
+      // documented production behavior (a null/blank rating was read as 0 by
+      // matchmaking team balancing, making a brand-new player look like the
+      // weakest possible player instead of an average one). This assertion
+      // previously expected null, which was stale relative to that fix.
+      expect(profile.elo).toMatchObject({ competitive: 5000, wingman: 5000 });
     });
 
     it("profile aggregation switches to season + tournament tracks (seasons on)", async () => {
@@ -658,11 +663,14 @@ describe("read-side views and aggregations (SQL-driven)", () => {
         expect(Number(duelRow.secondary_value)).toBe(40);
       });
 
-      it("includes tournament changes in the rolling sum when Exclude Tournaments is off, and excludes them when on", async () => {
-        // A single-elimination stage needs at least 4 teams (see
-        // TournamentFixtures.createTournament's stage validation, exercised
-        // the same way in elo.spec.ts's tournament test) — 2 teams isn't a
-        // valid bracket size and the tournament never reaches Live.
+      it("includes tournament-sourced changes in the rolling sum regardless of the Exclude Tournaments toggle", async () => {
+        // Canonical ELO: match source is metadata, not a separate ladder, so
+        // a tournament-linked player_elo row contributes to the rolling sum
+        // the same as a regular one, and the (now vestigial-for-ELO)
+        // Exclude Tournaments flag makes no difference here. A single-
+        // elimination stage needs at least 4 teams (see TournamentFixtures.
+        // createTournament's stage validation, exercised the same way in
+        // elo.spec.ts's tournament tests).
         const tournament = await tournamentFx.launch(
           [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 }],
           4,
@@ -681,11 +689,9 @@ describe("read-side views and aggregations (SQL-driven)", () => {
         const [excludedRow] = await eloLeaderboard(7, "Wingman", "current", true);
 
         expect(Number(includedRow.secondary_value)).toBe(150);
-        expect(Number(excludedRow.secondary_value)).toBe(50);
-        // Tournament rows carry no season_id, so the current-value baseline
-        // in the exclude branch is also tournament-adjusted; only the
-        // rolling-sum column is under test here.
-        expect(Number(excludedRow.value)).toBe(5050);
+        expect(Number(includedRow.value)).toBe(5150);
+        expect(Number(excludedRow.secondary_value)).toBe(150);
+        expect(Number(excludedRow.value)).toBe(5150);
       });
 
       it("leaves named-season ELO Change on the existing final-minus-starting formula", async () => {
@@ -778,14 +784,18 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       });
     });
 
-    // Named seasons only ever included player_elo rows with season_id equal
-    // to the season's UUID. Tournament matches always write season_id = NULL
-    // (season-independent by design), so a tournament played during a named
-    // season was invisible to that season's ELO/rank/matches/win streak.
-    // These tests cover the fix, scoped to an ACTIVE named season only --
-    // a completed season keeps its old final-minus-starting secondary_value
-    // and regular-only value untouched (also covered below).
-    describe("active-season tournament ELO", () => {
+    // CANONICAL ELO: there is exactly one ELO stream per player + mode +
+    // configured ELO season, fed by every eligible source (matchmaking,
+    // tournament, league) alike. A tournament-linked player_elo row is no
+    // longer written with season_id = NULL / read as a separate "tournament
+    // track" -- it carries the same season_id a regular match would, and is
+    // indistinguishable to every read below. The Exclude Tournaments flag
+    // therefore no longer changes any ELO leaderboard value: value,
+    // secondary_value, tertiary_value, and matches_played are always
+    // computed from the full canonical stream. Source filtering remains
+    // meaningful (and unchanged) for the OTHER leaderboard categories
+    // (best_kdr, best_win_rate, etc.) tested further below.
+    describe("canonical ELO (source-unified, Exclude Tournaments is a no-op for ELO)", () => {
       const insertEloAt = async (
         steamId: string,
         matchId: string,
@@ -813,9 +823,6 @@ describe("read-side views and aggregations (SQL-driven)", () => {
           [seasonId, type, excludeTournaments],
         );
 
-      // A single-elimination stage needs >= 4 teams (see TournamentFixtures.
-      // createTournament's stage validation; same pattern used throughout
-      // elo.spec.ts and the rolling-window tournament test above).
       const launchTournament = (type: "Competitive" | "Wingman" | "Duel" = "Wingman") =>
         tournamentFx.launch(
           [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 }],
@@ -823,39 +830,28 @@ describe("read-side views and aggregations (SQL-driven)", () => {
           type,
         );
 
-      const finishedMatch = async (
-        type: "Competitive" | "Wingman" | "Duel",
-        winner: string,
-        loser: string,
-        endedAt: string,
-      ) => {
-        const match = await fx.match({ type });
-        await fx.lineupPlayer(match.lineup_1_id, winner);
-        await fx.lineupPlayer(match.lineup_2_id, loser);
-        await postgres.query(
-          `UPDATE matches
-             SET winning_lineup_id = lineup_1_id, status = 'Finished', ended_at = $2
-           WHERE id = $1`,
-          [match.id, endedAt],
-        );
-        return match;
-      };
-
-      it("1. includes regular season matches for an active season", async () => {
+      it("1. an active named season's Current/Last-Match reads a tournament-linked row exactly like a regular one", async () => {
         const seasonId = await fx.season("2020-01-01", null); // open-ended => active
+        const tournament = await launchTournament("Wingman");
+        const bracket = (
+          await tournamentFx.getBrackets(tournament.stageIds[0])
+        ).find((b) => b.round === 1)!;
+
         const [player] = await fx.players(1);
-        const m1 = await fx.bareMatch();
-        const m2 = await fx.bareMatch();
-        await insertElo(player, m1.matchId, "Wingman", 5100, 100, 3, seasonId);
-        await insertElo(player, m2.matchId, "Wingman", 5250, 150, 1, seasonId);
+        const regularMatch = await fx.bareMatch();
+        // Both rows carry the SAME real season_id -- this is what the fixed
+        // write path (generate_player_elo_for_match) now produces for a
+        // tournament match played during an active season.
+        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
+        await insertElo(player, bracket.match_id!, "Wingman", 5350, 250, 1, seasonId);
 
         const [row] = await seasonElo(seasonId);
-        expect(Number(row.value)).toBe(5250);
-        expect(Number(row.secondary_value)).toBe(150); // Last Match
+        expect(Number(row.value)).toBe(5350); // latest row's own current, no adjustment math
+        expect(Number(row.secondary_value)).toBe(250); // Last Match
         expect(Number(row.matches_played)).toBe(2);
       });
 
-      it("2. includes an eligible tournament match played inside the active season's dates", async () => {
+      it("2. Exclude Tournaments does not change the active season's ELO value, Last Match, or matches_played", async () => {
         const seasonId = await fx.season("2020-01-01", null);
         const tournament = await launchTournament("Wingman");
         const bracket = (
@@ -865,148 +861,20 @@ describe("read-side views and aggregations (SQL-driven)", () => {
         const [player] = await fx.players(1);
         const regularMatch = await fx.bareMatch();
         await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
-        // Tournament row: season_id NULL, global current (5900) must NOT be
-        // used as the season's ELO.
-        await insertElo(player, bracket.match_id!, "Wingman", 5900, 250, 1);
+        await insertElo(player, bracket.match_id!, "Wingman", 5350, 250, 1, seasonId);
 
-        const [row] = await seasonElo(seasonId);
-        expect(Number(row.value)).toBe(5350); // 5100 (regular current) + 250 (tourney sum)
-        expect(Number(row.secondary_value)).toBe(250); // Last Match: tournament is the latest row
-        expect(Number(row.matches_played)).toBe(2);
+        const [includedRow] = await seasonElo(seasonId, "Wingman", false);
+        const [excludedRow] = await seasonElo(seasonId, "Wingman", true);
+        expect(Number(includedRow.value)).toBe(Number(excludedRow.value));
+        expect(Number(includedRow.secondary_value)).toBe(
+          Number(excludedRow.secondary_value),
+        );
+        expect(Number(includedRow.matches_played)).toBe(
+          Number(excludedRow.matches_played),
+        );
       });
 
-      it("3. excludes a tournament match that finished before the season started", async () => {
-        const seasonStart = new Date(
-          Date.now() - 5 * 24 * 60 * 60 * 1000,
-        ).toISOString();
-        const seasonId = await fx.season(seasonStart, null);
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-
-        const [player] = await fx.players(1);
-        const regularMatch = await fx.bareMatch();
-        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 2, seasonId);
-        const beforeSeason = new Date(
-          Date.now() - 10 * 24 * 60 * 60 * 1000,
-        ).toISOString();
-        await insertEloAt(player, bracket.match_id!, "Wingman", 9999, 500, beforeSeason);
-
-        const [row] = await seasonElo(seasonId);
-        expect(Number(row.value)).toBe(5100);
-        expect(Number(row.secondary_value)).toBe(100);
-        expect(Number(row.matches_played)).toBe(1);
-      });
-
-      it("4. excludes a tournament match at or after the season's end boundary", async () => {
-        const now = Date.now();
-        const start = new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString();
-        const end = new Date(now + 2 * 24 * 60 * 60 * 1000).toISOString(); // future => still active
-        const seasonId = await fx.season(start, end);
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-
-        const [player] = await fx.players(1);
-        const regularMatch = await fx.bareMatch();
-        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 5, seasonId);
-        // Exactly at the end boundary: [_from, _to) is half-open, so this
-        // must be excluded.
-        await insertEloAt(player, bracket.match_id!, "Wingman", 9999, 500, end);
-
-        const [row] = await seasonElo(seasonId);
-        expect(Number(row.value)).toBe(5100);
-        expect(Number(row.matches_played)).toBe(1);
-      });
-
-      it("5. a tournament bracket match with no player_elo row contributes nothing", async () => {
-        // There is no elo-enabled/ranked/rated setting anywhere in the
-        // schema for tournaments or tournament_stages (verified by a full
-        // migration-history audit), and generate_player_elo_for_match has no
-        // tournament-specific skip condition -- a tournament player_elo row
-        // existing is unconditional proof ELO ran for that match, the same
-        // as any other match. So there is nothing to "disable": eligibility
-        // here only ever reads EXISTING player_elo rows, and a bracket match
-        // that simply has no row (e.g. because it hasn't been played, or
-        // because the row was never generated for any of the ordinary
-        // generic reasons -- no winner, non-5stack source) contributes
-        // nothing, without any extra predicate needed.
-        const seasonId = await fx.season("2020-01-01", null);
-        const tournament = await launchTournament("Wingman");
-        const brackets = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).filter((b) => b.round === 1);
-        const [withRow, withoutRow] = brackets;
-        expect(withoutRow.match_id).not.toBeNull();
-
-        const [player] = await fx.players(1);
-        const regularMatch = await fx.bareMatch();
-        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
-        await insertElo(player, withRow.match_id!, "Wingman", 5300, 200, 1);
-        // Deliberately no insertElo call for withoutRow.match_id.
-
-        const [row] = await seasonElo(seasonId);
-        expect(Number(row.value)).toBe(5300); // 5100 + 200; withoutRow contributes 0
-        expect(Number(row.matches_played)).toBe(2);
-      });
-
-      it("6. excludes an unfinished tournament match (no player_elo row exists for it either)", async () => {
-        const seasonId = await fx.season("2020-01-01", null);
-        const tournament = await launchTournament("Wingman");
-        const brackets = await tournamentFx.getBrackets(tournament.stageIds[0]);
-        // The final (round 2) hasn't been played -- scheduled, not finished,
-        // no winner -- so generate_player_elo_for_match would never produce
-        // a row for it (winning_lineup_id IS NULL guard). No row is inserted
-        // for it here either.
-        const unfinished = brackets.find((b) => b.round === 2);
-        expect(unfinished).toBeDefined();
-
-        const [player] = await fx.players(1);
-        const regularMatch = await fx.bareMatch();
-        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
-
-        const [row] = await seasonElo(seasonId);
-        expect(Number(row.value)).toBe(5100);
-        expect(Number(row.matches_played)).toBe(1);
-      });
-
-      it("7. Exclude Tournaments off includes the tournament change", async () => {
-        const seasonId = await fx.season("2020-01-01", null);
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-
-        const [player] = await fx.players(1);
-        const regularMatch = await fx.bareMatch();
-        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
-        await insertElo(player, bracket.match_id!, "Wingman", 5900, 250, 1);
-
-        const [row] = await seasonElo(seasonId, "Wingman", false);
-        expect(Number(row.value)).toBe(5350);
-      });
-
-      it("8. Exclude Tournaments on excludes the tournament change", async () => {
-        const seasonId = await fx.season("2020-01-01", null);
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-
-        const [player] = await fx.players(1);
-        const regularMatch = await fx.bareMatch();
-        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
-        await insertElo(player, bracket.match_id!, "Wingman", 5900, 250, 1);
-
-        const [row] = await seasonElo(seasonId, "Wingman", true);
-        expect(Number(row.value)).toBe(5100);
-        expect(Number(row.secondary_value)).toBe(100); // Last Match: regular-only
-        expect(Number(row.matches_played)).toBe(1);
-      });
-
-      it("9. rank changes consistently when tournament ELO is included", async () => {
+      it("3. rank is identical whether or not Exclude Tournaments is set", async () => {
         const seasonId = await fx.season("2020-01-01", null);
         const tournament = await launchTournament("Wingman");
         const bracket = (
@@ -1018,294 +886,21 @@ describe("read-side views and aggregations (SQL-driven)", () => {
         const chaserMatch = await fx.bareMatch();
         await insertElo(leader, leaderMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
         await insertElo(chaser, chaserMatch.matchId, "Wingman", 5150, 150, 3, seasonId);
-        // Leader's tournament win pushes them above chaser only when
-        // tournaments are included.
-        await insertElo(leader, bracket.match_id!, "Wingman", 9999, 100, 1);
+        await insertElo(leader, bracket.match_id!, "Wingman", 5300, 200, 1, seasonId);
 
-        const [includedRank] = await postgres.query<
-          Array<{ rank: number }>
-        >(
+        const [includedRank] = await postgres.query<Array<{ rank: number }>>(
           `SELECT * FROM get_player_leaderboard_rank('elo', 0, $1, 'Wingman', false, $2, 'current')`,
           [leader, seasonId],
         );
-        const [excludedRank] = await postgres.query<
-          Array<{ rank: number }>
-        >(
+        const [excludedRank] = await postgres.query<Array<{ rank: number }>>(
           `SELECT * FROM get_player_leaderboard_rank('elo', 0, $1, 'Wingman', true, $2, 'current')`,
           [leader, seasonId],
         );
         expect(Number(includedRank.rank)).toBe(1);
-        expect(Number(excludedRank.rank)).toBe(2);
+        expect(Number(excludedRank.rank)).toBe(1);
       });
 
-      it("10. matches_played follows the Exclude Tournaments toggle", async () => {
-        const seasonId = await fx.season("2020-01-01", null);
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-
-        const [player] = await fx.players(1);
-        const regularMatch = await fx.bareMatch();
-        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
-        await insertElo(player, bracket.match_id!, "Wingman", 5900, 250, 1);
-
-        const [includedRow] = await seasonElo(seasonId, "Wingman", false);
-        const [excludedRow] = await seasonElo(seasonId, "Wingman", true);
-        expect(Number(includedRow.matches_played)).toBe(2);
-        expect(Number(excludedRow.matches_played)).toBe(1);
-      });
-
-      it("11. win streak follows the Exclude Tournaments toggle", async () => {
-        // win_streak was audited and needed no SQL change: it computes from
-        // matches directly (there is no season_id column on matches), and
-        // already respects both the season's date window and the
-        // Exclude Tournaments toggle (via a tournament_brackets NOT EXISTS
-        // clause present only in that branch). This test confirms that
-        // pre-existing behavior still holds for an active season.
-        const seasonId = await fx.season("2020-01-01", null);
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-        await tournamentFx.winMatch(bracket.match_id!);
-        await postgres.query(
-          "UPDATE matches SET status = 'Finished' WHERE id = $1",
-          [bracket.match_id],
-        );
-        const [winner] = await postgres.query<Array<{ steam_id: string }>>(
-          `SELECT mlp.steam_id
-             FROM matches m
-             JOIN match_lineup_players mlp ON mlp.match_lineup_id = m.winning_lineup_id
-            WHERE m.id = $1
-            LIMIT 1`,
-          [bracket.match_id],
-        );
-
-        const [loser] = await fx.players(1);
-        const regularWin = await finishedMatch(
-          "Wingman",
-          winner.steam_id,
-          loser,
-          new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-        );
-        await insertElo(winner.steam_id, regularWin.id, "Wingman", 5200, 100, 1, seasonId);
-        await insertElo(winner.steam_id, bracket.match_id!, "Wingman", 9999, 100, 2);
-
-        const [includedRow] = await seasonElo(seasonId, "Wingman", false);
-        const [excludedRow] = await seasonElo(seasonId, "Wingman", true);
-        expect(Number(includedRow.tertiary_value)).toBe(2); // tournament win + regular win
-        expect(Number(excludedRow.tertiary_value)).toBe(1); // regular win only
-      });
-
-      it("12. Last Match off may return the latest tournament delta", async () => {
-        const seasonId = await fx.season("2020-01-01", null);
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-
-        const [player] = await fx.players(1);
-        const regularMatch = await fx.bareMatch();
-        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
-        await insertElo(player, bracket.match_id!, "Wingman", 9999, 275, 1);
-
-        const [row] = await seasonElo(seasonId, "Wingman", false);
-        expect(Number(row.secondary_value)).toBe(275);
-      });
-
-      it("13. Last Match on returns the latest regular delta even if a tournament match is more recent", async () => {
-        const seasonId = await fx.season("2020-01-01", null);
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-
-        const [player] = await fx.players(1);
-        const regularMatch = await fx.bareMatch();
-        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
-        await insertElo(player, bracket.match_id!, "Wingman", 9999, 275, 1); // more recent than regular
-
-        const [row] = await seasonElo(seasonId, "Wingman", true);
-        expect(Number(row.secondary_value)).toBe(100);
-      });
-
-      it("14. leaves a completed season's ELO Change on the final-minus-starting formula, tournaments ignored either way", async () => {
-        const start = new Date(
-          Date.now() - 30 * 24 * 60 * 60 * 1000,
-        ).toISOString();
-        const end = new Date(
-          Date.now() - 1 * 24 * 60 * 60 * 1000,
-        ).toISOString(); // in the past => completed, not active
-        const seasonId = await fx.season(start, end);
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-
-        const [player] = await fx.players(1);
-        const first = await fx.bareMatch();
-        const second = await fx.bareMatch();
-        await insertElo(player, first.matchId, "Wingman", 5200, 200, 20, seasonId);
-        await insertElo(player, second.matchId, "Wingman", 5150, -50, 10, seasonId);
-        // Inside the season's [start, end) window, but must still be ignored:
-        // this season is completed, not active.
-        const insideWindow = new Date(
-          Date.now() - 15 * 24 * 60 * 60 * 1000,
-        ).toISOString();
-        await insertEloAt(player, bracket.match_id!, "Wingman", 9999, 900, insideWindow);
-
-        const [row] = await seasonElo(seasonId);
-        // Final (5150) minus starting-of-season (5200 - 200 = 5000) = 150.
-        expect(Number(row.value)).toBe(5150);
-        expect(Number(row.secondary_value)).toBe(150);
-      });
-
-      it("15. leaves rolling 7/30-day SUM(change) unaffected", async () => {
-        const [player] = await fx.players(1);
-        const m1 = await fx.bareMatch(T(60 * 24 * 5));
-        const m2 = await fx.bareMatch(T(60 * 24 * 1));
-        await insertElo(player, m1.matchId, "Wingman", 5100, 100, 5);
-        await insertElo(player, m2.matchId, "Wingman", 5160, 60, 1);
-
-        const [row] = await eloLeaderboard(7, "Wingman");
-        expect(Number(row.secondary_value)).toBe(160);
-      });
-
-      it("16. leaves Peak's value unaffected by active-season tournament inclusion", async () => {
-        const [player] = await fx.players(1);
-        const match = await fx.bareMatch();
-        await insertElo(player, match.matchId, "Wingman", 5400, 400, 2);
-
-        const [row] = await eloLeaderboard(0, "Wingman", "peak");
-        expect(Number(row.value)).toBe(5400);
-        // secondary_value under Peak is All Time's Current ELO; no season
-        // exists in this test, so it's the 5000 default.
-        expect(Number(row.secondary_value)).toBe(5000);
-      });
-
-      it("17. keeps tournament eligibility isolated per match type", async () => {
-        const seasonId = await fx.season("2020-01-01", null);
-        const tournament = await launchTournament("Duel");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-
-        const [player] = await fx.players(1);
-        const regularMatch = await fx.bareMatch();
-        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
-        // A Duel tournament change must not leak into the Wingman season row.
-        await insertElo(player, bracket.match_id!, "Duel", 9999, 500, 1);
-
-        const [row] = await seasonElo(seasonId, "Wingman");
-        expect(Number(row.value)).toBe(5100);
-        expect(Number(row.matches_played)).toBe(1);
-      });
-
-      it("18. does not double-count across several regular and tournament matches", async () => {
-        const seasonId = await fx.season("2020-01-01", null);
-        const tournament = await launchTournament("Wingman");
-        const brackets = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).filter((b) => b.round === 1);
-
-        const [player] = await fx.players(1);
-        const regularA = await fx.bareMatch();
-        const regularB = await fx.bareMatch();
-        await insertElo(player, regularA.matchId, "Wingman", 5100, 100, 5, seasonId);
-        await insertElo(player, regularB.matchId, "Wingman", 5060, -40, 4, seasonId);
-        await insertElo(player, brackets[0].match_id!, "Wingman", 9999, 80, 3);
-        await insertElo(player, brackets[1].match_id!, "Wingman", 9999, 30, 2);
-
-        const [row] = await seasonElo(seasonId);
-        // 5060 (regular current) + 80 + 30 = 5170; four rows, not eight.
-        expect(Number(row.value)).toBe(5170);
-        expect(Number(row.matches_played)).toBe(4);
-      });
-
-      it("19. surfaces a player whose only activity this season was a tournament match, anchored at the 5000 baseline", async () => {
-        const seasonId = await fx.season("2020-01-01", null);
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-
-        const [player] = await fx.players(1);
-        await insertElo(player, bracket.match_id!, "Wingman", 9999, 300, 1);
-
-        const [row] = await seasonElo(seasonId);
-        expect(row).toBeDefined();
-        expect(Number(row.value)).toBe(5300); // 5000 baseline + 300
-        expect(Number(row.secondary_value)).toBe(300);
-        expect(Number(row.matches_played)).toBe(1);
-
-        // Under Exclude Tournaments, this player has no regular-season row
-        // at all, so they don't appear.
-        const excludedRows = await seasonElo(seasonId, "Wingman", true);
-        expect(
-          excludedRows.find((r) => r.player_steam_id === player),
-        ).toBeUndefined();
-      });
-
-      it("20. respects exact timestamp boundaries: inclusive start, exclusive end", async () => {
-        const start = new Date(
-          Date.now() - 6 * 24 * 60 * 60 * 1000,
-        ).toISOString();
-        const end = new Date(
-          Date.now() + 1 * 24 * 60 * 60 * 1000,
-        ).toISOString();
-        const seasonId = await fx.season(start, end);
-        const tournament = await launchTournament("Wingman");
-        const brackets = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).filter((b) => b.round === 1);
-
-        const [player] = await fx.players(1);
-        const regularMatch = await fx.bareMatch();
-        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
-        // Exactly at start: >= is inclusive, must count.
-        await insertEloAt(player, brackets[0].match_id!, "Wingman", 9999, 50, start);
-        // Exactly at end: < is exclusive, must not count.
-        await insertEloAt(player, brackets[1].match_id!, "Wingman", 9999, 999, end);
-
-        const [row] = await seasonElo(seasonId);
-        expect(Number(row.value)).toBe(5150); // 5100 + 50, not +999
-        expect(Number(row.matches_played)).toBe(2);
-      });
-    });
-
-    // The All Time (Peak) ELO view's final three columns: a true
-    // non-tournament-reconstructed Peak ELO (Exclude Tournaments on), the
-    // active named season's Current ELO, and the player's all-time Record
-    // Win Streak -- replacing the previous placeholder 0 (secondary_value)
-    // and current-streak value (tertiary_value) Peak returned.
-    describe("all-time ELO leaderboard", () => {
-      const finishedMatch = async (
-        type: "Competitive" | "Wingman" | "Duel",
-        winner: string,
-        loser: string,
-        endedAt: string,
-      ) => {
-        const match = await fx.match({ type });
-        await fx.lineupPlayer(match.lineup_1_id, winner);
-        await fx.lineupPlayer(match.lineup_2_id, loser);
-        await postgres.query(
-          `UPDATE matches
-             SET winning_lineup_id = lineup_1_id, status = 'Finished', ended_at = $2
-           WHERE id = $1`,
-          [match.id, endedAt],
-        );
-        return match;
-      };
-
-      const launchTournament = (type: "Competitive" | "Wingman" | "Duel" = "Wingman") =>
-        tournamentFx.launch(
-          [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 }],
-          4,
-          type,
-        );
-
-      it("1. Peak ELO includes a tournament-driven high when the toggle is off", async () => {
+      it("4. Peak ELO reflects a tournament-driven high regardless of the toggle", async () => {
         const tournament = await launchTournament("Wingman");
         const bracket = (
           await tournamentFx.getBrackets(tournament.stageIds[0])
@@ -1313,215 +908,41 @@ describe("read-side views and aggregations (SQL-driven)", () => {
         const [player] = await fx.players(1);
         const regularMatch = await fx.bareMatch(T(60 * 24 * 2));
         await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 2);
-        // Tournament row pushes the player's current well above their
-        // regular-only peak.
         await insertElo(player, bracket.match_id!, "Wingman", 6500, 1400, 1);
 
-        const [row] = await eloLeaderboard(0, "Wingman", "peak", false);
-        expect(Number(row.value)).toBe(6500);
+        const [included] = await eloLeaderboard(0, "Wingman", "peak", false);
+        const [excluded] = await eloLeaderboard(0, "Wingman", "peak", true);
+        expect(Number(included.value)).toBe(6500);
+        expect(Number(excluded.value)).toBe(6500);
       });
 
-      it("2. Peak ELO with tournaments excluded reconstructs the true non-tournament trajectory", async () => {
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-        const [player] = await fx.players(1);
-        const m1 = await fx.bareMatch(T(60 * 24 * 3));
-        const m2 = await fx.bareMatch(T(60 * 24 * 1));
-        // Non-tournament trajectory: 5000 -> 5150 -> 5300 (true peak 5300).
-        await insertElo(player, m1.matchId, "Wingman", 5150, 150, 3);
-        await insertElo(player, m2.matchId, "Wingman", 5300, 150, 1);
-        // Tournament row (chronologically between them) inflates current far
-        // past the true peak; it must be ignored entirely, not netted out.
-        await insertElo(player, bracket.match_id!, "Wingman", 9999, 4699, 2);
+      it("5. win/record streak counts a tournament win regardless of the toggle", async () => {
+        const finishedMatch = async (
+          type: "Competitive" | "Wingman" | "Duel",
+          winner: string,
+          loser: string,
+          endedAt: string,
+        ) => {
+          const match = await fx.match({ type });
+          await fx.lineupPlayer(match.lineup_1_id, winner);
+          await fx.lineupPlayer(match.lineup_2_id, loser);
+          await postgres.query(
+            `UPDATE matches
+               SET winning_lineup_id = lineup_1_id, status = 'Finished', ended_at = $2
+             WHERE id = $1`,
+            [match.id, endedAt],
+          );
+          return match;
+        };
 
-        const [row] = await eloLeaderboard(0, "Wingman", "peak", true);
-        expect(Number(row.value)).toBe(5300);
-      });
-
-      it("3. a tournament gain before a later non-tournament peak doesn't corrupt the reconstructed peak", async () => {
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-        const [player] = await fx.players(1);
-        const m1 = await fx.bareMatch(T(60 * 24 * 4));
-        const m2 = await fx.bareMatch(T(60 * 24 * 2));
-        const m3 = await fx.bareMatch(T(60 * 24 * 1));
-
-        await insertElo(player, m1.matchId, "Wingman", 5100, 100, 4);
-        // Tournament row: a big gain, chronologically before the real peak.
-        await insertElo(player, bracket.match_id!, "Wingman", 8100, 3000, 3);
-        await insertElo(player, m2.matchId, "Wingman", 5150, 50, 2);
-        await insertElo(player, m3.matchId, "Wingman", 5350, 200, 1);
-
-        const [row] = await eloLeaderboard(0, "Wingman", "peak", true);
-        // True non-tournament trajectory: 5000 -> 5100 -> 5150 -> 5350. The
-        // old "raw MAX(current) minus lifetime tournament total"
-        // approximation would have computed 8100 - 3000 = 5100, missing the
-        // real 5350 peak entirely.
-        expect(Number(row.value)).toBe(5350);
-      });
-
-      it("4. a tournament loss before a later non-tournament peak doesn't inflate the reconstructed peak", async () => {
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-        const [player] = await fx.players(1);
-        const m1 = await fx.bareMatch(T(60 * 24 * 4));
-        const m2 = await fx.bareMatch(T(60 * 24 * 2));
-        const m3 = await fx.bareMatch(T(60 * 24 * 1));
-
-        await insertElo(player, m1.matchId, "Wingman", 5100, 100, 4);
-        // Tournament row: a loss, chronologically before the real peak.
-        await insertElo(player, bracket.match_id!, "Wingman", 4000, -1100, 3);
-        await insertElo(player, m2.matchId, "Wingman", 5250, 150, 2);
-        await insertElo(player, m3.matchId, "Wingman", 5300, 50, 1);
-
-        const [row] = await eloLeaderboard(0, "Wingman", "peak", true);
-        // True non-tournament trajectory: 5000 -> 5100 -> 5250 -> 5300. The
-        // old approximation would have computed MAX(current)=5300 minus the
-        // tournament's own -1100 total, i.e. 5300 - (-1100) = 6400 --
-        // inflating the peak by adding back a loss that should simply be
-        // ignored.
-        expect(Number(row.value)).toBe(5300);
-      });
-
-      it("5. a season reset to 5000 doesn't chain onto the previous season's ending ELO in the reconstructed peak", async () => {
-        const seasonOne = await fx.season("2020-01-01", "2020-06-01");
-        const seasonTwo = await fx.season("2020-06-01", "2020-09-01");
-        const [player] = await fx.players(1);
-        const s1m1 = await fx.bareMatch(T(60 * 24 * 200));
-        const s1m2 = await fx.bareMatch(T(60 * 24 * 190));
-        const s2m1 = await fx.bareMatch(T(60 * 24 * 100));
-
-        // Season one: regular ladder climbs to a real peak of 5800.
-        await insertElo(player, s1m1.matchId, "Wingman", 5500, 500, 200, seasonOne);
-        await insertElo(player, s1m2.matchId, "Wingman", 5800, 300, 190, seasonOne);
-        // Season two resets to the 5000 baseline (its own independent
-        // ladder) and only gains a little -- nowhere near season one's peak.
-        await insertElo(player, s2m1.matchId, "Wingman", 5050, 50, 100, seasonTwo);
-
-        const [row] = await eloLeaderboard(0, "Wingman", "peak", true);
-        // Correct reconstruction: season one's real peak (5800) stands,
-        // since season two is its own independently-reset chain starting
-        // back at 5000 (5000 + 50 = 5050), not season one's ending value
-        // plus season two's change (which would incorrectly read as 5850).
-        expect(Number(row.value)).toBe(5800);
-      });
-
-      it("6. Current ELO reflects the active named season's regular-ladder rating", async () => {
-        const seasonId = await fx.season("2020-01-01", null); // open-ended => active
-        const [player] = await fx.players(1);
-        const m1 = await fx.bareMatch();
-        const m2 = await fx.bareMatch();
-        await insertElo(player, m1.matchId, "Wingman", 5100, 100, 3, seasonId);
-        await insertElo(player, m2.matchId, "Wingman", 5250, 150, 1, seasonId);
-
-        const [row] = await eloLeaderboard(0, "Wingman", "peak", false);
-        expect(Number(row.secondary_value)).toBe(5250);
-      });
-
-      it("7. Current ELO with tournaments included adds the season's eligible tournament changes", async () => {
-        const seasonId = await fx.season("2020-01-01", null);
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-        const [player] = await fx.players(1);
-        const regularMatch = await fx.bareMatch();
-        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
-        await insertElo(player, bracket.match_id!, "Wingman", 5900, 250, 1);
-
-        const [row] = await eloLeaderboard(0, "Wingman", "peak", false);
-        expect(Number(row.secondary_value)).toBe(5350); // 5100 regular + 250 tourney
-      });
-
-      it("8. Current ELO excludes the season's tournament changes when the toggle is on", async () => {
-        const seasonId = await fx.season("2020-01-01", null);
-        const tournament = await launchTournament("Wingman");
-        const bracket = (
-          await tournamentFx.getBrackets(tournament.stageIds[0])
-        ).find((b) => b.round === 1)!;
-        const [player] = await fx.players(1);
-        const regularMatch = await fx.bareMatch();
-        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
-        await insertElo(player, bracket.match_id!, "Wingman", 5900, 250, 1);
-
-        const [row] = await eloLeaderboard(0, "Wingman", "peak", true);
-        expect(Number(row.secondary_value)).toBe(5100); // regular only
-      });
-
-      it("9. Current ELO defaults to 5000 for a player with no active-season activity", async () => {
-        await fx.season("2020-01-01", null); // active season exists, but the player below never touches it
-        const [activePlayer, inactivePlayer] = await fx.players(2);
-        const seasonId = (
-          await postgres.query<Array<{ id: string }>>("SELECT id FROM seasons LIMIT 1")
-        )[0].id;
-        const m1 = await fx.bareMatch();
-        await insertElo(activePlayer, m1.matchId, "Wingman", 5100, 100, 3, seasonId);
-        // inactivePlayer has old activity (so they appear in the Peak
-        // driving set at all) but nothing in the active season.
-        const oldMatch = await fx.bareMatch(T(60 * 24 * 400));
-        await insertElo(inactivePlayer, oldMatch.matchId, "Wingman", 5300, 300, 400);
-
-        const rows = await eloLeaderboard(0, "Wingman", "peak", false);
-        const inactiveRow = rows.find(
-          (r) => r.player_steam_id === inactivePlayer,
-        );
-        expect(inactiveRow).toBeDefined();
-        expect(Number(inactiveRow!.secondary_value)).toBe(5000);
-      });
-
-      it("10. record streak from one winning run", async () => {
-        const [player, opp1, opp2, opp3] = await fx.players(4);
-        await finishedMatch("Duel", player, opp1, T(60 * 24 * 3));
-        await finishedMatch("Duel", player, opp2, T(60 * 24 * 2));
-        const last = await finishedMatch("Duel", player, opp3, T(60 * 24 * 1));
-        await insertElo(player, last.id, "Duel", 5300, 300, 1);
-
-        const [row] = await eloLeaderboard(0, "Duel", "peak");
-        expect(Number(row.tertiary_value)).toBe(3);
-      });
-
-      it("11. record streak chooses the longest of multiple winning runs", async () => {
-        const [player, o1, o2, o3, o4, o5, o6] = await fx.players(7);
-        await finishedMatch("Duel", player, o1, T(60 * 24 * 6)); // win
-        await finishedMatch("Duel", player, o2, T(60 * 24 * 5)); // win
-        await finishedMatch("Duel", o3, player, T(60 * 24 * 4)); // loss
-        await finishedMatch("Duel", player, o4, T(60 * 24 * 3)); // win
-        await finishedMatch("Duel", player, o5, T(60 * 24 * 2)); // win
-        const last = await finishedMatch("Duel", player, o6, T(60 * 24 * 1)); // win
-        await insertElo(player, last.id, "Duel", 5300, 300, 1);
-
-        const [row] = await eloLeaderboard(0, "Duel", "peak");
-        // Islands: [win, win] = 2, [win, win, win] = 3 -> longest is 3.
-        expect(Number(row.tertiary_value)).toBe(3);
-      });
-
-      it("12. a loss separates streak islands rather than extending across it", async () => {
-        const [player, o1, o2, o3] = await fx.players(4);
-        await finishedMatch("Duel", player, o1, T(60 * 24 * 3)); // win
-        await finishedMatch("Duel", o2, player, T(60 * 24 * 2)); // loss
-        const last = await finishedMatch("Duel", player, o3, T(60 * 24 * 1)); // win
-        await insertElo(player, last.id, "Duel", 5300, 300, 1);
-
-        const [row] = await eloLeaderboard(0, "Duel", "peak");
-        expect(Number(row.tertiary_value)).toBe(1);
-      });
-
-      it("13. record streak includes a tournament win when the toggle is off, excludes it when on", async () => {
         const tournament = await launchTournament("Wingman");
         const bracket = (
           await tournamentFx.getBrackets(tournament.stageIds[0])
         ).find((b) => b.round === 1)!;
         await tournamentFx.winMatch(bracket.match_id!);
-        await postgres.query(
-          "UPDATE matches SET status = 'Finished' WHERE id = $1",
-          [bracket.match_id],
-        );
+        await postgres.query("UPDATE matches SET status = 'Finished' WHERE id = $1", [
+          bracket.match_id,
+        ]);
         const [winner] = await postgres.query<Array<{ steam_id: string }>>(
           `SELECT mlp.steam_id
              FROM matches m
@@ -1540,46 +961,13 @@ describe("read-side views and aggregations (SQL-driven)", () => {
         await insertElo(winner.steam_id, regularWin.id, "Wingman", 5200, 100, 1);
         await insertElo(winner.steam_id, bracket.match_id!, "Wingman", 9999, 100, 2);
 
-        const [includedRow] = await eloLeaderboard(0, "Wingman", "peak", false);
-        const [excludedRow] = await eloLeaderboard(0, "Wingman", "peak", true);
-        expect(Number(includedRow.tertiary_value)).toBe(2); // tournament win + regular win
-        expect(Number(excludedRow.tertiary_value)).toBe(1); // regular win only
+        const [included] = await eloLeaderboard(0, "Wingman", "peak", false);
+        const [excluded] = await eloLeaderboard(0, "Wingman", "peak", true);
+        expect(Number(included.tertiary_value)).toBe(2); // tournament win + regular win
+        expect(Number(excluded.tertiary_value)).toBe(2); // same -- no longer excludable
       });
 
-      it("14. cancelled, unfinished, and no-winner matches never extend or break the record streak", async () => {
-        const [player, o1, o2] = await fx.players(3);
-        await finishedMatch("Duel", player, o1, T(60 * 24 * 3));
-        // An unfinished/no-winner match sandwiched in time: status stays at
-        // its default (not 'Finished') and winning_lineup_id stays NULL.
-        const noWinner = await fx.match({ type: "Duel" });
-        await fx.lineupPlayer(noWinner.lineup_1_id, player);
-        await fx.lineupPlayer(noWinner.lineup_2_id, o2);
-        await postgres.query("UPDATE matches SET ended_at = $2 WHERE id = $1", [
-          noWinner.id,
-          T(60 * 24 * 2),
-        ]);
-        const last = await finishedMatch("Duel", player, o2, T(60 * 24 * 1));
-        await insertElo(player, last.id, "Duel", 5300, 300, 1);
-
-        const [row] = await eloLeaderboard(0, "Duel", "peak");
-        // Both eligible wins count as one continuous streak (2) -- the
-        // ineligible middle match is invisible to the streak query
-        // entirely, neither extending nor breaking it.
-        expect(Number(row.tertiary_value)).toBe(2);
-      });
-
-      it("15. record streak is isolated per match type", async () => {
-        const [player, o1, o2] = await fx.players(3);
-        // A Wingman win must not count toward the Duel record streak.
-        await finishedMatch("Wingman", player, o1, T(60 * 24 * 2));
-        const duelWin = await finishedMatch("Duel", player, o2, T(60 * 24 * 1));
-        await insertElo(player, duelWin.id, "Duel", 5300, 300, 1);
-
-        const [row] = await eloLeaderboard(0, "Duel", "peak");
-        expect(Number(row.tertiary_value)).toBe(1);
-      });
-
-      it("16. All Time matches_played follows the Exclude Tournaments toggle", async () => {
+      it("6. matches_played counts a tournament-linked row regardless of the toggle", async () => {
         const tournament = await launchTournament("Wingman");
         const bracket = (
           await tournamentFx.getBrackets(tournament.stageIds[0])
@@ -1589,231 +977,90 @@ describe("read-side views and aggregations (SQL-driven)", () => {
         await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 2);
         await insertElo(player, bracket.match_id!, "Wingman", 5200, 100, 1);
 
-        const [includedRow] = await eloLeaderboard(0, "Wingman", "peak", false);
-        const [excludedRow] = await eloLeaderboard(0, "Wingman", "peak", true);
-        expect(Number(includedRow.matches_played)).toBe(2);
-        expect(Number(excludedRow.matches_played)).toBe(1);
+        const [included] = await eloLeaderboard(0, "Wingman", "peak", false);
+        const [excluded] = await eloLeaderboard(0, "Wingman", "peak", true);
+        expect(Number(included.matches_played)).toBe(2);
+        expect(Number(excluded.matches_played)).toBe(2);
       });
 
-      it("17. active-season Last Match is unaffected by the All Time changes", async () => {
+      it("7. a player whose only activity this season came from a tournament match still starts from the 5000 baseline", async () => {
         const seasonId = await fx.season("2020-01-01", null);
-        const [player] = await fx.players(1);
-        const m1 = await fx.bareMatch();
-        const m2 = await fx.bareMatch();
-        await insertElo(player, m1.matchId, "Wingman", 5100, 100, 3, seasonId);
-        await insertElo(player, m2.matchId, "Wingman", 5250, 150, 1, seasonId);
-
-        const [row] = await postgres.query<Array<LeaderboardRow>>(
-          `SELECT * FROM get_leaderboard(
-             'elo', 0, 'Wingman', false, NULL, $1, 'current'
-           )`,
-          [seasonId],
-        );
-        expect(Number(row.value)).toBe(5250);
-        expect(Number(row.secondary_value)).toBe(150); // Last Match, unaffected
-      });
-
-      it("18. completed-season ELO Change is unaffected by the All Time changes", async () => {
-        const seasonStart = new Date(
-          Date.now() - 60 * 24 * 60 * 60 * 1000,
-        ).toISOString();
-        const seasonEnd = new Date(
-          Date.now() - 30 * 24 * 60 * 60 * 1000,
-        ).toISOString();
-        const seasonId = await fx.season(seasonStart, seasonEnd);
-        const [player] = await fx.players(1);
-        const first = await fx.bareMatch(T(60 * 24 * 45));
-        const second = await fx.bareMatch(T(60 * 24 * 35));
-        await insertElo(player, first.matchId, "Competitive", 5200, 200, 45, seasonId);
-        await insertElo(
-          player,
-          second.matchId,
-          "Competitive",
-          5150,
-          -50,
-          35,
-          seasonId,
-        );
-
-        const [row] = await postgres.query<Array<LeaderboardRow>>(
-          `SELECT * FROM get_leaderboard(
-             'elo', 0, 'Competitive', false, NULL, $1, 'current'
-           )`,
-          [seasonId],
-        );
-        expect(Number(row.value)).toBe(5150);
-        expect(Number(row.secondary_value)).toBe(150); // final(5150) - starting(5000)
-      });
-
-      it("19. rolling 7/30-day SUM(change) is unaffected by the All Time changes", async () => {
-        const [player] = await fx.players(1);
-        const m1 = await fx.bareMatch(T(60 * 24 * 5));
-        const m2 = await fx.bareMatch(T(60 * 24 * 1));
-        await insertElo(player, m1.matchId, "Wingman", 5100, 100, 5);
-        await insertElo(player, m2.matchId, "Wingman", 5160, 60, 1);
-
-        const [sevenDay] = await eloLeaderboard(7, "Wingman");
-        const [thirtyDay] = await eloLeaderboard(30, "Wingman");
-        expect(Number(sevenDay.secondary_value)).toBe(160);
-        expect(Number(thirtyDay.secondary_value)).toBe(160);
-      });
-
-      it("20. a match linked from multiple tournament_brackets rows is never double-counted", async () => {
         const tournament = await launchTournament("Wingman");
         const bracket = (
           await tournamentFx.getBrackets(tournament.stageIds[0])
         ).find((b) => b.round === 1)!;
-        const [{ tournament_stage_id }] = await postgres.query<
-          Array<{ tournament_stage_id: string }>
-        >("SELECT tournament_stage_id FROM tournament_brackets WHERE id = $1", [
-          bracket.id,
-        ]);
-        // Simulate a duplicate tournament_brackets link to the same match --
-        // the schema has no UNIQUE constraint on tournament_brackets.match_id.
-        await postgres.query(
-          `INSERT INTO tournament_brackets (tournament_stage_id, match_id, round)
-           VALUES ($1, $2, $3)`,
-          [tournament_stage_id, bracket.match_id, bracket.round],
-        );
 
         const [player] = await fx.players(1);
-        const regularMatch = await fx.bareMatch(T(60 * 24 * 2));
-        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 2);
-        await insertElo(player, bracket.match_id!, "Wingman", 5200, 100, 1);
+        // A tournament-only player's row now carries the real season_id
+        // (unlike the old season_id = NULL write), so they surface via the
+        // ordinary season-scoped lookup with no special-case union needed.
+        await insertElo(player, bracket.match_id!, "Wingman", 5300, 300, 1, seasonId);
 
-        const [excludedRow] = await eloLeaderboard(0, "Wingman", "peak", true);
-        const [includedRow] = await eloLeaderboard(0, "Wingman", "peak", false);
-        // Exclude-tournaments: still fully excluded once (not "un-excluded"
-        // by matching two bracket rows) -- reconstructed from the one
-        // regular row only.
-        expect(Number(excludedRow.value)).toBe(5100);
-        expect(Number(excludedRow.matches_played)).toBe(1);
-        // Include-tournaments: the tournament match still counts once.
-        expect(Number(includedRow.matches_played)).toBe(2);
+        const [row] = await seasonElo(seasonId);
+        expect(row).toBeDefined();
+        expect(Number(row.value)).toBe(5300);
+        expect(Number(row.matches_played)).toBe(1);
+      });
+
+      it("8. a completed season's final-minus-starting ELO Change is unaffected by tournament-linked rows", async () => {
+        const start = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const end = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
+        const seasonId = await fx.season(start, end);
+        const tournament = await launchTournament("Wingman");
+        const bracket = (
+          await tournamentFx.getBrackets(tournament.stageIds[0])
+        ).find((b) => b.round === 1)!;
+
+        const [player] = await fx.players(1);
+        const first = await fx.bareMatch();
+        const second = await fx.bareMatch();
+        await insertElo(player, first.matchId, "Wingman", 5200, 200, 20, seasonId);
+        await insertElo(player, second.matchId, "Wingman", 5150, -50, 10, seasonId);
+        // Must be the LATEST row for "value" to land on it -- i.e. fewer
+        // days ago than `second` (10), not more. Using 15 here previously
+        // made this row chronologically EARLIER than `second`, so the
+        // (correct) latest-row lookup picked up `second`'s 5150 instead.
+        const insideWindow = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
+        await insertEloAt(player, bracket.match_id!, "Wingman", 5400, 250, insideWindow, seasonId);
+
+        const [row] = await seasonElo(seasonId);
+        // Final (5400) minus starting-of-season (5200 - 200 = 5000) = 400.
+        expect(Number(row.value)).toBe(5400);
+        expect(Number(row.secondary_value)).toBe(400);
+      });
+
+      it("9. tournament eligibility for one match type never leaks into another", async () => {
+        const seasonId = await fx.season("2020-01-01", null);
+        const tournament = await launchTournament("Duel");
+        const bracket = (
+          await tournamentFx.getBrackets(tournament.stageIds[0])
+        ).find((b) => b.round === 1)!;
+
+        const [player] = await fx.players(1);
+        const regularMatch = await fx.bareMatch();
+        await insertElo(player, regularMatch.matchId, "Wingman", 5100, 100, 3, seasonId);
+        // A Duel tournament row, even with a real season_id, must not
+        // surface on the Wingman leaderboard row.
+        await insertElo(player, bracket.match_id!, "Duel", 5500, 500, 1, seasonId);
+
+        const [row] = await seasonElo(seasonId, "Wingman");
+        expect(Number(row.value)).toBe(5100);
+        expect(Number(row.matches_played)).toBe(1);
       });
     });
 
-    it("defaults omitted ELO view to current and validates unsupported views", async () => {
-      const [player] = await fx.players(1);
-      const match = await fx.bareMatch(T(60));
-      await insertElo(player, match.matchId, "Duel", 5400, 75, 0);
-
-      const omitted = await leaderboard("elo", 0, "Duel");
-      expect(Number(omitted[0].value)).toBe(5400);
-      expect(Number(omitted[0].secondary_value)).toBe(75);
-
-      await expect(
-        postgres.query(
-          "SELECT * FROM get_leaderboard('elo', 0, 'Duel', false, NULL, NULL, 'invalid')",
-        ),
-      ).rejects.toThrow(/Invalid ELO view/);
-      await expect(
-        postgres.query(
-          "SELECT * FROM get_leaderboard('elo', 7, 'Duel', false, NULL, NULL, 'peak')",
-        ),
-      ).rejects.toThrow(/Peak ELO view only supports/);
-    });
-
-    it("preserves season-current behavior and rejects a season peak view", async () => {
-      const [player] = await fx.players(1);
-      const seasonId = await fx.season("2025-01-01");
-      const firstMatch = await fx.bareMatch(T(60 * 24 * 2));
-      const latestMatch = await fx.bareMatch(T(60 * 24));
-      await insertElo(
-        player,
-        firstMatch.matchId,
-        "Competitive",
-        5100,
-        100,
-        2,
-        seasonId,
-      );
-      await insertElo(
-        player,
-        latestMatch.matchId,
-        "Competitive",
-        5075,
-        -25,
-        1,
-        seasonId,
-      );
-
-      const [current] = await postgres.query<Array<LeaderboardRow>>(
-        `SELECT * FROM get_leaderboard(
-           'elo', 0, 'Competitive', false, NULL, $1, 'current'
-         )`,
-        [seasonId],
-      );
-      expect(Number(current.value)).toBe(5075);
-      expect(Number(current.secondary_value)).toBe(75);
-
-      await expect(
-        postgres.query(
-          `SELECT * FROM get_leaderboard(
-             'elo', 0, 'Competitive', false, NULL, $1, 'peak'
-           )`,
-          [seasonId],
-        ),
-      ).rejects.toThrow(/Peak ELO view only supports/);
-    });
-
-    it("keeps rank ties and total population behavior unchanged", async () => {
-      const [one, two] = await fx.players(2);
-      const match = await fx.bareMatch(T(60));
-      await insertElo(one, match.matchId, "Wingman", 5600, 50, 0);
-      await insertElo(two, match.matchId, "Wingman", 5600, -20, 0);
-
-      for (const player of [one, two]) {
-        const [rank] = await postgres.query<
-          Array<{ rank: number; total: number }>
-        >(
-          `SELECT * FROM get_player_leaderboard_rank(
-             'elo', 0, $1, 'Wingman', false, NULL, 'current'
-           )`,
-          [player],
-        );
-        expect(Number(rank.rank)).toBe(1);
-        expect(Number(rank.total)).toBe(2);
-      }
-    });
-
-    it("uses match_id as a deterministic tie-breaker for equal ledger timestamps", async () => {
-      const [player] = await fx.players(1);
-      const firstMatch = await fx.bareMatch(T(60));
-      const secondMatch = await fx.bareMatch(T(60));
-      const createdAt = T(30);
-      const rows = [
-        { matchId: firstMatch.matchId, current: 5500, change: 100 },
-        { matchId: secondMatch.matchId, current: 5650, change: 150 },
-      ].sort((a, b) => b.matchId.localeCompare(a.matchId));
-
-      for (const row of rows) {
-        await postgres.query(
-          `INSERT INTO player_elo
-             (steam_id, match_id, type, "current", change, created_at)
-           VALUES ($1, $2, 'Duel', $3, $4, $5)`,
-          [player, row.matchId, row.current, row.change, createdAt],
-        );
-      }
-
-      const [current] = await eloLeaderboard(0, "Duel");
-      expect(Number(current.value)).toBe(rows[0].current);
-      expect(Number(current.secondary_value)).toBe(rows[0].change);
-    });
-
-    it("preserves tournament inclusion and exclusion adjustments", async () => {
+    it("preserves canonical ELO across matchmaking and tournament sources: no adjustment math, one unified value", async () => {
+      // A single-elimination first stage needs >= 4 teams: tournament_stages'
+      // BEFORE INSERT/UPDATE validation trigger rejects min_teams < 4 * groups
+      // (hasura/triggers/tournament_stages.sql), and `groups` defaults to 1,
+      // so anything below 4 raises "First stage must have at least 4 teams".
       const tournament = await tournamentFx.launch(
-        [
-          {
-            type: "SingleElimination",
-            order: 1,
-            minTeams: 2,
-            maxTeams: 2,
-          },
-        ],
-        2,
+        [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 }],
+        4,
       );
-      const [bracket] = await tournamentFx.getBrackets(tournament.stageIds[0]);
+      const [bracket] = (
+        await tournamentFx.getBrackets(tournament.stageIds[0])
+      ).filter((b) => b.round === 1);
       expect(bracket.match_id).not.toBeNull();
 
       const [player] = await fx.players(1);
@@ -1821,27 +1068,19 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       await insertElo(player, regularMatch.matchId, "Wingman", 5000, 0, 2);
       await insertElo(player, bracket.match_id!, "Wingman", 5100, 100, 1);
 
-      const [includedCurrent] = await eloLeaderboard(
-        0,
-        "Wingman",
-        "current",
-        false,
-      );
-      const [excludedCurrent] = await eloLeaderboard(
-        0,
-        "Wingman",
-        "current",
-        true,
-      );
+      const [includedCurrent] = await eloLeaderboard(0, "Wingman", "current", false);
+      const [excludedCurrent] = await eloLeaderboard(0, "Wingman", "current", true);
+      const [includedPeak] = await eloLeaderboard(0, "Wingman", "peak", false);
       const [excludedPeak] = await eloLeaderboard(0, "Wingman", "peak", true);
 
+      // Every view agrees: 5100 is simply the latest/highest row, no matter
+      // which source produced it or how the (now inert, for ELO) Exclude
+      // Tournaments flag is set.
       expect(Number(includedCurrent.value)).toBe(5100);
       expect(Number(includedCurrent.secondary_value)).toBe(100);
-      expect(Number(excludedCurrent.value)).toBe(5000);
-      expect(Number(excludedPeak.value)).toBe(5000);
-      // secondary_value under Peak is All Time's Current ELO; no season
-      // exists in this test, so it's the 5000 default.
-      expect(Number(excludedPeak.secondary_value)).toBe(5000);
+      expect(Number(excludedCurrent.value)).toBe(5100);
+      expect(Number(includedPeak.value)).toBe(5100);
+      expect(Number(excludedPeak.value)).toBe(5100);
     });
 
     it("best_kdr divides kills by deaths, falling back to kill count for the deathless", async () => {

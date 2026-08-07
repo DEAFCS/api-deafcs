@@ -68,8 +68,19 @@ BEGIN
 
     _seasons_enabled := seasons_enabled();
 
-    -- Get the player's current ELO value from the most recent record
-    -- Scoped by legacy (seasons off) vs tournament vs season context
+    -- Get the player's current (canonical) ELO value from the most recent
+    -- record for this player+type+season, regardless of which source
+    -- (matchmaking, tournament, or league) produced that prior row.
+    --
+    -- IMPORTANT: there is exactly ONE canonical ELO stream per
+    -- player+mode+configured-ELO-season. Match source is metadata about a
+    -- row, not a separate rating ladder -- so this lookup is intentionally
+    -- source-agnostic. It previously branched on `_is_tournament` and, in
+    -- that branch, only considered prior rows with season_id IS NULL --
+    -- which could never see a player's matchmaking history (season_id =
+    -- <uuid>), so a player's first tournament/league match always fell
+    -- through to the 5000 default even when they already had a real rating
+    -- for that mode this season. See ELO_ARCHITECTURE_INVESTIGATION.md.
     IF NOT _seasons_enabled THEN
         -- Legacy: latest ELO by type, ignoring season entirely
         SELECT pe.current INTO _current_player_elo
@@ -80,20 +91,9 @@ BEGIN
         AND pe."type" = match_type
         ORDER BY pe.created_at DESC
         LIMIT 1;
-    ELSIF _is_tournament THEN
-        -- Tournament track: find latest ELO where season_id IS NULL and match is a tournament match
-        SELECT pe.current INTO _current_player_elo
-        FROM player_elo pe
-        INNER JOIN tournament_brackets tb ON tb.match_id = pe.match_id
-        WHERE pe.steam_id = player_record.steam_id
-        AND pe.created_at < match_record.ended_at
-        AND pe.match_id != match_record.id
-        AND pe."type" = match_type
-        AND pe.season_id IS NULL
-        ORDER BY pe.created_at DESC
-        LIMIT 1;
     ELSIF _season_id IS NOT NULL THEN
-        -- Season match: find latest ELO within this season
+        -- Canonical: latest ELO within this configured ELO season, from any
+        -- eligible source (matchmaking, tournament, league alike).
         SELECT pe.current INTO _current_player_elo
         FROM player_elo pe
         WHERE pe.steam_id = player_record.steam_id
@@ -147,7 +147,9 @@ BEGIN
     _series_multiplier := GREATEST(ABS(_player_map_wins - _player_map_losses), 1);
 
     -- Calculate average ELO for player's team
-    -- Scoped by tournament vs season context
+    -- Scoped by legacy (seasons off) vs canonical season context. Source
+    -- (matchmaking/tournament/league) is not a separate lookup branch here
+    -- either, for the same reason as the starting-ELO lookup above.
     SELECT
         AVG(player_elo) INTO _player_team_elo_avg
     FROM (
@@ -162,18 +164,6 @@ BEGIN
                         AND pe.created_at < match_record.ended_at
                         AND pe.match_id != match_record.id
                         AND pe."type" = match_type
-                        ORDER BY pe.created_at DESC
-                        LIMIT 1
-                    )
-                    WHEN _is_tournament THEN (
-                        SELECT pe.current
-                        FROM player_elo pe
-                        INNER JOIN tournament_brackets tb ON tb.match_id = pe.match_id
-                        WHERE pe.steam_id = mlp.steam_id
-                        AND pe.created_at < match_record.ended_at
-                        AND pe.match_id != match_record.id
-                        AND pe."type" = match_type
-                        AND pe.season_id IS NULL
                         ORDER BY pe.created_at DESC
                         LIMIT 1
                     )
@@ -201,7 +191,8 @@ BEGIN
     ) AS team_elos;
 
     -- Calculate average ELO for opponent's team
-    -- Scoped by tournament vs season context
+    -- Scoped by legacy (seasons off) vs canonical season context (see note
+    -- on the player-team average above).
     SELECT
         AVG(player_elo) INTO _opponent_team_elo_avg
     FROM (
@@ -216,18 +207,6 @@ BEGIN
                         AND pe.created_at < match_record.ended_at
                         AND pe.match_id != match_record.id
                         AND pe."type" = match_type
-                        ORDER BY pe.created_at DESC
-                        LIMIT 1
-                    )
-                    WHEN _is_tournament THEN (
-                        SELECT pe.current
-                        FROM player_elo pe
-                        INNER JOIN tournament_brackets tb ON tb.match_id = pe.match_id
-                        WHERE pe.steam_id = mlp.steam_id
-                        AND pe.created_at < match_record.ended_at
-                        AND pe.match_id != match_record.id
-                        AND pe."type" = match_type
-                        AND pe.season_id IS NULL
                         ORDER BY pe.created_at DESC
                         LIMIT 1
                     )
@@ -458,7 +437,10 @@ BEGIN
         RETURN 0;
     END IF;
 
-    -- Determine if this is a tournament match
+    -- _is_tournament is retained as match metadata (passed through to
+    -- get_player_elo_for_match for its return payload / potential future
+    -- source-aware stats) but no longer changes which ELO ladder this match
+    -- writes to or reads from -- see the canonical-ELO note below.
     _is_tournament := is_tournament_match(match_record);
 
     _seasons_enabled := seasons_enabled();
@@ -466,11 +448,20 @@ BEGIN
     -- Determine season context. Season is derived from the match's own end time
     -- (NOT the currently-active season) so recompute/backfill of historical matches
     -- attribute ELO to the season the match actually happened in.
+    --
+    -- CANONICAL ELO: there is exactly one ELO stream per player + mode +
+    -- configured ELO season, regardless of match source. Matchmaking,
+    -- tournament, and league matches alike resolve the SAME season_id here
+    -- and read/write the SAME player_elo rows for that scope -- match
+    -- source is metadata on a row (derivable via tournament_brackets /
+    -- league_season_divisions), never a separate rating ladder. Tournament
+    -- matches previously always wrote season_id = NULL, isolating them onto
+    -- their own untagged track and forcing every player's first
+    -- tournament/league match to start over at the 5000 default even when
+    -- they already had a real matchmaking rating. See
+    -- ELO_ARCHITECTURE_INVESTIGATION.md for the full writeup.
     IF NOT _seasons_enabled THEN
-        _season_id := NULL;   -- Legacy: single global ELO ladder, no season/tournament split
-        _is_tournament := FALSE;
-    ELSIF _is_tournament THEN
-        _season_id := NULL;   -- Tournament matches are always season-independent
+        _season_id := NULL;   -- Legacy: single global ELO ladder, no season split
     ELSE
         _season_id := season_for_timestamp(COALESCE(match_record.ended_at, match_record.created_at));
     END IF;

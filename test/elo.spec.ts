@@ -74,6 +74,33 @@ describe("ELO engine (SQL-driven)", () => {
     return match;
   };
 
+  // Same one-player-per-lineup shape as `duel`, but tagged Wingman -- used
+  // only to prove mode isolation (a player's Competitive/Wingman/Duel
+  // ratings never influence one another's starting value).
+  const wingman = async (
+    playerA: string,
+    playerB: string,
+    {
+      winner = "a",
+      endedDaysAgo = 1,
+    }: { winner?: "a" | "b"; endedDaysAgo?: number } = {},
+  ) => {
+    const match = await fx.match({ type: "Wingman", bestOf: 1 });
+    await fx.lineupPlayer(match.lineup_1_id, playerA);
+    await fx.lineupPlayer(match.lineup_2_id, playerB);
+    await postgres.query(
+      `UPDATE matches SET winning_lineup_id = ${
+        winner === "a" ? "lineup_1_id" : "lineup_2_id"
+      } WHERE id = $1`,
+      [match.id],
+    );
+    await postgres.query(
+      `UPDATE matches SET ended_at = now() - make_interval(days => $2) WHERE id = $1`,
+      [match.id, endedDaysAgo],
+    );
+    return match;
+  };
+
   const generate = async (matchId: string) => {
     const [row] = await postgres.query<
       Array<{ generate_player_elo_for_match: number }>
@@ -239,26 +266,139 @@ describe("ELO engine (SQL-driven)", () => {
     expect(winnerTwo.expected_score).toBeCloseTo(0.5);
   });
 
-  it("rates tournament matches on their own season-independent track", async () => {
+  // Canonical ELO: one rating stream per player + mode + configured ELO
+  // season, fed by every eligible source (matchmaking, tournament, league)
+  // alike -- match source is metadata on a row, never a separate rating
+  // ladder. These two tests replace a prior assertion that tournament
+  // matches wrote their own season_id = NULL track; that was the bug (a
+  // player's first tournament match always reset to 5000 even when they
+  // already had a real matchmaking rating this season). See
+  // ELO_ARCHITECTURE_INVESTIGATION.md.
+  it("continues the player's canonical season rating into a tournament match instead of resetting to 5000", async () => {
     await fx.enableSeasons();
-    await fx.season("2025-01-01", null);
+    const seasonId = await fx.season("2025-01-01", null);
 
+    // Duel tournament so both the prior matchmaking match and the
+    // tournament match share the same mode ladder (one player per lineup).
     const t = await tfx.launch(
       [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 }],
       4,
+      "Duel",
     );
     const semi = (await tfx.getBrackets(t.stageIds[0])).find(
       (b) => b.round === 1,
     )!;
-    await tfx.winMatch(semi.match_id!);
+    const [{ lineup_1_id, lineup_2_id }] = await postgres.query<
+      Array<{ lineup_1_id: string; lineup_2_id: string }>
+    >("SELECT lineup_1_id, lineup_2_id FROM matches WHERE id = $1", [
+      semi.match_id,
+    ]);
+    const [{ steam_id: playerA }] = await postgres.query<
+      Array<{ steam_id: string }>
+    >(
+      "SELECT steam_id FROM match_lineup_players WHERE match_lineup_id = $1 LIMIT 1",
+      [lineup_1_id],
+    );
+    const [{ steam_id: playerB }] = await postgres.query<
+      Array<{ steam_id: string }>
+    >(
+      "SELECT steam_id FROM match_lineup_players WHERE match_lineup_id = $1 LIMIT 1",
+      [lineup_2_id],
+    );
 
+    // Give playerA a real matchmaking rating first, in the same mode and
+    // season, so it's provably not 5000.
+    const opponent = await fx.player();
+    const mm = await duel(playerA, opponent, { endedDaysAgo: 10 });
+    await postgres.query(
+      "UPDATE matches SET ended_at = '2025-01-05' WHERE id = $1",
+      [mm.id],
+    );
+    await generate(mm.id);
+    const priorElo = Number(
+      (await eloRows(mm.id)).find((r) => r.steam_id === playerA)!.current,
+    );
+    expect(priorElo).not.toBe(5000);
+
+    await tfx.winMatch(semi.match_id!);
     expect(await generate(semi.match_id!)).toBeGreaterThan(0);
-    const rows = await postgres.query<Array<{ season_id: string | null }>>(
-      "SELECT season_id FROM player_elo WHERE match_id = $1",
+    const tournamentRows = await eloRows(semi.match_id!);
+    const playerARow = tournamentRows.find((r) => r.steam_id === playerA)!;
+
+    // The tournament match wrote into the SAME configured ELO season as
+    // matchmaking, and its starting rating (current - change) is the
+    // player's real prior rating, not the 5000 default.
+    expect(playerARow.season_id).toBe(seasonId);
+    expect(Number(playerARow.current) - Number(playerARow.change)).toBe(
+      priorElo,
+    );
+
+    // A brand-new player in the same tournament match, with no prior
+    // rating at all, still starts from the 5000 baseline -- the default is
+    // preserved, only reused, never invented as a second "current" for a
+    // player who already has one.
+    const playerBRow = tournamentRows.find((r) => r.steam_id === playerB)!;
+    expect(Number(playerBRow.current) - Number(playerBRow.change)).toBe(5000);
+  });
+
+  it("continues the canonical rating from a tournament match into the next matchmaking match (no reset)", async () => {
+    await fx.enableSeasons();
+    const seasonId = await fx.season("2025-01-01", null);
+
+    const t = await tfx.launch(
+      [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 }],
+      4,
+      "Duel",
+    );
+    const semi = (await tfx.getBrackets(t.stageIds[0])).find(
+      (b) => b.round === 1,
+    )!;
+    const [{ lineup_1_id }] = await postgres.query<
+      Array<{ lineup_1_id: string }>
+    >("SELECT lineup_1_id FROM matches WHERE id = $1", [semi.match_id]);
+    const [{ steam_id: playerA }] = await postgres.query<
+      Array<{ steam_id: string }>
+    >(
+      "SELECT steam_id FROM match_lineup_players WHERE match_lineup_id = $1 LIMIT 1",
+      [lineup_1_id],
+    );
+
+    await tfx.winMatch(semi.match_id!, "lineup_1_id");
+    // winMatch only sets winning_lineup_id; a DB trigger (tbu_matches) then
+    // forces status to 'Finished' and stamps ended_at = NOW() in that same
+    // update. That leaves the tournament match's ended_at at "right now" --
+    // fine on its own, but the next matchmaking match below must be dated
+    // strictly LATER than that, or its starting-ELO lookup (which filters
+    // player_elo.created_at < the querying match's own ended_at) would
+    // exclude this match's just-written row entirely. Pin it to a known
+    // past instant instead of leaving it at wall-clock "now", so the
+    // matchmaking match's `endedDaysAgo` below has a fixed point to be
+    // later than.
+    await postgres.query(
+      "UPDATE matches SET ended_at = now() - make_interval(days => 2) WHERE id = $1",
       [semi.match_id],
     );
-    expect(rows.length).toBeGreaterThan(0);
-    expect(rows.every((r) => r.season_id === null)).toBe(true);
+    await generate(semi.match_id!);
+    const tournamentElo = Number(
+      (await eloRows(semi.match_id!)).find((r) => r.steam_id === playerA)!
+        .current,
+    );
+
+    // Next matchmaking match for the same player (even a loss) must start
+    // from the rating the tournament match just produced -- not 5000, and
+    // not whatever a separate matchmaking-only track would have had. Dated
+    // 1 day ago, i.e. strictly after the tournament match's pinned 2-days-ago
+    // timestamp above.
+    const opponent = await fx.player();
+    const mm = await duel(playerA, opponent, {
+      endedDaysAgo: 1,
+      winner: "b",
+    });
+    await generate(mm.id);
+    const mmRow = (await eloRows(mm.id)).find((r) => r.steam_id === playerA)!;
+
+    expect(Number(mmRow.current) - Number(mmRow.change)).toBe(tournamentElo);
+    expect(mmRow.season_id).toBe(seasonId);
   });
 
   it("protects strong performers on losing teams", async () => {
@@ -292,5 +432,25 @@ describe("ELO engine (SQL-driven)", () => {
     expect(Math.abs(Number(fightingLoser.change))).toBeLessThan(
       Math.abs(Number(silentLoser.change)),
     );
+  });
+
+  it("keeps Competitive/Wingman/Duel ratings independent for the same player", async () => {
+    const [a, b] = await fx.players(2);
+
+    const duelMatch = await duel(a, b, { endedDaysAgo: 2 });
+    await generate(duelMatch.id);
+    const duelElo = Number(
+      (await eloRows(duelMatch.id)).find((r) => r.steam_id === a)!.current,
+    );
+    expect(duelElo).not.toBe(5000);
+
+    // Same player's very first Wingman match still starts from the 5000
+    // baseline -- their Duel rating must not leak into a different mode.
+    const wingmanMatch = await wingman(a, b, { endedDaysAgo: 1 });
+    await generate(wingmanMatch.id);
+    const wingmanRow = (await eloRows(wingmanMatch.id)).find(
+      (r) => r.steam_id === a,
+    )!;
+    expect(Number(wingmanRow.current) - Number(wingmanRow.change)).toBe(5000);
   });
 });
