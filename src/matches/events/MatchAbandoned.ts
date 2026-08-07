@@ -9,6 +9,7 @@ export default class MatchAbandoned extends MatchEventProcessor<{
         __args: {
           object: {
             steam_id: this.data.steam_id,
+            match_id: this.matchId,
           },
         },
         __typename: true,

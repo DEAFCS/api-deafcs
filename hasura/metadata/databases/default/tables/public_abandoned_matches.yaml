@@ -8,6 +8,9 @@ select_permissions:
         - steam_id
         - abandoned_at
         - id
+        - match_id
+        - reason
+        - remove_sanction_date
       filter: {}
       allow_aggregations: true
     comment: ""

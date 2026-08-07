@@ -172,6 +172,11 @@ export class DisconnectBudgetService {
         __args: {
           object: {
             steam_id: steamId,
+            match_id: matchId ?? null,
+            reason,
+            remove_sanction_date: new Date(
+              Date.now() + durationMs,
+            ).toISOString(),
           },
         },
         __typename: true,
