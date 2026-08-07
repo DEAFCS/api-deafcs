@@ -91,6 +91,24 @@ export class CancelExpiredMatches extends WorkerHost {
   private async handleExpiredTournamentMatch(
     match: Awaited<ReturnType<typeof this.getTournamentMatches>>[number],
   ) {
+    const lineupPlayers = [
+      ...match.lineup_1.lineup_players,
+      ...match.lineup_2.lineup_players,
+    ];
+    const hasNoShow = lineupPlayers.some(
+      (player) => player.steam_id != null && player.connected_at == null,
+    );
+
+    // Everyone's actually touched the server -- they just never all hit .r
+    // in-game (or nobody bothered). That's not a no-show, so force the
+    // match past warmup the same way a non-tournament match would, instead
+    // of forfeiting a fully-staffed match or paging an organizer over
+    // nothing.
+    if (!hasNoShow) {
+      await this.forceStartMatch(match);
+      return;
+    }
+
     const hasReadyLineup = match.lineup_1.is_ready || match.lineup_2.is_ready;
     const isAdminMode = match.options?.match_mode === "admin";
 
@@ -216,16 +234,25 @@ export class CancelExpiredMatches extends WorkerHost {
         },
         id: true,
         is_tournament_match: true,
+        server_id: true,
         options: {
           match_mode: true,
         },
         lineup_1: {
           id: true,
           is_ready: true,
+          lineup_players: {
+            steam_id: true,
+            connected_at: true,
+          },
         },
         lineup_2: {
           id: true,
           is_ready: true,
+          lineup_players: {
+            steam_id: true,
+            connected_at: true,
+          },
         },
       },
     });
@@ -282,11 +309,10 @@ export class CancelExpiredMatches extends WorkerHost {
     return matches;
   }
 
-  private async forceStartMatch(
-    match: Awaited<
-      ReturnType<typeof this.getExpiredNonTournamentMatches>
-    >[number],
-  ) {
+  // Structural type instead of the previous getExpiredNonTournamentMatches-
+  // only one -- also called for a no-show-free tournament match now
+  // (handleExpiredTournamentMatch), which comes from a different query.
+  private async forceStartMatch(match: { id: string; server_id: string | null }) {
     if (!match.server_id) {
       this.logger.warn(
         `cannot force-start match=${match.id}, no server assigned`,
