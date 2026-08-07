@@ -21,7 +21,7 @@ import { SteamBansService } from "src/steam-match-history/steam-bans.service";
 import { RedisManagerService } from "src/redis/redis-manager/redis-manager.service";
 import { PlayerReindexService } from "./player-reindex.service";
 import { PlayerEloRecomputeService } from "../matches/player-elo-recompute.service";
-import { SYSTEM_STEAM_ID } from "../matches/disconnect-budget/disconnect-budget.service";
+import { SYSTEM_STEAM_ID } from "../matches/disconnect-budget/constants";
 
 @Controller("type-sense")
 export class TypeSenseController {

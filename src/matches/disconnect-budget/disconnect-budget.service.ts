@@ -2,10 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { PostgresService } from "src/postgres/postgres.service";
 import { SanctionsService } from "src/sanctions/sanctions.service";
 import { HasuraService } from "src/hasura/hasura.service";
-
-// Reserved player row (see migration 1877000000000_seed_system_player) used
-// as the sanctioner for bans issued automatically rather than by an admin.
-export const SYSTEM_STEAM_ID = "0";
+import { SYSTEM_STEAM_ID } from "./constants";
 
 const DISCONNECT_BUDGET_SECONDS = 5 * 60;
 

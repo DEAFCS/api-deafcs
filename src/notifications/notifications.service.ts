@@ -13,7 +13,7 @@ import {
 } from "generated/schema";
 import { DISCORD_COLORS } from "./utilities/constants";
 import { NotificationsQueues } from "./enums/NotificationsQueues";
-import { SYSTEM_STEAM_ID } from "../matches/disconnect-budget/disconnect-budget.service";
+import { SYSTEM_STEAM_ID } from "../matches/disconnect-budget/constants";
 
 @Injectable()
 export class NotificationsService {

@@ -47,7 +47,7 @@ import { isRoleAbove } from "../utilities/isRoleAbove";
 import { DemoMetadataService } from "../demos/demo-metadata.service";
 import { ClipsService } from "./clips/clips.service";
 import { ClipSpec } from "./clips/types/ClipSpec";
-import { SYSTEM_STEAM_ID } from "./disconnect-budget/disconnect-budget.service";
+import { SYSTEM_STEAM_ID } from "./disconnect-budget/constants";
 
 @Controller("matches")
 export class MatchesController {

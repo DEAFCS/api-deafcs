@@ -21,7 +21,7 @@ import { DraftGame } from "./types/DraftGame";
 import { DraftGameError } from "./types/DraftGameError";
 import { DraftGameQueues } from "./enums/DraftGameQueues";
 import { DraftService } from "./draft.service";
-import { SYSTEM_STEAM_ID } from "../matches/disconnect-budget/disconnect-budget.service";
+import { SYSTEM_STEAM_ID } from "../matches/disconnect-budget/constants";
 
 export interface CreateDraftGameSettings {
   type: e_match_types_enum;
