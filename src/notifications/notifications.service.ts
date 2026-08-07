@@ -13,6 +13,7 @@ import {
 } from "generated/schema";
 import { DISCORD_COLORS } from "./utilities/constants";
 import { NotificationsQueues } from "./enums/NotificationsQueues";
+import { SYSTEM_STEAM_ID } from "../matches/disconnect-budget/disconnect-budget.service";
 
 @Injectable()
 export class NotificationsService {
@@ -149,6 +150,23 @@ export class NotificationsService {
     reason?: string | null;
   }): Promise<void> {
     if (sanction.type !== "ban") {
+      return;
+    }
+
+    // Automated leaver/no-show bans ("Abandoned") shouldn't page admins --
+    // only a real admin-issued sanction ("Sanction") does. This fires from
+    // the generic player_sanctions INSERT event trigger for every ban
+    // regardless of source, so the distinction has to be looked up here
+    // rather than relying on the caller to only invoke this for admin bans.
+    const [sanctionRow] = await this.postgres.query<
+      Array<{ sanctioned_by_steam_id: string }>
+    >(
+      `SELECT sanctioned_by_steam_id::text AS sanctioned_by_steam_id
+         FROM public.player_sanctions
+        WHERE id = $1`,
+      [sanction.sanctionId],
+    );
+    if (sanctionRow?.sanctioned_by_steam_id === SYSTEM_STEAM_ID) {
       return;
     }
 

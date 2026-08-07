@@ -1,7 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { PostgresService } from "src/postgres/postgres.service";
 import { SanctionsService } from "src/sanctions/sanctions.service";
-import { NotificationsService } from "src/notifications/notifications.service";
+import { HasuraService } from "src/hasura/hasura.service";
 
 // Reserved player row (see migration 1877000000000_seed_system_player) used
 // as the sanctioner for bans issued automatically rather than by an admin.
@@ -41,7 +41,7 @@ export class DisconnectBudgetService {
     private readonly logger: Logger,
     private readonly postgres: PostgresService,
     private readonly sanctionsService: SanctionsService,
-    private readonly notificationsService: NotificationsService,
+    private readonly hasura: HasuraService,
   ) {}
 
   /**
@@ -161,18 +161,25 @@ export class DisconnectBudgetService {
       sanctionedBySteamId: SYSTEM_STEAM_ID,
     });
 
-    // Admins-only bell notification for automated bans -- deliberately not
-    // queueSanctionNotification/notifyMatchPlayersOfSanction, which would
-    // also broadcast "who got banned" to regular/verified users who happened
-    // to be in a recent match with them.
-    if (id) {
-      await this.notificationsService.notifyAdminsOfBan({
-        sanctionId: id,
-        steamId,
-        type: "ban",
-        reason,
-      });
-    }
+    // This still goes through player_sanctions (type: "ban") -- that's
+    // what actually enforces the block (is_banned, matchmaking queue-join,
+    // the game server's connect-time kick) and none of that changes here.
+    // But it's an "Abandoned" violation, not a "Sanction" -- also record it
+    // in abandoned_matches (same table/shape MatchAbandoned already
+    // writes to) so it shows up under the Abandoned tab on the player's
+    // profile instead of Sanctions, and deliberately skip the admin bell
+    // notification below: admins asked to be alerted for real (Sanction)
+    // bans, not for every automated leaver/no-show.
+    await this.hasura.mutation({
+      insert_abandoned_matches_one: {
+        __args: {
+          object: {
+            steam_id: steamId,
+          },
+        },
+        __typename: true,
+      },
+    });
 
     // Mid-match/touched-server leavers: flag the row now, forcing a flat
     // penalty once the match actually finishes and generate_player_elo_for_match
