@@ -1,3 +1,23 @@
+-- Add a Source filter (Overall / Matchmaking / Tournament / League) to the
+-- leaderboard. Classifies matches using existing relationships only
+-- (tournament_brackets -> tournament_stages -> is_league_tournament()) --
+-- no schema changes.
+--
+-- For non-ELO categories, _source filters rows the same way
+-- _exclude_tournaments already did, just with a 3-way split instead of an
+-- in/out boolean. Trophies has no Matchmaking bucket (trophies only exist
+-- for tournaments) and correctly returns empty for that selection.
+--
+-- For ELO, _source NEVER filters `value` (current/peak canonical rating --
+-- see the canonical-ELO comment block above _leaderboard_elo). It only
+-- scopes the contribution columns (ELO change, matches played) to the
+-- selected source, and restricts row membership to players who actually
+-- have matches from that source in the window (a clean empty state rather
+-- than a fake all-zero row for everyone).
+--
+-- _exclude_tournaments is left in every signature unchanged for backward
+-- compatibility with any other caller still using it.
+
 -- Stale-overload cleanup. CREATE OR REPLACE cannot remove an old overload, so
 -- once a second signature exists EVERY call becomes ambiguous ("function is not
 -- unique", SQLSTATE 42725). Drop every known signature explicitly before

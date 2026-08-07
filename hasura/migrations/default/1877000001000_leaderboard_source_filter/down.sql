@@ -1,3 +1,37 @@
+-- Rollback the leaderboard Source filter (1877000001000). Restores
+-- get_leaderboard / _leaderboard_* to their pre-Source signatures
+-- (matching what 1877000000900 last deployed) by re-dropping the 8-arg
+-- get_leaderboard/get_player_leaderboard_rank overloads and every
+-- _source-bearing _leaderboard_* signature, then recreating the previous
+-- versions.
+
+DROP FUNCTION IF EXISTS public.get_leaderboard(TEXT, INT, TEXT, BOOLEAN, TEXT, UUID, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.get_player_leaderboard_rank(TEXT, INT, TEXT, TEXT, BOOLEAN, UUID, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public._leaderboard_elo(INT, TEXT, BOOLEAN, UUID, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public._leaderboard_kdr(INT, TEXT, BOOLEAN, UUID, TEXT);
+DROP FUNCTION IF EXISTS public._leaderboard_win_rate(INT, TEXT, BOOLEAN, UUID, TEXT);
+DROP FUNCTION IF EXISTS public._leaderboard_hs_pct(INT, TEXT, BOOLEAN, UUID, TEXT);
+DROP FUNCTION IF EXISTS public._leaderboard_trophies(INT, TEXT, UUID, TEXT);
+DROP FUNCTION IF EXISTS public._leaderboard_hltv_metric(TEXT, INT, TEXT, BOOLEAN, TEXT, UUID, TEXT);
+DROP FUNCTION IF EXISTS public._leaderboard_udr(INT, TEXT, BOOLEAN, TEXT, UUID, TEXT);
+DROP FUNCTION IF EXISTS public._leaderboard_match_source(UUID);
+DROP FUNCTION IF EXISTS public._leaderboard_tournament_source(UUID);
+
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN
+    SELECT p.oid::regprocedure AS sig
+    FROM pg_proc p
+    WHERE p.pronamespace = 'public'::regnamespace
+      AND p.proname IN ('get_leaderboard', 'get_player_leaderboard_rank')
+      AND p.pronargs <> 7
+  LOOP
+    EXECUTE 'DROP FUNCTION ' || r.sig;
+  END LOOP;
+END $$;
+
+
 -- Stale-overload cleanup. CREATE OR REPLACE cannot remove an old overload, so
 -- once a second signature exists EVERY call becomes ambiguous ("function is not
 -- unique", SQLSTATE 42725). Drop every known signature explicitly before
@@ -7,24 +41,18 @@
 -- actually re-run this cleanup against an already-broken database.
 DROP FUNCTION IF EXISTS public._leaderboard_trophies(INT);
 DROP FUNCTION IF EXISTS public._leaderboard_trophies(INT, TEXT);                     -- pre-_season 2-arg
-DROP FUNCTION IF EXISTS public._leaderboard_trophies(INT, TEXT, UUID);               -- pre-_source 3-arg
+DROP FUNCTION IF EXISTS public._leaderboard_trophies(INT, TEXT, UUID);               -- current exact signature, return type may be stale
 DROP FUNCTION IF EXISTS public._leaderboard_awards(INT, TEXT, UUID);                 -- Phase A pre-compatibility name
 DROP FUNCTION IF EXISTS public.get_leaderboard(TEXT, INT, TEXT, BOOLEAN);            -- pre-_role 4-arg
 DROP FUNCTION IF EXISTS public.get_leaderboard(TEXT, INT, TEXT, BOOLEAN, TEXT);      -- pre-_season 5-arg
 DROP FUNCTION IF EXISTS public.get_player_leaderboard_rank(TEXT, INT, TEXT, TEXT, BOOLEAN); -- pre-_season 5-arg
 DROP FUNCTION IF EXISTS public._leaderboard_elo(INT, TEXT, BOOLEAN);
 DROP FUNCTION IF EXISTS public._leaderboard_elo(INT, TEXT, BOOLEAN, UUID);
-DROP FUNCTION IF EXISTS public._leaderboard_elo(INT, TEXT, BOOLEAN, UUID, TEXT);     -- pre-_source 5-arg
 DROP FUNCTION IF EXISTS public._leaderboard_kdr(INT, TEXT, BOOLEAN);
-DROP FUNCTION IF EXISTS public._leaderboard_kdr(INT, TEXT, BOOLEAN, UUID);           -- pre-_source 4-arg
 DROP FUNCTION IF EXISTS public._leaderboard_win_rate(INT, TEXT, BOOLEAN);
-DROP FUNCTION IF EXISTS public._leaderboard_win_rate(INT, TEXT, BOOLEAN, UUID);      -- pre-_source 4-arg
 DROP FUNCTION IF EXISTS public._leaderboard_hs_pct(INT, TEXT, BOOLEAN);
-DROP FUNCTION IF EXISTS public._leaderboard_hs_pct(INT, TEXT, BOOLEAN, UUID);        -- pre-_source 4-arg
 DROP FUNCTION IF EXISTS public._leaderboard_hltv_metric(TEXT, INT, TEXT, BOOLEAN, TEXT);
 DROP FUNCTION IF EXISTS public._leaderboard_udr(INT, TEXT, BOOLEAN, TEXT);
-DROP FUNCTION IF EXISTS public._leaderboard_match_source(UUID);
-DROP FUNCTION IF EXISTS public._leaderboard_tournament_source(UUID);
 
 -- Belt-and-suspenders: sweep up any other historical get_leaderboard arity we
 -- did not enumerate above (e.g. an even older 3-arg overload).
@@ -45,45 +73,6 @@ BEGIN
   END LOOP;
 END $$;
 
--- ============================================================
--- Match/tournament source classification (Matchmaking / Tournament / League)
---
--- Classifies a match into exactly one of 'matchmaking' / 'tournament' /
--- 'league' using only existing relationships -- no schema changes, no new
--- columns. This is a read-only classification helper; it does not affect
--- the canonical ELO write path or any ELO value calculation.
---   'matchmaking' = no tournament_brackets row references this match
---   'tournament'  = bracket-linked, but the owning tournament is NOT
---                   league-backed
---   'league'      = bracket-linked, and the owning tournament IS
---                   league-backed (public.is_league_tournament())
--- ============================================================
-CREATE OR REPLACE FUNCTION public._leaderboard_match_source(_match_id uuid)
-RETURNS text
-LANGUAGE sql STABLE
-AS $$
-  SELECT CASE
-    WHEN tb.match_id IS NULL THEN 'matchmaking'
-    WHEN public.is_league_tournament(ts.tournament_id) THEN 'league'
-    ELSE 'tournament'
-  END
-  FROM (SELECT _match_id AS match_id) mm
-  LEFT JOIN public.tournament_brackets tb ON tb.match_id = mm.match_id
-  LEFT JOIN public.tournament_stages ts ON ts.id = tb.tournament_stage_id
-$$;
-
--- Trophies join straight to tournaments (no match_id hop). Matchmaking is
--- not a meaningful bucket here -- trophies only ever exist for tournaments.
-CREATE OR REPLACE FUNCTION public._leaderboard_tournament_source(_tournament_id uuid)
-RETURNS text
-LANGUAGE sql STABLE
-AS $$
-  SELECT CASE
-    WHEN public.is_league_tournament(_tournament_id) THEN 'league'
-    ELSE 'tournament'
-  END
-$$;
-
 CREATE OR REPLACE FUNCTION public.get_leaderboard(
   _category TEXT,
   _window_days INT,
@@ -91,46 +80,41 @@ CREATE OR REPLACE FUNCTION public.get_leaderboard(
   _exclude_tournaments BOOLEAN DEFAULT FALSE,
   _role TEXT DEFAULT NULL,
   _season_id UUID DEFAULT NULL,
-  _elo_view TEXT DEFAULT 'current',
-  _source TEXT DEFAULT 'overall'
+  _elo_view TEXT DEFAULT 'current'
 )
 RETURNS SETOF public.leaderboard_entries
 LANGUAGE plpgsql STABLE
 AS $$
 BEGIN
-  IF _source IS NULL OR lower(_source) NOT IN ('overall', 'matchmaking', 'tournament', 'league') THEN
-    RAISE EXCEPTION 'Invalid source: %. Must be one of: overall, matchmaking, tournament, league', _source;
-  END IF;
-
   IF _category = 'elo' THEN
-    RETURN QUERY SELECT * FROM _leaderboard_elo(_window_days, _match_type, _exclude_tournaments, _season_id, _elo_view, _source);
+    RETURN QUERY SELECT * FROM _leaderboard_elo(_window_days, _match_type, _exclude_tournaments, _season_id, _elo_view);
 
   ELSIF _category = 'best_kdr' THEN
-    RETURN QUERY SELECT * FROM _leaderboard_kdr(_window_days, _match_type, _exclude_tournaments, _season_id, _source);
+    RETURN QUERY SELECT * FROM _leaderboard_kdr(_window_days, _match_type, _exclude_tournaments, _season_id);
 
   ELSIF _category = 'best_win_rate' THEN
-    RETURN QUERY SELECT * FROM _leaderboard_win_rate(_window_days, _match_type, _exclude_tournaments, _season_id, _source);
+    RETURN QUERY SELECT * FROM _leaderboard_win_rate(_window_days, _match_type, _exclude_tournaments, _season_id);
 
   ELSIF _category = 'highest_hs_pct' THEN
-    RETURN QUERY SELECT * FROM _leaderboard_hs_pct(_window_days, _match_type, _exclude_tournaments, _season_id, _source);
+    RETURN QUERY SELECT * FROM _leaderboard_hs_pct(_window_days, _match_type, _exclude_tournaments, _season_id);
 
   ELSIF _category = 'trophies' THEN
-    RETURN QUERY SELECT * FROM _leaderboard_trophies(_window_days, _match_type, _season_id, _source);
+    RETURN QUERY SELECT * FROM _leaderboard_trophies(_window_days, _match_type, _season_id);
 
   ELSIF _category = 'best_rating' THEN
-    RETURN QUERY SELECT * FROM _leaderboard_hltv_metric('rating', _window_days, _match_type, _exclude_tournaments, _role, _season_id, _source);
+    RETURN QUERY SELECT * FROM _leaderboard_hltv_metric('rating', _window_days, _match_type, _exclude_tournaments, _role, _season_id);
 
   ELSIF _category = 'best_adr' THEN
-    RETURN QUERY SELECT * FROM _leaderboard_hltv_metric('adr', _window_days, _match_type, _exclude_tournaments, _role, _season_id, _source);
+    RETURN QUERY SELECT * FROM _leaderboard_hltv_metric('adr', _window_days, _match_type, _exclude_tournaments, _role, _season_id);
 
   ELSIF _category = 'best_kpr' THEN
-    RETURN QUERY SELECT * FROM _leaderboard_hltv_metric('kpr', _window_days, _match_type, _exclude_tournaments, _role, _season_id, _source);
+    RETURN QUERY SELECT * FROM _leaderboard_hltv_metric('kpr', _window_days, _match_type, _exclude_tournaments, _role, _season_id);
 
   ELSIF _category = 'best_kast' THEN
-    RETURN QUERY SELECT * FROM _leaderboard_hltv_metric('kast', _window_days, _match_type, _exclude_tournaments, _role, _season_id, _source);
+    RETURN QUERY SELECT * FROM _leaderboard_hltv_metric('kast', _window_days, _match_type, _exclude_tournaments, _role, _season_id);
 
   ELSIF _category = 'best_udr' THEN
-    RETURN QUERY SELECT * FROM _leaderboard_udr(_window_days, _match_type, _exclude_tournaments, _role, _season_id, _source);
+    RETURN QUERY SELECT * FROM _leaderboard_udr(_window_days, _match_type, _exclude_tournaments, _role, _season_id);
 
   ELSE
     RAISE EXCEPTION 'Invalid category: %. Must be one of: elo, best_kdr, best_win_rate, highest_hs_pct, trophies, best_rating, best_adr, best_kpr, best_kast, best_udr', _category;
@@ -160,25 +144,13 @@ $$;
 -- the shared get_leaderboard dispatcher and the other, still source-
 -- filterable, leaderboard categories below) but has no effect on ELO
 -- value/secondary_value/tertiary_value/matches_played.
---
--- _source (Overall/Matchmaking/Tournament/League) is likewise NEVER applied
--- to `value`, for the exact same reason: there is only one canonical ELO
--- rating stream, and a source-filtered "current ELO" would be mathematically
--- invalid. _source instead scopes the *contribution* columns -- how much
--- ELO change and how many matches came from the selected source within the
--- window -- while `value` (current/peak) stays identical across every
--- Source selection for a given player/mode/window. When a Source other than
--- Overall is selected, players with zero matches from that source in the
--- window are dropped from the result set entirely (a clean empty state
--- rather than showing everyone with a fake all-zero row).
 -- ============================================================
 CREATE OR REPLACE FUNCTION public._leaderboard_elo(
   _window_days INT,
   _match_type TEXT,
   _exclude_tournaments BOOLEAN,
   _season_id UUID DEFAULT NULL,
-  _elo_view TEXT DEFAULT 'current',
-  _source TEXT DEFAULT 'overall'
+  _elo_view TEXT DEFAULT 'current'
 )
 RETURNS SETOF public.leaderboard_entries
 LANGUAGE plpgsql STABLE
@@ -194,10 +166,6 @@ DECLARE
 BEGIN
   IF _elo_view IS NULL OR lower(_elo_view) NOT IN ('current', 'peak') THEN
     RAISE EXCEPTION 'Invalid ELO view: %. Must be one of: current, peak', _elo_view;
-  END IF;
-
-  IF _source IS NULL OR lower(_source) NOT IN ('overall', 'matchmaking', 'tournament', 'league') THEN
-    RAISE EXCEPTION 'Invalid source: %. Must be one of: overall, matchmaking, tournament, league', _source;
   END IF;
 
   _use_peak := lower(_elo_view) = 'peak';
@@ -278,22 +246,6 @@ BEGIN
       AND ((_from IS NULL OR pe.created_at >= _from) AND (_to IS NULL OR pe.created_at < _to))
     GROUP BY pe.steam_id
   ),
-  -- Source-scoped contribution: how much ELO change and how many matches
-  -- came from the selected Source within the window. Only computed/used
-  -- when _source <> 'overall'. Never feeds `value` -- see the big comment
-  -- above this function.
-  source_change AS (
-    SELECT pe.steam_id,
-      SUM(pe.change) as total_change,
-      COUNT(*)::int as source_matches_played
-    FROM player_elo pe
-    WHERE lower(_source) <> 'overall'
-      AND (_match_type IS NULL OR pe.type = _match_type)
-      AND (_season_id IS NULL OR pe.season_id = _season_id)
-      AND ((_from IS NULL OR pe.created_at >= _from) AND (_to IS NULL OR pe.created_at < _to))
-      AND public._leaderboard_match_source(pe.match_id) = lower(_source)
-    GROUP BY pe.steam_id
-  ),
   first_elo AS (
     SELECT DISTINCT ON (pe.steam_id)
       pe.steam_id,
@@ -371,17 +323,6 @@ BEGIN
     SELECT steam_id FROM last_elo
     UNION
     SELECT steam_id FROM peak_elo WHERE _use_peak
-  ),
-  -- When a Source other than Overall is selected, only keep players who
-  -- actually have matches from that source in the window -- a clean empty
-  -- leaderboard (or empty subset) rather than showing every canonical-ELO
-  -- player with a fake all-zero row. `value` for anyone kept here is still
-  -- untouched/canonical -- this only restricts *row membership*.
-  filtered_players AS (
-    SELECT d.steam_id
-    FROM driving_players d
-    WHERE lower(_source) = 'overall'
-       OR EXISTS (SELECT 1 FROM source_change sc WHERE sc.steam_id = d.steam_id)
   )
   SELECT
     d.steam_id::text           as player_steam_id,
@@ -394,8 +335,6 @@ BEGIN
     END                        as value,
     CASE WHEN _use_peak
       THEN COALESCE(pac.active_current, 5000)::float
-      WHEN lower(_source) <> 'overall'
-      THEN COALESCE(sc.total_change, 0)::float
       WHEN _unbounded_current
       THEN le.latest_change::float
       WHEN _is_rolling_window
@@ -408,16 +347,12 @@ BEGIN
       THEN COALESCE(rs.record_streak, 0)::float
       ELSE COALESCE(ws.streak, 0)::float
     END                        as tertiary_value,
-    CASE WHEN lower(_source) <> 'overall'
-      THEN COALESCE(sc.source_matches_played, 0)
-      ELSE COALESCE(mc.matches_played, 0)
-    END::int                   as matches_played
-  FROM filtered_players d
+    COALESCE(mc.matches_played, 0)::int as matches_played
+  FROM driving_players d
   LEFT JOIN last_elo le ON le.steam_id = d.steam_id
   LEFT JOIN peak_elo pk ON pk.steam_id = d.steam_id
   LEFT JOIN peak_active_current pac ON pac.steam_id = d.steam_id
   LEFT JOIN rolling_change rc ON rc.steam_id = d.steam_id
-  LEFT JOIN source_change sc ON sc.steam_id = d.steam_id
   LEFT JOIN first_elo fe ON fe.steam_id = d.steam_id
   LEFT JOIN match_counts mc ON mc.steam_id = d.steam_id
   LEFT JOIN win_streak ws ON ws.steam_id = d.steam_id
@@ -436,8 +371,7 @@ CREATE OR REPLACE FUNCTION public._leaderboard_kdr(
   _window_days INT,
   _match_type TEXT,
   _exclude_tournaments BOOLEAN,
-  _season_id UUID DEFAULT NULL,
-  _source TEXT DEFAULT 'overall'
+  _season_id UUID DEFAULT NULL
 )
 RETURNS SETOF public.leaderboard_entries
 LANGUAGE plpgsql STABLE
@@ -446,10 +380,6 @@ DECLARE
   _from timestamptz;
   _to timestamptz;
 BEGIN
-  IF _source IS NULL OR lower(_source) NOT IN ('overall', 'matchmaking', 'tournament', 'league') THEN
-    RAISE EXCEPTION 'Invalid source: %. Must be one of: overall, matchmaking, tournament, league', _source;
-  END IF;
-
   IF _season_id IS NOT NULL THEN
     SELECT s.starts_at, COALESCE(s.ends_at, now())
       INTO _from, _to
@@ -478,7 +408,6 @@ BEGIN
       AND ((_from IS NULL OR pk.time >= _from) AND (_to IS NULL OR pk.time < _to))
       AND (_match_type IS NULL OR mo.type = _match_type)
       AND (NOT _exclude_tournaments OR NOT EXISTS (SELECT 1 FROM tournament_brackets tb WHERE tb.match_id = pk.match_id))
-      AND (lower(_source) = 'overall' OR public._leaderboard_match_source(pk.match_id) = lower(_source))
     GROUP BY pk.attacker_steam_id
   ),
   deaths AS (
@@ -493,7 +422,6 @@ BEGIN
       AND ((_from IS NULL OR dk.time >= _from) AND (_to IS NULL OR dk.time < _to))
       AND (_match_type IS NULL OR mo2.type = _match_type)
       AND (NOT _exclude_tournaments OR NOT EXISTS (SELECT 1 FROM tournament_brackets tb WHERE tb.match_id = dk.match_id))
-      AND (lower(_source) = 'overall' OR public._leaderboard_match_source(dk.match_id) = lower(_source))
     GROUP BY dk.attacked_steam_id
   )
   SELECT
@@ -523,8 +451,7 @@ CREATE OR REPLACE FUNCTION public._leaderboard_win_rate(
   _window_days INT,
   _match_type TEXT,
   _exclude_tournaments BOOLEAN,
-  _season_id UUID DEFAULT NULL,
-  _source TEXT DEFAULT 'overall'
+  _season_id UUID DEFAULT NULL
 )
 RETURNS SETOF public.leaderboard_entries
 LANGUAGE plpgsql STABLE
@@ -533,10 +460,6 @@ DECLARE
   _from timestamptz;
   _to timestamptz;
 BEGIN
-  IF _source IS NULL OR lower(_source) NOT IN ('overall', 'matchmaking', 'tournament', 'league') THEN
-    RAISE EXCEPTION 'Invalid source: %. Must be one of: overall, matchmaking, tournament, league', _source;
-  END IF;
-
   IF _season_id IS NOT NULL THEN
     SELECT s.starts_at, COALESCE(s.ends_at, now())
       INTO _from, _to
@@ -567,7 +490,6 @@ BEGIN
       AND ((_from IS NULL OR m.ended_at >= _from) AND (_to IS NULL OR m.ended_at < _to))
       AND (_match_type IS NULL OR mo.type = _match_type)
       AND (NOT _exclude_tournaments OR NOT EXISTS (SELECT 1 FROM tournament_brackets tb WHERE tb.match_id = m.id))
-      AND (lower(_source) = 'overall' OR public._leaderboard_match_source(m.id) = lower(_source))
   )
   SELECT
     pm.steam_id::text          as player_steam_id,
@@ -593,8 +515,7 @@ CREATE OR REPLACE FUNCTION public._leaderboard_hs_pct(
   _window_days INT,
   _match_type TEXT,
   _exclude_tournaments BOOLEAN,
-  _season_id UUID DEFAULT NULL,
-  _source TEXT DEFAULT 'overall'
+  _season_id UUID DEFAULT NULL
 )
 RETURNS SETOF public.leaderboard_entries
 LANGUAGE plpgsql STABLE
@@ -603,10 +524,6 @@ DECLARE
   _from timestamptz;
   _to timestamptz;
 BEGIN
-  IF _source IS NULL OR lower(_source) NOT IN ('overall', 'matchmaking', 'tournament', 'league') THEN
-    RAISE EXCEPTION 'Invalid source: %. Must be one of: overall, matchmaking, tournament, league', _source;
-  END IF;
-
   IF _season_id IS NOT NULL THEN
     SELECT s.starts_at, COALESCE(s.ends_at, now())
       INTO _from, _to
@@ -640,7 +557,6 @@ BEGIN
     AND ((_from IS NULL OR pk.time >= _from) AND (_to IS NULL OR pk.time < _to))
     AND (_match_type IS NULL OR mo.type = _match_type)
     AND (NOT _exclude_tournaments OR NOT EXISTS (SELECT 1 FROM tournament_brackets tb WHERE tb.match_id = pk.match_id))
-    AND (lower(_source) = 'overall' OR public._leaderboard_match_source(pk.match_id) = lower(_source))
   GROUP BY pk.attacker_steam_id, p.name, p.avatar_url, p.country
   ORDER BY value DESC;
 END;
@@ -654,8 +570,7 @@ $$;
 CREATE OR REPLACE FUNCTION public._leaderboard_trophies(
   _window_days INT,
   _match_type TEXT DEFAULT NULL,
-  _season_id UUID DEFAULT NULL,
-  _source TEXT DEFAULT 'overall'
+  _season_id UUID DEFAULT NULL
 )
 RETURNS SETOF public.leaderboard_entries
 LANGUAGE plpgsql STABLE
@@ -664,10 +579,6 @@ DECLARE
   _from timestamptz;
   _to timestamptz;
 BEGIN
-  IF _source IS NULL OR lower(_source) NOT IN ('overall', 'matchmaking', 'tournament', 'league') THEN
-    RAISE EXCEPTION 'Invalid source: %. Must be one of: overall, matchmaking, tournament, league', _source;
-  END IF;
-
   IF _season_id IS NOT NULL THEN
     SELECT s.starts_at, COALESCE(s.ends_at, now())
       INTO _from, _to
@@ -696,12 +607,6 @@ BEGIN
     WHERE tt.player_steam_id IS NOT NULL
       AND ((_from IS NULL OR t.start >= _from) AND (_to IS NULL OR t.start < _to))
       AND (_match_type IS NULL OR mo.type = _match_type)
-      -- Trophies only ever belong to tournaments -- Matchmaking is never a
-      -- meaningful bucket here and correctly yields an empty result.
-      AND (
-        lower(_source) = 'overall'
-        OR (lower(_source) <> 'matchmaking' AND public._leaderboard_tournament_source(t.id) = lower(_source))
-      )
     GROUP BY tt.player_steam_id
   )
   SELECT
@@ -729,8 +634,7 @@ CREATE TABLE IF NOT EXISTS public.player_leaderboard_rank (
 
 -- Drop every stale overload so the get_leaderboard() call below resolves
 -- unambiguously. The current get_leaderboard / get_player_leaderboard_rank both
--- take 8 args (added _source), so anything with a different arg count is a
--- stale signature.
+-- take 7 args, so anything with a different arg count is a stale signature.
 DO $$
 DECLARE r record;
 BEGIN
@@ -739,7 +643,7 @@ BEGIN
     FROM pg_proc p
     WHERE p.pronamespace = 'public'::regnamespace
       AND p.proname IN ('get_leaderboard', 'get_player_leaderboard_rank')
-      AND p.pronargs <> 8
+      AND p.pronargs <> 7
   LOOP
     EXECUTE 'DROP FUNCTION ' || r.sig;
   END LOOP;
@@ -752,8 +656,7 @@ CREATE OR REPLACE FUNCTION public.get_player_leaderboard_rank(
   _match_type TEXT DEFAULT NULL,
   _exclude_tournaments BOOLEAN DEFAULT FALSE,
   _season_id UUID DEFAULT NULL,
-  _elo_view TEXT DEFAULT 'current',
-  _source TEXT DEFAULT 'overall'
+  _elo_view TEXT DEFAULT 'current'
 )
 RETURNS SETOF public.player_leaderboard_rank
 LANGUAGE plpgsql STABLE
@@ -766,9 +669,9 @@ BEGIN
       le.value,
       (RANK() OVER (ORDER BY le.value DESC))::int AS rank,
       (COUNT(*) OVER ())::int AS total
-    -- Pass all 8 args explicitly. A shorter call binds ambiguously if a stale
-    -- overload still exists; exact arity always resolves the 8-arg one.
-    FROM public.get_leaderboard(_category, _window_days, _match_type, _exclude_tournaments, NULL::text, _season_id, _elo_view, _source) le
+    -- Pass all 7 args explicitly. A shorter call binds ambiguously if a stale
+    -- overload still exists; exact arity always resolves the 7-arg one.
+    FROM public.get_leaderboard(_category, _window_days, _match_type, _exclude_tournaments, NULL::text, _season_id, _elo_view) le
   )
   SELECT r.player_steam_id, r.value, r.rank, r.total
   FROM ranked r
@@ -787,8 +690,7 @@ CREATE OR REPLACE FUNCTION public._leaderboard_hltv_metric(
   _match_type TEXT,
   _exclude_tournaments BOOLEAN,
   _role TEXT DEFAULT NULL,
-  _season_id UUID DEFAULT NULL,
-  _source TEXT DEFAULT 'overall'
+  _season_id UUID DEFAULT NULL
 )
 RETURNS SETOF public.leaderboard_entries
 LANGUAGE plpgsql STABLE
@@ -797,10 +699,6 @@ DECLARE
   _from timestamptz;
   _to timestamptz;
 BEGIN
-  IF _source IS NULL OR lower(_source) NOT IN ('overall', 'matchmaking', 'tournament', 'league') THEN
-    RAISE EXCEPTION 'Invalid source: %. Must be one of: overall, matchmaking, tournament, league', _source;
-  END IF;
-
   IF _season_id IS NOT NULL THEN
     SELECT s.starts_at, COALESCE(s.ends_at, now())
       INTO _from, _to
@@ -836,7 +734,6 @@ BEGIN
       AND ((_from IS NULL OR m.created_at >= _from) AND (_to IS NULL OR m.created_at < _to))
       AND (_match_type IS NULL OR mo.type = _match_type)
       AND (NOT _exclude_tournaments OR NOT EXISTS (SELECT 1 FROM tournament_brackets tb WHERE tb.match_id = h.match_id))
-      AND (lower(_source) = 'overall' OR public._leaderboard_match_source(h.match_id) = lower(_source))
       AND (_role IS NULL OR r.role = _role)
     GROUP BY h.steam_id
     HAVING SUM(h.rounds_played) >= 50
@@ -875,8 +772,7 @@ CREATE OR REPLACE FUNCTION public._leaderboard_udr(
   _match_type TEXT,
   _exclude_tournaments BOOLEAN,
   _role TEXT DEFAULT NULL,
-  _season_id UUID DEFAULT NULL,
-  _source TEXT DEFAULT 'overall'
+  _season_id UUID DEFAULT NULL
 )
 RETURNS SETOF public.leaderboard_entries
 LANGUAGE plpgsql STABLE
@@ -885,10 +781,6 @@ DECLARE
   _from timestamptz;
   _to timestamptz;
 BEGIN
-  IF _source IS NULL OR lower(_source) NOT IN ('overall', 'matchmaking', 'tournament', 'league') THEN
-    RAISE EXCEPTION 'Invalid source: %. Must be one of: overall, matchmaking, tournament, league', _source;
-  END IF;
-
   IF _season_id IS NOT NULL THEN
     SELECT s.starts_at, COALESCE(s.ends_at, now())
       INTO _from, _to
@@ -921,7 +813,6 @@ BEGIN
       AND ((_from IS NULL OR m.created_at >= _from) AND (_to IS NULL OR m.created_at < _to))
       AND (_match_type IS NULL OR mo.type = _match_type)
       AND (NOT _exclude_tournaments OR NOT EXISTS (SELECT 1 FROM tournament_brackets tb WHERE tb.match_id = s.match_id))
-      AND (lower(_source) = 'overall' OR public._leaderboard_match_source(s.match_id) = lower(_source))
       AND (_role IS NULL OR r.role = _role)
     GROUP BY s.steam_id
     HAVING SUM(s.rounds_played) >= 50

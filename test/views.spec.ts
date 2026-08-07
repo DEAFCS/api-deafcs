@@ -1170,5 +1170,306 @@ describe("read-side views and aggregations (SQL-driven)", () => {
         postgres.query("SELECT * FROM get_leaderboard('bogus', 30, NULL)"),
       ).rejects.toThrow(/Invalid category/);
     });
+
+    // Overall / Matchmaking / Tournament / League. Classifies matches using
+    // only existing relationships (tournament_brackets -> tournament_stages
+    // -> league_season_divisions), no schema changes. For ELO, `value` must
+    // stay canonical/source-invariant -- only the contribution columns
+    // (secondary_value / matches_played) and row membership may change.
+    describe("Source filter (Overall/Matchmaking/Tournament/League)", () => {
+      const leaderboardSource = (
+        category: string,
+        windowDays: number,
+        type: string | null,
+        source: string,
+      ) =>
+        postgres.query<Array<LeaderboardRow>>(
+          `SELECT * FROM get_leaderboard($1, $2, $3, false, NULL, NULL, 'current', $4)`,
+          [category, windowDays, type, source],
+        );
+
+      // Fabricates a tournament-linked match without running the full
+      // registration/scheduling flow -- tournament_brackets.match_id and
+      // (for league) league_season_divisions.tournament_id are the only
+      // relationships _leaderboard_match_source actually reads.
+      const attachTournamentBracket = async (
+        matchId: string,
+        { league = false }: { league?: boolean } = {},
+      ) => {
+        const tournament = await tournamentFx.createTournament([
+          { type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 },
+        ]);
+        await postgres.query(
+          `INSERT INTO tournament_brackets (tournament_stage_id, match_id, round)
+           VALUES ($1, $2, 1)`,
+          [tournament.stageIds[0], matchId],
+        );
+        let leagueSeasonId: string | null = null;
+        if (league) {
+          // tier has a UNIQUE constraint, and the leagues migration seeds 4
+          // default divisions (Invite=1, Main=2, Intermediate=3, Open=4)
+          // into every freshly-migrated test DB -- a hardcoded tier here
+          // collides with that seed data. Compute the next free tier
+          // instead, so this fixture is correct regardless of what's
+          // already seeded.
+          const [division] = await postgres.query<Array<{ id: string }>>(
+            `INSERT INTO league_divisions (name, tier)
+             SELECT $1, COALESCE(MAX(tier), 0) + 1 FROM league_divisions
+             RETURNING id`,
+            [fx.nextName("division")],
+          );
+          const [season] = await postgres.query<Array<{ id: string }>>(
+            `INSERT INTO league_seasons (name) VALUES ($1) RETURNING id`,
+            [fx.nextName("season")],
+          );
+          leagueSeasonId = season.id;
+          await postgres.query(
+            `INSERT INTO league_season_divisions
+               (league_season_id, league_division_id, tournament_id)
+             VALUES ($1, $2, $3)`,
+            [season.id, division.id, tournament.id],
+          );
+        }
+        return { ...tournament, leagueSeasonId };
+      };
+
+      it("rejects an unknown source loudly", async () => {
+        await expect(
+          postgres.query(
+            "SELECT * FROM get_leaderboard('elo', 30, 'Duel', false, NULL, NULL, 'current', 'bogus')",
+          ),
+        ).rejects.toThrow(/Invalid source/);
+      });
+
+      it("keeps ELO value identical across Overall/Matchmaking/Tournament/League for the same player", async () => {
+        const [player] = await fx.players(1);
+        const mmMatch = await fx.bareMatch(T(60 * 24 * 2));
+        await insertElo(player, mmMatch.matchId, "Duel", 5050, 50, 2);
+
+        const tourneyMatch = await fx.bareMatch(T(60 * 24 * 1));
+        await attachTournamentBracket(tourneyMatch.matchId);
+        await insertElo(player, tourneyMatch.matchId, "Duel", 5120, 70, 1);
+
+        const overall = await leaderboardSource("elo", 30, "Duel", "overall");
+        const mm = await leaderboardSource("elo", 30, "Duel", "matchmaking");
+        const tourney = await leaderboardSource("elo", 30, "Duel", "tournament");
+
+        // `value` is the canonical latest rating: identical no matter which
+        // Source is selected, because there is only one ELO stream.
+        expect(Number(overall[0].value)).toBe(5120);
+        expect(Number(mm[0].value)).toBe(5120);
+        expect(Number(tourney[0].value)).toBe(5120);
+
+        // League: no league-backed match exists for this player, so the
+        // player is correctly dropped from the League view entirely (empty
+        // state), while `value` for anyone who IS kept would still be
+        // canonical.
+        const league = await leaderboardSource("elo", 30, "Duel", "league");
+        expect(league.find((r) => r.player_steam_id === player)).toBeUndefined();
+      });
+
+      it("scopes ELO secondary_value/matches_played to the selected source without touching value", async () => {
+        const [player] = await fx.players(1);
+        const mm1 = await fx.bareMatch(T(60 * 24 * 5));
+        const mm2 = await fx.bareMatch(T(60 * 24 * 3));
+        const tourneyMatch = await fx.bareMatch(T(60 * 24 * 1));
+        await attachTournamentBracket(tourneyMatch.matchId);
+
+        await insertElo(player, mm1.matchId, "Wingman", 5050, 50, 5);
+        await insertElo(player, mm2.matchId, "Wingman", 5080, 30, 3);
+        await insertElo(player, tourneyMatch.matchId, "Wingman", 5180, 100, 1);
+
+        const overall = await leaderboardSource(
+          "elo",
+          30,
+          "Wingman",
+          "overall",
+        );
+        const mm = await leaderboardSource(
+          "elo",
+          30,
+          "Wingman",
+          "matchmaking",
+        );
+        const tourney = await leaderboardSource(
+          "elo",
+          30,
+          "Wingman",
+          "tournament",
+        );
+
+        // value: canonical, identical everywhere.
+        for (const rows of [overall, mm, tourney]) {
+          expect(Number(rows[0].value)).toBe(5180);
+        }
+
+        // secondary_value / matches_played: source-scoped contribution.
+        expect(Number(overall[0].secondary_value)).toBe(180); // 50+30+100
+        expect(Number(overall[0].matches_played)).toBe(3);
+        expect(Number(mm[0].secondary_value)).toBe(80); // 50+30
+        expect(Number(mm[0].matches_played)).toBe(2);
+        expect(Number(tourney[0].secondary_value)).toBe(100);
+        expect(Number(tourney[0].matches_played)).toBe(1);
+      });
+
+      it("best_kdr buckets kills into Matchmaking vs Tournament, Overall combines both", async () => {
+        const { ctx: mmCtx } = await statMatch();
+        const { match: tourneyMatch, ctx: tourneyCtx } = await statMatch();
+        await attachTournamentBracket(tourneyMatch.id);
+
+        const [player, victim] = await fx.players(2);
+        await fx.kill(mmCtx, player, victim);
+        await fx.kill(mmCtx, player, victim, { round: 2 });
+        await fx.kill(tourneyCtx, player, victim);
+
+        const mm = await leaderboardSource(
+          "best_kdr",
+          30,
+          "Competitive",
+          "matchmaking",
+        );
+        const tourney = await leaderboardSource(
+          "best_kdr",
+          30,
+          "Competitive",
+          "tournament",
+        );
+        const overall = await leaderboardSource(
+          "best_kdr",
+          30,
+          "Competitive",
+          "overall",
+        );
+
+        expect(Number(mm[0].secondary_value)).toBe(2); // kills
+        expect(Number(tourney[0].secondary_value)).toBe(1);
+        expect(Number(overall[0].secondary_value)).toBe(3);
+      });
+
+      it("trophies + Matchmaking returns empty (trophies only ever belong to tournaments)", async () => {
+        const tournament = await attachTournamentBracket(
+          (await fx.bareMatch(T(1))).matchId,
+        );
+        const [player] = await fx.players(1);
+        await postgres.query(
+          `INSERT INTO tournament_trophies (tournament_id, player_steam_id, placement)
+           VALUES ($1, $2, 1)`,
+          [tournament.id, player],
+        );
+
+        const mm = await leaderboardSource(
+          "trophies",
+          0,
+          null,
+          "matchmaking",
+        );
+        expect(mm.length).toBe(0);
+
+        const tourney = await leaderboardSource(
+          "trophies",
+          0,
+          null,
+          "tournament",
+        );
+        expect(tourney.length).toBe(1);
+        expect(Number(tourney[0].value)).toBe(1); // gold count
+      });
+
+      it("League with no league-backed matches returns an empty leaderboard cleanly (non-ELO category)", async () => {
+        const { ctx } = await statMatch();
+        const [a, b] = await fx.players(2);
+        await fx.kill(ctx, a, b);
+
+        const league = await leaderboardSource(
+          "best_kdr",
+          30,
+          "Competitive",
+          "league",
+        );
+        expect(league).toEqual([]);
+      });
+
+      it("classifies a league-backed tournament match distinctly from a standalone tournament match", async () => {
+        const { match: leagueMatch, ctx: leagueCtx } = await statMatch();
+        const leagueTournament = await attachTournamentBracket(
+          leagueMatch.id,
+          { league: true },
+        );
+        const { match: standaloneMatch, ctx: standaloneCtx } =
+          await statMatch();
+        await attachTournamentBracket(standaloneMatch.id);
+
+        const [player, victim] = await fx.players(2);
+        await fx.kill(leagueCtx, player, victim);
+        await fx.kill(leagueCtx, player, victim, { round: 2 });
+        await fx.kill(standaloneCtx, player, victim);
+
+        try {
+          const league = await leaderboardSource(
+            "best_kdr",
+            30,
+            "Competitive",
+            "league",
+          );
+          const tourney = await leaderboardSource(
+            "best_kdr",
+            30,
+            "Competitive",
+            "tournament",
+          );
+
+          expect(Number(league[0].secondary_value)).toBe(2);
+          expect(Number(tourney[0].secondary_value)).toBe(1);
+        } finally {
+          // A league-linked tournament is guarded against direct
+          // delete/cancel (hasura/triggers/tournaments.sql tbd_tournaments:
+          // "This tournament belongs to a league..."), and the next test's
+          // beforeEach does an unconditional `DELETE FROM tournaments`,
+          // which would hit that guard and fail if this row is left
+          // league-linked.
+          //
+          // Directly DELETEing the tournament ourselves (even with the
+          // league_cascade bypass set) collides with tournament_brackets'
+          // own delete-side trigger interactions ("tuple to be deleted was
+          // already modified by an operation triggered by the current
+          // command") -- the same class of trigger-ordering hazard already
+          // documented around tournament deletion elsewhere in this
+          // codebase. The sanctioned teardown is one level up: delete the
+          // *league season* that owns this tournament. Its own
+          // tbd_league_seasons BEFORE DELETE trigger (hasura/triggers/
+          // league_seasons.sql) sets the same bypass and removes the
+          // matches, then the tournament, in the correct order and on the
+          // correct row versions -- exactly mirroring both production's
+          // only sanctioned path for removing a league-owned tournament and
+          // hasura/tests/leagues/cleanup.sql's own teardown convention.
+          await postgres.query("DELETE FROM league_seasons WHERE id = $1", [
+            leagueTournament.leagueSeasonId,
+          ]);
+        }
+      });
+
+      it("legacy callers that only pass _exclude_tournaments (no _source) still work and default to Overall", async () => {
+        const [champ, rival] = await fx.players(2);
+        await ratedDuel(champ, rival);
+        await ratedDuel(champ, rival);
+        await ratedDuel(rival, champ);
+
+        // Old-style 4-arg positional call, exactly as pre-existing callers
+        // (and the `leaderboard()` helper above) already use.
+        const rows = await postgres.query<Array<LeaderboardRow>>(
+          "SELECT * FROM get_leaderboard($1, $2, $3, $4)",
+          ["best_win_rate", 30, "Duel", false],
+        );
+        expect(rows.map((r) => r.player_steam_id)).toEqual([champ, rival]);
+
+        const [rank] = await postgres.query<
+          Array<{ rank: number; total: number; value: number }>
+        >(
+          "SELECT * FROM get_player_leaderboard_rank('best_win_rate', 30, $1, 'Duel')",
+          [rival],
+        );
+        expect(Number(rank.total)).toBe(2);
+      });
+    });
   });
 });
