@@ -76,12 +76,36 @@ export class NotificationsService {
     silence: "silenced",
   };
 
+  // Automated leaver/no-show bans ("Abandoned") shouldn't notify anyone
+  // except the banned player themselves (notifyBannedPlayer, left
+  // untouched) -- not admins, not co-players. Only a real admin-issued
+  // sanction ("Sanction") broadcasts to either. This fires from the
+  // generic player_sanctions INSERT event trigger for every ban regardless
+  // of source, so the distinction has to be looked up here rather than
+  // relying on the caller to only invoke these for admin bans.
+  private async isSystemIssuedBan(sanctionId: string): Promise<boolean> {
+    const [sanctionRow] = await this.postgres.query<
+      Array<{ sanctioned_by_steam_id: string }>
+    >(
+      `SELECT sanctioned_by_steam_id::text AS sanctioned_by_steam_id
+         FROM public.player_sanctions
+        WHERE id = $1`,
+      [sanctionId],
+    );
+
+    return sanctionRow?.sanctioned_by_steam_id === SYSTEM_STEAM_ID;
+  }
+
   async notifyMatchPlayersOfSanction(sanction: {
     sanctionId: string;
     steamId: string;
     type: string;
     reason?: string | null;
   }): Promise<void> {
+    if (await this.isSystemIssuedBan(sanction.sanctionId)) {
+      return;
+    }
+
     const recipients = await this.postgres.query<Array<{ steam_id: string }>>(
       `SELECT DISTINCT other_p.steam_id::text AS steam_id
          FROM public.matches m
@@ -153,20 +177,7 @@ export class NotificationsService {
       return;
     }
 
-    // Automated leaver/no-show bans ("Abandoned") shouldn't page admins --
-    // only a real admin-issued sanction ("Sanction") does. This fires from
-    // the generic player_sanctions INSERT event trigger for every ban
-    // regardless of source, so the distinction has to be looked up here
-    // rather than relying on the caller to only invoke this for admin bans.
-    const [sanctionRow] = await this.postgres.query<
-      Array<{ sanctioned_by_steam_id: string }>
-    >(
-      `SELECT sanctioned_by_steam_id::text AS sanctioned_by_steam_id
-         FROM public.player_sanctions
-        WHERE id = $1`,
-      [sanction.sanctionId],
-    );
-    if (sanctionRow?.sanctioned_by_steam_id === SYSTEM_STEAM_ID) {
+    if (await this.isSystemIssuedBan(sanction.sanctionId)) {
       return;
     }
 
