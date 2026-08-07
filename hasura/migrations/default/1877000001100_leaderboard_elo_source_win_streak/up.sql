@@ -1,3 +1,26 @@
+-- Fix ELO Source (Matchmaking/Tournament/League) column semantics.
+--
+-- Two bugs fixed, both scoped to _leaderboard_elo only:
+--
+-- 1. tertiary_value (Win Streak) was never source-scoped -- the win_streak
+--    CTE had no _source predicate, so a non-Overall Source still displayed
+--    the player's overall current win streak instead of their streak
+--    within just that source's matches. Added a new source_win_streak CTE
+--    (identical calculation, filtered by _leaderboard_match_source(m.id) =
+--    the selected source) and wired it into tertiary_value ahead of the
+--    unfiltered win_streak, exactly mirroring how source_change already
+--    scopes secondary_value/matches_played. Overall is untouched -- it
+--    still reads the original unfiltered win_streak CTE.
+--
+-- 2. secondary_value's SQL was already correctly source-scoped (returns
+--    sc.total_change for any non-Overall source, taking priority over the
+--    Active Season "Last Match" branch), but the doc comment above the
+--    function undersold this; clarified it explicitly names ELO Change /
+--    Win Streak / Matches as the three source-scoped contribution columns.
+--
+-- `value` (current/peak canonical ELO) remains completely untouched and
+-- source-invariant, as before. No schema or Hasura metadata changes.
+
 -- Stale-overload cleanup. CREATE OR REPLACE cannot remove an old overload, so
 -- once a second signature exists EVERY call becomes ambiguous ("function is not
 -- unique", SQLSTATE 42725). Drop every known signature explicitly before

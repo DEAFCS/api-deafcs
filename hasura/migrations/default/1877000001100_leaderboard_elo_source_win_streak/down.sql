@@ -1,3 +1,8 @@
+-- Rollback 1877000001100: restores _leaderboard_elo to the pre-win-streak-
+-- scoping version (tertiary_value always the unfiltered win_streak CTE,
+-- regardless of _source). No signature/arity change either direction, so
+-- this is a plain CREATE OR REPLACE, no DROP FUNCTION needed.
+
 -- Stale-overload cleanup. CREATE OR REPLACE cannot remove an old overload, so
 -- once a second signature exists EVERY call becomes ambiguous ("function is not
 -- unique", SQLSTATE 42725). Drop every known signature explicitly before
@@ -164,20 +169,13 @@ $$;
 -- _source (Overall/Matchmaking/Tournament/League) is likewise NEVER applied
 -- to `value`, for the exact same reason: there is only one canonical ELO
 -- rating stream, and a source-filtered "current ELO" would be mathematically
--- invalid. _source instead scopes the *contribution* columns for any
--- non-Overall selection:
---   secondary_value = ELO Change (SUM of pe.change) from the selected
---     source within the window -- NOT "Last Match", even if an active named
---     season would otherwise show Last Match for Overall.
---   tertiary_value  = current win streak computed only from the selected
---     source's finished matches within the window.
---   matches_played  = match count from the selected source within the
---     window.
--- `value` (current/peak) stays identical across every Source selection for
--- a given player/mode/window. When a Source other than Overall is selected,
--- players with zero matches from that source in the window are dropped
--- from the result set entirely (a clean empty state rather than showing
--- everyone with a fake all-zero row).
+-- invalid. _source instead scopes the *contribution* columns -- how much
+-- ELO change and how many matches came from the selected source within the
+-- window -- while `value` (current/peak) stays identical across every
+-- Source selection for a given player/mode/window. When a Source other than
+-- Overall is selected, players with zero matches from that source in the
+-- window are dropped from the result set entirely (a clean empty state
+-- rather than showing everyone with a fake all-zero row).
 -- ============================================================
 CREATE OR REPLACE FUNCTION public._leaderboard_elo(
   _window_days INT,
@@ -342,33 +340,6 @@ BEGIN
     ) sub
     GROUP BY sub.steam_id
   ),
-  -- Source-scoped win streak: the same current-streak calculation as
-  -- win_streak above, but restricted to matches from the selected Source.
-  -- Only computed/used when _source <> 'overall' -- Overall keeps using the
-  -- unfiltered win_streak CTE above, unchanged.
-  source_win_streak AS (
-    SELECT sub.steam_id,
-      COALESCE(MIN(CASE WHEN sub.won = 0 THEN sub.rn END) - 1, MAX(sub.rn))::int as streak
-    FROM (
-      SELECT
-        mlp.steam_id,
-        CASE WHEN m.winning_lineup_id = mlp.match_lineup_id THEN 1 ELSE 0 END as won,
-        ROW_NUMBER() OVER (PARTITION BY mlp.steam_id ORDER BY m.ended_at DESC) as rn
-      FROM match_lineup_players mlp
-      JOIN match_lineups ml ON ml.id = mlp.match_lineup_id
-      JOIN matches m ON m.id = ml.match_id
-      JOIN match_options mo ON mo.id = m.match_options_id
-      WHERE lower(_source) <> 'overall'
-        AND m.status = 'Finished'
-        AND m.source = '5stack'
-        AND mlp.steam_id IS NOT NULL
-        AND m.winning_lineup_id IS NOT NULL
-        AND ((_from IS NULL OR m.ended_at >= _from) AND (_to IS NULL OR m.ended_at < _to))
-        AND (_match_type IS NULL OR mo.type = _match_type)
-        AND public._leaderboard_match_source(m.id) = lower(_source)
-    ) sub
-    GROUP BY sub.steam_id
-  ),
   record_streak AS (
     SELECT isl.steam_id, MAX(isl.island_len)::int AS record_streak
     FROM (
@@ -440,8 +411,6 @@ BEGIN
     END                        as secondary_value,
     CASE WHEN _use_peak
       THEN COALESCE(rs.record_streak, 0)::float
-      WHEN lower(_source) <> 'overall'
-      THEN COALESCE(sws.streak, 0)::float
       ELSE COALESCE(ws.streak, 0)::float
     END                        as tertiary_value,
     CASE WHEN lower(_source) <> 'overall'
@@ -457,7 +426,6 @@ BEGIN
   LEFT JOIN first_elo fe ON fe.steam_id = d.steam_id
   LEFT JOIN match_counts mc ON mc.steam_id = d.steam_id
   LEFT JOIN win_streak ws ON ws.steam_id = d.steam_id
-  LEFT JOIN source_win_streak sws ON sws.steam_id = d.steam_id
   LEFT JOIN record_streak rs ON rs.steam_id = d.steam_id
   JOIN players p ON p.steam_id = d.steam_id
   WHERE (_use_peak AND pk.peak_current IS NOT NULL) OR (NOT _use_peak AND le.current_elo IS NOT NULL)

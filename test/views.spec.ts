@@ -1312,6 +1312,80 @@ describe("read-side views and aggregations (SQL-driven)", () => {
         expect(Number(tourney[0].matches_played)).toBe(1);
       });
 
+      it("scopes ELO Win Streak (tertiary_value) to the selected source -- regression for the bug where Tournament showed the Overall streak", async () => {
+        // Real finished Duel matches, driving both the win_streak CTE
+        // (which needs real matches/winning_lineup_id, not just player_elo
+        // rows) and player_elo via generate_player_elo_for_match, exactly
+        // like the ratedDuel helper above but with source attachment and
+        // explicit end-dates so chronological order is deterministic.
+        const ratedDuelSourced = async (
+          a: string,
+          b: string,
+          { endedDaysAgo, tournament }: { endedDaysAgo: number; tournament: boolean },
+        ) => {
+          const match = await fx.match({ type: "Duel" });
+          await fx.lineupPlayer(match.lineup_1_id, a);
+          await fx.lineupPlayer(match.lineup_2_id, b);
+          if (tournament) {
+            await attachTournamentBracket(match.id);
+          }
+          // a always wins.
+          await postgres.query(
+            "UPDATE matches SET winning_lineup_id = lineup_1_id WHERE id = $1",
+            [match.id],
+          );
+          await postgres.query(
+            "UPDATE matches SET ended_at = now() - make_interval(days => $2) WHERE id = $1",
+            [match.id, endedDaysAgo],
+          );
+          await postgres.query("SELECT generate_player_elo_for_match($1)", [
+            match.id,
+          ]);
+          return match;
+        };
+
+        const [a, b] = await fx.players(2);
+        // Oldest first: 2 tournament wins, then 2 matchmaking wins -- a
+        // wins all 4, so the unfiltered/Overall streak is 4, but the
+        // Tournament-only streak (only among the 2 tournament matches) is 2,
+        // and the Matchmaking-only streak is likewise 2.
+        await ratedDuelSourced(a, b, { endedDaysAgo: 4, tournament: true });
+        await ratedDuelSourced(a, b, { endedDaysAgo: 3, tournament: true });
+        await ratedDuelSourced(a, b, { endedDaysAgo: 2, tournament: false });
+        await ratedDuelSourced(a, b, { endedDaysAgo: 1, tournament: false });
+
+        const overall = await leaderboardSource("elo", 30, "Duel", "overall");
+        const tourney = await leaderboardSource(
+          "elo",
+          30,
+          "Duel",
+          "tournament",
+        );
+        const mm = await leaderboardSource(
+          "elo",
+          30,
+          "Duel",
+          "matchmaking",
+        );
+
+        const overallRow = overall.find((r) => r.player_steam_id === a)!;
+        const tourneyRow = tourney.find((r) => r.player_steam_id === a)!;
+        const mmRow = mm.find((r) => r.player_steam_id === a)!;
+
+        expect(Number(overallRow.tertiary_value)).toBe(4);
+        expect(Number(overallRow.matches_played)).toBe(4);
+
+        expect(Number(tourneyRow.matches_played)).toBe(2);
+        expect(Number(tourneyRow.tertiary_value)).toBe(2);
+
+        expect(Number(mmRow.matches_played)).toBe(2);
+        expect(Number(mmRow.tertiary_value)).toBe(2);
+
+        // value stays canonical regardless of source, as always.
+        expect(Number(tourneyRow.value)).toBe(Number(overallRow.value));
+        expect(Number(mmRow.value)).toBe(Number(overallRow.value));
+      });
+
       it("best_kdr buckets kills into Matchmaking vs Tournament, Overall combines both", async () => {
         const { ctx: mmCtx } = await statMatch();
         const { match: tourneyMatch, ctx: tourneyCtx } = await statMatch();
