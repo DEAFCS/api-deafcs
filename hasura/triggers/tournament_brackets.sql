@@ -33,6 +33,17 @@ BEGIN
      END IF;
 
      IF OLD.match_id IS NOT NULL THEN
+        -- The downstream match already exists. If a winner reassignment
+        -- upstream just changed which team occupies this slot (via
+        -- assign_team_to_bracket_slot), keep the still-unplayed match's
+        -- lineup in sync -- otherwise match_lineups/match_lineup_players
+        -- would keep pointing at the team that was just displaced.
+        -- refresh_tournament_match_lineup_teams no-ops once the match has
+        -- progressed past Scheduled/WaitingForCheckIn/Canceled.
+        IF (OLD.tournament_team_id_1 IS DISTINCT FROM NEW.tournament_team_id_1) OR
+           (OLD.tournament_team_id_2 IS DISTINCT FROM NEW.tournament_team_id_2) THEN
+            PERFORM refresh_tournament_match_lineup_teams(NEW);
+        END IF;
         return NEW;
      END IF;
 
