@@ -61,6 +61,19 @@ export class SanctionsController {
   }
 
   @HasuraAction()
+  public async resetLeaverBanStage(data: { steam_id: string; user: User }) {
+    const { steam_id, user } = data;
+
+    if (!user || !isRoleAbove(user.role, "moderator")) {
+      throw Error("you are not allowed to reset a player's leaver ban stage");
+    }
+
+    await this.sanctionsService.resetLeaverBanStage(steam_id);
+
+    return { success: true };
+  }
+
+  @HasuraAction()
   public async kickServerPlayer(data: {
     serverId: string;
     steam_id: string;

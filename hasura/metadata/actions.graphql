@@ -799,6 +799,10 @@ type Mutation {
 }
 
 type Mutation {
+  resetLeaverBanStage(steam_id: String!): SuccessOutput!
+}
+
+type Mutation {
   updateClip(
     clip_id: uuid!
     title: String

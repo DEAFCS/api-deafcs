@@ -171,6 +171,25 @@ export class SanctionsService {
     };
   }
 
+  // Separate from unsanctionServerPlayer/removing an abandoned_matches row
+  // -- those only lift the ban for that one violation, they don't touch
+  // leaver_ban_stage (see DisconnectBudgetService.applyLeaverBan), so a
+  // player who got an unfair/mistaken automated ban stays "stuck" at their
+  // escalated stage and immediately re-escalates further on their next
+  // violation even after the ban itself was removed. This gives admins an
+  // explicit, independent way to reset the stage counter itself back to a
+  // clean slate, regardless of which (if any) ban/abandoned-match rows they
+  // also chose to remove.
+  public async resetLeaverBanStage(steamId: string): Promise<void> {
+    await this.postgres.query(
+      `UPDATE public.players
+          SET leaver_ban_stage = 0,
+              leaver_ban_stage_expires_at = NULL
+        WHERE steam_id = $1::bigint`,
+      [steamId],
+    );
+  }
+
   public async kickServerPlayer(params: {
     serverId: string;
     steamId: string;
