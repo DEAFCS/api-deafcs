@@ -3,7 +3,12 @@ import path from "path";
 import { PostgresService } from "./../src/postgres/postgres.service";
 import { Fixtures } from "./utils/fixtures";
 import { TournamentFixtures } from "./utils/tournament-fixtures";
-import { bootMigratedDb, seedRegionWithServer, SqlTestDb } from "./utils/sql-test-db";
+import {
+  bootMigratedDb,
+  runAsUser,
+  seedRegionWithServer,
+  SqlTestDb,
+} from "./utils/sql-test-db";
 
 // Bug A: reassigning a tournament match's winner through the simple selector
 // used to leave a downstream, already-scheduled match's match_lineups/
@@ -154,6 +159,61 @@ describe("tournament winner reassignment (SQL-driven)", () => {
     },
   );
 
+  // Production observed "Cannot remove players: not enough players in
+  // lineup" the moment a tournament winner was reassigned through the fixed
+  // web selector -- meaning match_lineup_players' minimum-roster DELETE
+  // guard (hasura/triggers/match_lineup_players.sql, tbid_match_lineup_players)
+  // really does see a non-admin hasura.user session while this cascade runs,
+  // whatever the exact plumbing from setMatchWinner's admin-secret-authenticated
+  // Hasura mutation turns out to be. These tests don't depend on resolving
+  // that mechanism: they reproduce the guard under an explicit, realistic
+  // organizer session (runAsUser, the same helper permissions.spec.ts uses to
+  // simulate how Hasura forwards x-hasura-* as the `hasura.user` Postgres
+  // session variable) and prove the fix survives it regardless.
+  it("reproduces the production guard: naively deleting a lineup's players under a real organizer session hits 'Cannot remove players'", async () => {
+    const { t, final } = await semisToUnplayedFinal("Duel");
+    const [{ match_id: finalMatchId }] = await postgres.query<Array<{ match_id: string }>>(
+      "SELECT match_id FROM tournament_brackets WHERE id = $1",
+      [final.id],
+    );
+    const [{ lineup_1_id: lineupId }] = await postgres.query<Array<{ lineup_1_id: string }>>(
+      "SELECT lineup_1_id FROM matches WHERE id = $1",
+      [finalMatchId],
+    );
+
+    await expect(
+      runAsUser(postgres, t.organizer, "tournament_organizer", (query) =>
+        query("DELETE FROM match_lineup_players WHERE match_lineup_id = $1", [lineupId]),
+      ),
+    ).rejects.toThrow(/Cannot remove players: not enough players in lineup/);
+  });
+
+  it.each([["Wingman"], ["Duel"], ["Competitive"]])(
+    "%s: the fix succeeds under a real (non-admin) organizer session, not just an unauthenticated test connection",
+    async (matchType) => {
+      const { t, semi1, final } = await semisToUnplayedFinal(matchType);
+      const incomingTeam = semi1.tournament_team_id_2!;
+
+      const [beforeRow] = await postgres.query<
+        Array<{ tournament_team_id_1: string | null; match_id: string }>
+      >("SELECT tournament_team_id_1, match_id FROM tournament_brackets WHERE id = $1", [final.id]);
+      const [finalMatch] = await postgres.query<Array<{ lineup_1_id: string; lineup_2_id: string }>>(
+        "SELECT lineup_1_id, lineup_2_id FROM matches WHERE id = $1",
+        [beforeRow.match_id],
+      );
+      const displacedLineupId =
+        beforeRow.tournament_team_id_1 === semi1.tournament_team_id_1
+          ? finalMatch.lineup_1_id
+          : finalMatch.lineup_2_id;
+
+      await runAsUser(postgres, t.organizer, "tournament_organizer", (query) =>
+        query("UPDATE matches SET winning_lineup_id = lineup_2_id WHERE id = $1", [semi1.match_id]),
+      );
+
+      expect(await lineupPlayers(displacedLineupId)).toEqual(await rosterOf(incomingTeam));
+    },
+  );
+
   it("never rewrites a downstream match's lineups once it has actually been played", async () => {
     const { semi1, final } = await semisToUnplayedFinal("Wingman");
 
@@ -250,5 +310,124 @@ describe("tournament winner reassignment (SQL-driven)", () => {
     expect(throwIdx).toBeGreaterThan(-1);
     expect(mutateIdx).toBeGreaterThan(-1);
     expect(throwIdx).toBeLessThan(mutateIdx);
+  });
+
+  // Scope check: MatchSelectWinner.vue / setMatchWinner are shared by every
+  // match source (MatchActions.vue's canSetMatchWinner only checks
+  // is_organizer + role, no source/type gate -- see pages/matches/[id]/index.vue,
+  // the one shared match-detail page). refresh_tournament_match_lineup_teams
+  // is only ever invoked from tau_tournament_brackets (an AFTER UPDATE
+  // trigger on tournament_brackets), and can_reassign_winner's downstream
+  // check only bites when a tournament_brackets row exists for the match.
+  // Neither an ordinary matchmaking/manual match nor a draft match ever gets
+  // a tournament_brackets row, so both must behave exactly as before this
+  // fix: unrestricted winner (re)selection, no lineup-refresh side effects.
+  //
+  // League matches are the one case that's intentionally NOT exempt here:
+  // hasura/triggers/league_match_lineup_players.sql shows a league match is
+  // still a tournament_stages/tournament_brackets row underneath (joined via
+  // league_season_divisions), so the tournament safeguards above already
+  // cover League by the same mechanism -- nothing additional to carve out.
+  describe("non-tournament matches are unaffected", () => {
+    const buildOrdinaryMatch = async (matchType: string) => {
+      const organizer = await fx.player();
+      const match = await fx.match({ type: matchType });
+      await postgres.query("UPDATE matches SET organizer_steam_id = $1 WHERE id = $2", [
+        organizer,
+        match.id,
+      ]);
+      const teammates = matchType === "Duel" ? 0 : matchType === "Wingman" ? 1 : 4;
+      const lineup1Players = [
+        await fx.lineupPlayer(match.lineup_1_id),
+        ...(await Promise.all(
+          Array.from({ length: teammates }, () => fx.lineupPlayer(match.lineup_1_id)),
+        )),
+      ];
+      const lineup2Players = [
+        await fx.lineupPlayer(match.lineup_2_id),
+        ...(await Promise.all(
+          Array.from({ length: teammates }, () => fx.lineupPlayer(match.lineup_2_id)),
+        )),
+      ];
+      return { organizer, match, lineup1Players, lineup2Players };
+    };
+
+    it.each([["Wingman"], ["Duel"], ["Competitive"]])(
+      "%s ordinary/matchmaking-style match: first winner selection and reassignment both work exactly as before, untouched by tournament safeguards",
+      async (matchType) => {
+        const { organizer, match } = await buildOrdinaryMatch(matchType);
+        const before1 = await lineupPlayers(match.lineup_1_id);
+        const before2 = await lineupPlayers(match.lineup_2_id);
+
+        expect(
+          (
+            await postgres.query<Array<{ id: string | null }>>(
+              "SELECT tb.id FROM tournament_brackets tb WHERE tb.match_id = $1",
+              [match.id],
+            )
+          ).length,
+        ).toBe(0);
+
+        const organizerSession = JSON.stringify({
+          "x-hasura-role": "match_organizer",
+          "x-hasura-user-id": organizer,
+        });
+
+        // First winner selection: no prior winner, so canReassignWinner is
+        // never even consulted (matches.controller#setMatchWinner only calls
+        // it when isReassignment is true).
+        await postgres.query("UPDATE matches SET winning_lineup_id = lineup_1_id WHERE id = $1", [
+          match.id,
+        ]);
+
+        // Reassignment of an ordinary match: no tournament_brackets row
+        // exists, so can_reassign_winner's downstream check is a no-op and
+        // this must be allowed exactly as it always was.
+        const [{ allowed }] = await postgres.query<Array<{ allowed: boolean }>>(
+          "SELECT can_reassign_winner(m, $2::json) AS allowed FROM matches m WHERE m.id = $1",
+          [match.id, organizerSession],
+        );
+        expect(allowed).toBe(true);
+
+        await postgres.query("UPDATE matches SET winning_lineup_id = lineup_2_id WHERE id = $1", [
+          match.id,
+        ]);
+
+        const [{ winning_lineup_id: winner, lineup_2_id: lineup2 }] = await postgres.query<
+          Array<{ winning_lineup_id: string; lineup_2_id: string }>
+        >("SELECT winning_lineup_id, lineup_2_id FROM matches WHERE id = $1", [match.id]);
+        expect(winner).toBe(lineup2);
+
+        // No tournament lineup-refresh path was ever involved: the exact
+        // same players are seated, same rows, nothing added or removed.
+        expect(await lineupPlayers(match.lineup_1_id)).toEqual(before1);
+        expect(await lineupPlayers(match.lineup_2_id)).toEqual(before2);
+      },
+    );
+
+    it("draft match (matches row linked via draft_games.match_id, no tournament_brackets row): winner reassignment is unaffected", async () => {
+      const { organizer, match } = await buildOrdinaryMatch("Wingman");
+      await postgres.query(
+        `INSERT INTO draft_games (host_steam_id, type, status, capacity, match_id)
+         VALUES ($1, 'Wingman', 'Completed', 4, $2)`,
+        [organizer, match.id],
+      );
+      const before1 = await lineupPlayers(match.lineup_1_id);
+      const before2 = await lineupPlayers(match.lineup_2_id);
+
+      await postgres.query("UPDATE matches SET winning_lineup_id = lineup_1_id WHERE id = $1", [
+        match.id,
+      ]);
+      await postgres.query("UPDATE matches SET winning_lineup_id = lineup_2_id WHERE id = $1", [
+        match.id,
+      ]);
+
+      const [{ winning_lineup_id: winner, lineup_2_id: lineup2 }] = await postgres.query<
+        Array<{ winning_lineup_id: string; lineup_2_id: string }>
+      >("SELECT winning_lineup_id, lineup_2_id FROM matches WHERE id = $1", [match.id]);
+      expect(winner).toBe(lineup2);
+      expect(await lineupPlayers(match.lineup_1_id)).toEqual(before1);
+      expect(await lineupPlayers(match.lineup_2_id)).toEqual(before2);
+    });
   });
 });
