@@ -3,6 +3,7 @@ import { HasuraService } from "src/hasura/hasura.service";
 import { PostgresService } from "src/postgres/postgres.service";
 import { RconService } from "src/rcon/rcon.service";
 import { DedicatedServersService } from "src/dedicated-servers/dedicated-servers.service";
+import { SYSTEM_STEAM_ID } from "src/matches/disconnect-budget/constants";
 
 export type SanctionType = "ban" | "mute" | "gag" | "silence";
 
@@ -171,23 +172,68 @@ export class SanctionsService {
     };
   }
 
-  // Separate from unsanctionServerPlayer/removing an abandoned_matches row
-  // -- those only lift the ban for that one violation, they don't touch
-  // leaver_ban_stage (see DisconnectBudgetService.applyLeaverBan), so a
-  // player who got an unfair/mistaken automated ban stays "stuck" at their
-  // escalated stage and immediately re-escalates further on their next
-  // violation even after the ban itself was removed. This gives admins an
-  // explicit, independent way to reset the stage counter itself back to a
-  // clean slate, regardless of which (if any) ban/abandoned-match rows they
-  // also chose to remove.
-  public async resetLeaverBanStage(steamId: string): Promise<void> {
+  // Plain delete_abandoned_matches_by_pk only removed the history row --
+  // it never touched the actual enforcement (player_sanctions) or
+  // leaver_ban_stage (see DisconnectBudgetService.applyLeaverBan), so an
+  // admin clearing out a mistaken/unfair automated ban was left thinking
+  // it was undone while the player stayed banned and kept escalating
+  // further on their next violation regardless. This does all three in
+  // one action: removes the record, lifts the still-active system-issued
+  // ban for that violation (if any), and undoes one step of escalation.
+  //
+  // Deliberately a flat -1, not a reset to 0 -- e.g. stage 1,2,3,4,4+ (the
+  // last one capped, not a real extra escalation): removing the "4+" entry
+  // should land back on stage 4 (what match 4 legitimately earned), not
+  // wipe out real history by zeroing everything out. This is a
+  // close-enough approximation of that when the stage is at the cap
+  // (removing the capped entry looks the same as removing the one before
+  // it) -- getting it exactly right in every case would mean tracking each
+  // violation's prior stage individually, which isn't worth the added
+  // complexity for how rarely this runs.
+  public async removeAbandonedMatch(id: string): Promise<void> {
+    const [removed] = await this.postgres.query<
+      Array<{ steam_id: string }>
+    >(
+      `DELETE FROM public.abandoned_matches
+        WHERE id = $1
+       RETURNING steam_id`,
+      [id],
+    );
+
+    if (!removed) {
+      return;
+    }
+
+    const { steam_id: steamId } = removed;
+
     await this.postgres.query(
+      `UPDATE public.player_sanctions
+          SET deleted_at = now()
+        WHERE player_steam_id = $1::bigint
+          AND type = 'ban'
+          AND sanctioned_by_steam_id = $2::bigint
+          AND deleted_at IS NULL`,
+      [steamId, SYSTEM_STEAM_ID],
+    );
+
+    const [player] = await this.postgres.query<
+      Array<{ leaver_ban_stage: number }>
+    >(
       `UPDATE public.players
-          SET leaver_ban_stage = 0,
-              leaver_ban_stage_expires_at = NULL
-        WHERE steam_id = $1::bigint`,
+          SET leaver_ban_stage = GREATEST(leaver_ban_stage - 1, 0)
+        WHERE steam_id = $1::bigint
+        RETURNING leaver_ban_stage`,
       [steamId],
     );
+
+    if (player?.leaver_ban_stage === 0) {
+      await this.postgres.query(
+        `UPDATE public.players
+            SET leaver_ban_stage_expires_at = NULL
+          WHERE steam_id = $1::bigint`,
+        [steamId],
+      );
+    }
   }
 
   public async kickServerPlayer(params: {

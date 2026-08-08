@@ -799,7 +799,7 @@ type Mutation {
 }
 
 type Mutation {
-  resetLeaverBanStage(steam_id: String!): SuccessOutput!
+  removeAbandonedMatch(id: uuid!): SuccessOutput!
 }
 
 type Mutation {

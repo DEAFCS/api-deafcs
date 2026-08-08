@@ -61,14 +61,14 @@ export class SanctionsController {
   }
 
   @HasuraAction()
-  public async resetLeaverBanStage(data: { steam_id: string; user: User }) {
-    const { steam_id, user } = data;
+  public async removeAbandonedMatch(data: { id: string; user: User }) {
+    const { id, user } = data;
 
     if (!user || !isRoleAbove(user.role, "moderator")) {
-      throw Error("you are not allowed to reset a player's leaver ban stage");
+      throw Error("you are not allowed to remove an abandoned match");
     }
 
-    await this.sanctionsService.resetLeaverBanStage(steam_id);
+    await this.sanctionsService.removeAbandonedMatch(id);
 
     return { success: true };
   }
