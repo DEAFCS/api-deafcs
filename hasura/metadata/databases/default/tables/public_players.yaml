@@ -313,6 +313,11 @@ computed_fields:
       function:
         name: get_player_elo
         schema: public
+  - name: is_admin_sanctioned
+    definition:
+      function:
+        name: is_admin_sanctioned
+        schema: public
   - name: is_banned
     definition:
       function:
@@ -439,6 +444,7 @@ select_permissions:
       computed_fields:
         - current_lobby_id
         - elo
+        - is_admin_sanctioned
         - is_banned
         - is_gagged
         - is_muted
@@ -486,6 +492,7 @@ select_permissions:
       computed_fields:
         - current_lobby_id
         - elo
+        - is_admin_sanctioned
         - is_banned
         - is_gagged
         - is_in_another_match
@@ -535,6 +542,7 @@ select_permissions:
       computed_fields:
         - current_lobby_id
         - elo
+        - is_admin_sanctioned
         - is_banned
         - is_gagged
         - is_in_another_match
