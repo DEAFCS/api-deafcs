@@ -302,6 +302,11 @@ array_relationships:
           name: player_utility
           schema: public
 computed_fields:
+  - name: banned_until
+    definition:
+      function:
+        name: banned_until
+        schema: public
   - name: current_lobby_id
     definition:
       function:
@@ -442,6 +447,7 @@ select_permissions:
         - game_ban_count
         - days_since_last_ban
       computed_fields:
+        - banned_until
         - current_lobby_id
         - elo
         - is_admin_sanctioned
@@ -490,6 +496,7 @@ select_permissions:
         - game_ban_count
         - days_since_last_ban
       computed_fields:
+        - banned_until
         - current_lobby_id
         - elo
         - is_admin_sanctioned
@@ -540,6 +547,7 @@ select_permissions:
         - game_ban_count
         - days_since_last_ban
       computed_fields:
+        - banned_until
         - current_lobby_id
         - elo
         - is_admin_sanctioned
