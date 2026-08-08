@@ -1,3 +1,41 @@
+-- Belt-and-suspenders cleanup for orphaned Awards Phase A objects. These
+-- three names (tau_tournaments_awards, tbi_award_recipients, tbd_awards)
+-- were an earlier iteration of what's now tau_tournaments_trophies() /
+-- award_recipients.sql / awards.sql, renamed away before this migration
+-- landed -- hasura/migrations/default/1873000000700_awards_phase_a/down.sql
+-- already knows to drop them on rollback, but the forward-deploy path never
+-- did, so any environment where they were ever created (schema-current or
+-- not) still has them bound and firing. They reference the pre-refactor
+-- award_recipients.tournament_id/.source columns (folded into
+-- award_occurrences during this same migration), so when they fire they
+-- fail with "column ... does not exist" -- notably inside
+-- reset_tournament_match()'s Finished -> Live transition on tournaments.
+-- The boot loader skips re-applying a file whose content hash is
+-- unchanged, so this can't be fixed by simply redeploying the unchanged
+-- current triggers -- editing this file (as this comment does) bumps the
+-- hash and forces the cleanup below to actually run.
+DROP TRIGGER IF EXISTS tau_tournaments_awards ON public.tournaments;
+DROP FUNCTION IF EXISTS public.tau_tournaments_awards();
+
+-- tbi_award_recipients predates the 0700 migration's
+-- `ALTER TABLE award_recipients RENAME TO legacy_award_recipients_phase_a`
+-- (up.sql:430), so its trigger binding moved with the table rename rather
+-- than staying on the current public.award_recipients (the table that
+-- migration re-creates fresh, unrelated to the pre-refactor one). Confirmed
+-- against production: the live trigger is on
+-- public.legacy_award_recipients_phase_a, not public.award_recipients.
+-- legacy_award_recipients_phase_a is a permanent, intentionally-kept
+-- historical copy of pre-migration award/trophy rows -- every database that
+-- has applied 0700 has this table (fresh or upgraded alike) -- so this is
+-- not a guess at an occasionally-present relation. `IF EXISTS` still
+-- applies to a missing relation, not just a missing trigger name, so this
+-- remains a no-op on any database that predates 0700.
+DROP TRIGGER IF EXISTS tbi_award_recipients ON public.legacy_award_recipients_phase_a;
+DROP FUNCTION IF EXISTS public.tbi_award_recipients();
+
+DROP TRIGGER IF EXISTS tbd_awards ON public.awards;
+DROP FUNCTION IF EXISTS public.tbd_awards();
+
 CREATE OR REPLACE FUNCTION public.tau_tournaments() RETURNS TRIGGER
     LANGUAGE plpgsql
     AS $$

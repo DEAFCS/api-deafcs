@@ -1,7 +1,11 @@
 import { createHash } from "crypto";
 import fs from "fs";
 import path from "path";
-import { bootContainerAndMigrate, SqlTestDb } from "./utils/sql-test-db";
+import {
+  bootContainerAndMigrate,
+  bootMigratedDb,
+  SqlTestDb,
+} from "./utils/sql-test-db";
 
 const VERSION = "1873000000700";
 const PLAYER_ID = "76561198000000001";
@@ -500,5 +504,239 @@ describe("awards Phase A exact hybrid-production repair", () => {
         WHERE version = ${VERSION}`,
     );
     expect(count).toBe("1");
+  }, 600_000);
+});
+
+// Bug B: production carried an orphaned tau_tournaments_awards() trigger --
+// an earlier, renamed-away Awards Phase A iteration
+// (hasura/migrations/default/1873000000700_awards_phase_a/down.sql knows
+// to drop it on rollback, but the forward-deploy path never did) that
+// still referenced the pre-refactor award_recipients.tournament_id/.source
+// columns folded into award_occurrences by this same migration. Firing it
+// (e.g. reset_tournament_match()'s Finished -> Live transition on
+// tournaments) crashed with "column tournament_id does not exist".
+describe("orphaned Awards Phase A trigger/function cleanup", () => {
+  const TRIGGERS_FILE = "hasura/triggers/tournaments.sql";
+  const triggersSource = fs.readFileSync(
+    path.resolve(`./${TRIGGERS_FILE}`),
+    "utf8",
+  );
+
+  let db: SqlTestDb;
+
+  beforeAll(async () => {
+    db = await bootMigratedDb("AwardsOrphanCleanupTest");
+  }, 600_000);
+
+  afterAll(async () => {
+    await db?.stop();
+  });
+
+  it("hasura/triggers/tournaments.sql contains the explicit orphan cleanup statements, targeting the ACTUAL production relations", () => {
+    expect(triggersSource).toMatch(
+      /DROP TRIGGER IF EXISTS tau_tournaments_awards ON public\.tournaments;/,
+    );
+    expect(triggersSource).toMatch(
+      /DROP FUNCTION IF EXISTS public\.tau_tournaments_awards\(\);/,
+    );
+    // Confirmed against production: this trigger's binding moved with the
+    // 0700 migration's `award_recipients RENAME TO
+    // legacy_award_recipients_phase_a` -- it is NOT on the current, freshly
+    // re-created public.award_recipients table.
+    expect(triggersSource).toMatch(
+      /DROP TRIGGER IF EXISTS tbi_award_recipients ON public\.legacy_award_recipients_phase_a;/,
+    );
+    expect(triggersSource).not.toMatch(
+      /DROP TRIGGER IF EXISTS tbi_award_recipients ON public\.award_recipients;/,
+    );
+    expect(triggersSource).toMatch(
+      /DROP FUNCTION IF EXISTS public\.tbi_award_recipients\(\);/,
+    );
+    expect(triggersSource).toMatch(
+      /DROP TRIGGER IF EXISTS tbd_awards ON public\.awards;/,
+    );
+    expect(triggersSource).toMatch(
+      /DROP FUNCTION IF EXISTS public\.tbd_awards\(\);/,
+    );
+  });
+
+  it("current tau_tournaments_trophies still calls clear_tournament_calculated_awards, not a raw award_recipients delete", () => {
+    expect(triggersSource).toMatch(
+      /PERFORM public\.clear_tournament_calculated_awards\(OLD\.id\);/,
+    );
+    expect(triggersSource).not.toMatch(
+      /DELETE FROM public\.award_recipients\s+WHERE tournament_id/,
+    );
+  });
+
+  it("no current function/trigger under any name reintroduces tau_tournaments_awards, tbi_award_recipients, or tbd_awards", async () => {
+    const rows = await db.postgres.query<Array<{ proname: string }>>(
+      `SELECT proname FROM pg_proc
+        WHERE pronamespace = 'public'::regnamespace
+          AND proname IN ('tau_tournaments_awards', 'tbi_award_recipients', 'tbd_awards')`,
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it("reproduces the production crash, then confirms reapplying the current triggers file both removes the orphan and fixes the Finished -> Live transition", async () => {
+    const [{ steam_id: organizerSteamId }] = await db.postgres.query<
+      Array<{ steam_id: string }>
+    >(
+      `INSERT INTO players (steam_id, name)
+       VALUES (76561198000099001, 'Orphan Trigger Test Organizer')
+       RETURNING steam_id`,
+    );
+    const [{ id: mapPoolId }] = await db.postgres.query<Array<{ id: string }>>(
+      `INSERT INTO map_pools (type) VALUES ('Competitive') RETURNING id`,
+    );
+    const [{ id: matchOptionsId }] = await db.postgres.query<
+      Array<{ id: string }>
+    >(
+      `INSERT INTO match_options
+         (overtime, knife_round, mr, best_of, coaches, map_veto, map_pool_id, type)
+       VALUES (true, true, 12, 1, false, false, $1, 'Competitive')
+       RETURNING id`,
+      [mapPoolId],
+    );
+    const [{ id: tournamentId }] = await db.postgres.query<
+      Array<{ id: string }>
+    >(
+      `INSERT INTO tournaments (name, start, organizer_steam_id, match_options_id, status)
+       VALUES ('Orphan trigger test cup', now(), $1, $2, 'Finished')
+       RETURNING id`,
+      [organizerSteamId, matchOptionsId],
+    );
+
+    // Simulate an upgraded environment that still has the orphan: the
+    // *current, final* award_recipients schema (occurrence_id-based, no
+    // tournament_id/source columns) is already in place -- exactly like
+    // production, where the table migrated correctly but this one stray
+    // trigger function did not get updated because it had been renamed
+    // away rather than edited in place.
+    await db.postgres.query(`
+      CREATE OR REPLACE FUNCTION public.tau_tournaments_awards() RETURNS TRIGGER
+          LANGUAGE plpgsql AS $$
+      BEGIN
+          IF OLD.status = 'Finished' AND NEW.status IS DISTINCT FROM 'Finished' THEN
+              DELETE FROM public.award_recipients
+              WHERE tournament_id = OLD.id
+                AND source = 'tournament';
+          END IF;
+          RETURN NEW;
+      END;
+      $$;
+      DROP TRIGGER IF EXISTS tau_tournaments_awards ON public.tournaments;
+      CREATE TRIGGER tau_tournaments_awards
+          AFTER UPDATE ON public.tournaments
+          FOR EACH ROW EXECUTE FUNCTION public.tau_tournaments_awards();
+    `);
+
+    // The orphan reproduces the exact reported crash.
+    await expect(
+      db.postgres.query(`UPDATE tournaments SET status = 'Live' WHERE id = $1`, [
+        tournamentId,
+      ]),
+    ).rejects.toThrow(/column "tournament_id" does not exist/);
+
+    // The failed statement rolled back -- the tournament is still Finished.
+    const [{ status: statusAfterFailure }] = await db.postgres.query<
+      Array<{ status: string }>
+    >(`SELECT status FROM tournaments WHERE id = $1`, [tournamentId]);
+    expect(statusAfterFailure).toBe("Finished");
+
+    // Force the boot loader's content-hash skip to not apply here (mirrors
+    // "reapplies canonical SQL once" above) and reapply via the real
+    // deploy path, not a hand-run copy of the file.
+    await db.postgres.query(
+      `DELETE FROM migration_hashes.hashes
+        WHERE replace(name, E'\\\\', '/') = $1`,
+      [TRIGGERS_FILE.replace(".sql", "")],
+    );
+    await db.hasura.setup();
+
+    const rowsAfterCleanup = await db.postgres.query<
+      Array<{ proname: string }>
+    >(
+      `SELECT proname FROM pg_proc
+        WHERE pronamespace = 'public'::regnamespace
+          AND proname = 'tau_tournaments_awards'`,
+    );
+    expect(rowsAfterCleanup).toEqual([]);
+
+    // Same transition now succeeds cleanly.
+    await db.postgres.query(`UPDATE tournaments SET status = 'Live' WHERE id = $1`, [
+      tournamentId,
+    ]);
+    const [{ status: statusAfterFix }] = await db.postgres.query<
+      Array<{ status: string }>
+    >(`SELECT status FROM tournaments WHERE id = $1`, [tournamentId]);
+    expect(statusAfterFix).toBe("Live");
+  }, 600_000);
+
+  it("reproduces the ACTUAL production shape for tbi_award_recipients (bound to legacy_award_recipients_phase_a, not award_recipients) and confirms cleanup removes it without a dependency error, while preserving the table", async () => {
+    // legacy_award_recipients_phase_a is a permanent artifact of the 0700
+    // migration (the pre-refactor award_recipients/tournament_trophies
+    // table, renamed and kept as a historical copy) -- every database that
+    // has applied 0700, fresh or upgraded, has it.
+    const [{ exists: legacyTableExistsBefore }] = await db.postgres.query<
+      Array<{ exists: boolean }>
+    >(
+      `SELECT to_regclass('public.legacy_award_recipients_phase_a') IS NOT NULL AS exists`,
+    );
+    expect(legacyTableExistsBefore).toBe(true);
+
+    await db.postgres.query(`
+      CREATE OR REPLACE FUNCTION public.tbi_award_recipients() RETURNS TRIGGER
+          LANGUAGE plpgsql AS $$
+      BEGIN
+          RETURN NEW;
+      END;
+      $$;
+      DROP TRIGGER IF EXISTS tbi_award_recipients ON public.legacy_award_recipients_phase_a;
+      CREATE TRIGGER tbi_award_recipients
+          BEFORE INSERT ON public.legacy_award_recipients_phase_a
+          FOR EACH ROW EXECUTE FUNCTION public.tbi_award_recipients();
+    `);
+
+    const beforeCleanup = await db.postgres.query<
+      Array<{ tgname: string; relname: string }>
+    >(
+      `SELECT t.tgname, c.relname
+         FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+        WHERE t.tgname = 'tbi_award_recipients'`,
+    );
+    expect(beforeCleanup).toEqual([
+      { tgname: "tbi_award_recipients", relname: "legacy_award_recipients_phase_a" },
+    ]);
+
+    await db.postgres.query(
+      `DELETE FROM migration_hashes.hashes
+        WHERE replace(name, E'\\\\', '/') = $1`,
+      [TRIGGERS_FILE.replace(".sql", "")],
+    );
+    // The real deploy path -- if the cleanup targeted the wrong relation,
+    // the trigger would survive and this DROP FUNCTION IF EXISTS would
+    // fail with "cannot drop function ... because other objects depend on
+    // it" (confirmed empirically), aborting setup().
+    await expect(db.hasura.setup()).resolves.not.toThrow();
+
+    const afterCleanup = await db.postgres.query<Array<{ tgname: string }>>(
+      `SELECT tgname FROM pg_trigger WHERE tgname = 'tbi_award_recipients'`,
+    );
+    expect(afterCleanup).toEqual([]);
+
+    const fnAfterCleanup = await db.postgres.query<Array<{ proname: string }>>(
+      `SELECT proname FROM pg_proc
+        WHERE pronamespace = 'public'::regnamespace AND proname = 'tbi_award_recipients'`,
+    );
+    expect(fnAfterCleanup).toEqual([]);
+
+    // The table itself is untouched -- only the stray trigger/function.
+    const [{ exists: legacyTableExistsAfter }] = await db.postgres.query<
+      Array<{ exists: boolean }>
+    >(
+      `SELECT to_regclass('public.legacy_award_recipients_phase_a') IS NOT NULL AS exists`,
+    );
+    expect(legacyTableExistsAfter).toBe(true);
   }, 600_000);
 });
