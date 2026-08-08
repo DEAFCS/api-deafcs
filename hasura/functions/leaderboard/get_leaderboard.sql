@@ -501,11 +501,29 @@ BEGIN
   END IF;
 
   RETURN QUERY
-  WITH kills AS (
+  WITH participants AS (
+    -- Eligible match participants for the selected season/mode/source, so a
+    -- player with zero kills (or zero deaths) is still counted instead of
+    -- silently missing from the ladder (see kills/deaths below).
+    SELECT DISTINCT
+      mlp.steam_id,
+      m.id AS match_id
+    FROM match_lineup_players mlp
+    JOIN match_lineups ml ON ml.id = mlp.match_lineup_id
+    JOIN matches m ON m.id = ml.match_id
+    JOIN match_options mo ON mo.id = m.match_options_id
+    WHERE m.status = 'Finished'
+      AND m.source = '5stack'
+      AND mlp.steam_id IS NOT NULL
+      AND ((_from IS NULL OR m.ended_at >= _from) AND (_to IS NULL OR m.ended_at < _to))
+      AND (_match_type IS NULL OR mo.type = _match_type)
+      AND (NOT _exclude_tournaments OR NOT EXISTS (SELECT 1 FROM tournament_brackets tb WHERE tb.match_id = m.id))
+      AND (lower(_source) = 'overall' OR public._leaderboard_match_source(m.id) = lower(_source))
+  ),
+  kills AS (
     SELECT
       pk.attacker_steam_id as steam_id,
-      COUNT(*) as kill_count,
-      COUNT(DISTINCT pk.match_id)::int as match_count
+      COUNT(*) as kill_count
     FROM player_kills pk
     JOIN matches m ON m.id = pk.match_id
     JOIN match_options mo ON mo.id = m.match_options_id
@@ -534,20 +552,22 @@ BEGIN
     GROUP BY dk.attacked_steam_id
   )
   SELECT
-    k.steam_id::text           as player_steam_id,
+    part.steam_id::text        as player_steam_id,
     p.name                     as player_name,
     p.avatar_url               as player_avatar_url,
     p.country                  as player_country,
     CASE WHEN COALESCE(d.death_count, 0) = 0
-      THEN k.kill_count::float
-      ELSE ROUND((k.kill_count::numeric / d.death_count::numeric), 2)::float
+      THEN COALESCE(k.kill_count, 0)::float
+      ELSE ROUND((COALESCE(k.kill_count, 0)::numeric / d.death_count::numeric), 2)::float
     END                        as value,
-    k.kill_count::float        as secondary_value,
+    COALESCE(k.kill_count, 0)::float  as secondary_value,
     COALESCE(d.death_count, 0)::float as tertiary_value,
-    k.match_count              as matches_played
-  FROM kills k
-  LEFT JOIN deaths d ON d.steam_id = k.steam_id
-  JOIN players p ON p.steam_id = k.steam_id
+    COUNT(DISTINCT part.match_id)::int as matches_played
+  FROM participants part
+  LEFT JOIN kills k ON k.steam_id = part.steam_id
+  LEFT JOIN deaths d ON d.steam_id = part.steam_id
+  JOIN players p ON p.steam_id = part.steam_id
+  GROUP BY part.steam_id, p.name, p.avatar_url, p.country, k.kill_count, d.death_count
   ORDER BY value DESC;
 END;
 $$;
@@ -658,27 +678,58 @@ BEGIN
   END IF;
 
   RETURN QUERY
+  WITH participants AS (
+    -- Eligible match participants for the selected season/mode/source, so a
+    -- player with zero kills (zero headshots) is still counted instead of
+    -- silently missing from the ladder merely because they have no attacker
+    -- row in player_kills.
+    SELECT DISTINCT
+      mlp.steam_id,
+      m.id AS match_id
+    FROM match_lineup_players mlp
+    JOIN match_lineups ml ON ml.id = mlp.match_lineup_id
+    JOIN matches m ON m.id = ml.match_id
+    JOIN match_options mo ON mo.id = m.match_options_id
+    WHERE m.status = 'Finished'
+      AND m.source = '5stack'
+      AND mlp.steam_id IS NOT NULL
+      AND ((_from IS NULL OR m.ended_at >= _from) AND (_to IS NULL OR m.ended_at < _to))
+      AND (_match_type IS NULL OR mo.type = _match_type)
+      AND (NOT _exclude_tournaments OR NOT EXISTS (SELECT 1 FROM tournament_brackets tb WHERE tb.match_id = m.id))
+      AND (lower(_source) = 'overall' OR public._leaderboard_match_source(m.id) = lower(_source))
+  ),
+  kills AS (
+    SELECT
+      pk.attacker_steam_id as steam_id,
+      COUNT(*) as kill_count,
+      SUM(CASE WHEN pk.headshot THEN 1 ELSE 0 END) as hs_count
+    FROM player_kills pk
+    JOIN matches m ON m.id = pk.match_id
+    JOIN match_options mo ON mo.id = m.match_options_id
+    WHERE pk.attacker_steam_id IS NOT NULL
+      AND pk.attacker_steam_id != pk.attacked_steam_id
+      AND m.source = '5stack'
+      AND ((_from IS NULL OR pk.time >= _from) AND (_to IS NULL OR pk.time < _to))
+      AND (_match_type IS NULL OR mo.type = _match_type)
+      AND (NOT _exclude_tournaments OR NOT EXISTS (SELECT 1 FROM tournament_brackets tb WHERE tb.match_id = pk.match_id))
+      AND (lower(_source) = 'overall' OR public._leaderboard_match_source(pk.match_id) = lower(_source))
+    GROUP BY pk.attacker_steam_id
+  )
   SELECT
-    pk.attacker_steam_id::text as player_steam_id,
+    part.steam_id::text        as player_steam_id,
     p.name                     as player_name,
     p.avatar_url               as player_avatar_url,
     p.country                  as player_country,
-    ROUND((SUM(CASE WHEN pk.headshot THEN 1 ELSE 0 END)::numeric / COUNT(*)::numeric) * 100, 2)::float as value,
-    COUNT(*)::float            as secondary_value,
+    CASE WHEN COALESCE(k.kill_count, 0) = 0 THEN 0::float
+      ELSE ROUND((COALESCE(k.hs_count, 0)::numeric / k.kill_count::numeric) * 100, 2)::float
+    END                        as value,
+    COALESCE(k.kill_count, 0)::float as secondary_value,
     NULL::float                as tertiary_value,
-    COUNT(DISTINCT pk.match_id)::int as matches_played
-  FROM player_kills pk
-  JOIN players p ON p.steam_id = pk.attacker_steam_id
-  JOIN matches m ON m.id = pk.match_id
-  JOIN match_options mo ON mo.id = m.match_options_id
-  WHERE pk.attacker_steam_id IS NOT NULL
-    AND pk.attacker_steam_id != pk.attacked_steam_id
-    AND m.source = '5stack'
-    AND ((_from IS NULL OR pk.time >= _from) AND (_to IS NULL OR pk.time < _to))
-    AND (_match_type IS NULL OR mo.type = _match_type)
-    AND (NOT _exclude_tournaments OR NOT EXISTS (SELECT 1 FROM tournament_brackets tb WHERE tb.match_id = pk.match_id))
-    AND (lower(_source) = 'overall' OR public._leaderboard_match_source(pk.match_id) = lower(_source))
-  GROUP BY pk.attacker_steam_id, p.name, p.avatar_url, p.country
+    COUNT(DISTINCT part.match_id)::int as matches_played
+  FROM participants part
+  LEFT JOIN kills k ON k.steam_id = part.steam_id
+  JOIN players p ON p.steam_id = part.steam_id
+  GROUP BY part.steam_id, p.name, p.avatar_url, p.country, k.kill_count, k.hs_count
   ORDER BY value DESC;
 END;
 $$;
@@ -817,6 +868,12 @@ $$;
 -- ============================================================
 -- HLTV-stat leaderboards (rating / ADR / KPR / KAST), rounds-weighted
 -- value = _metric, secondary = complementary stat, tertiary = rounds played
+--
+-- No minimum-rounds floor: a player with at least one eligible completed
+-- match/round in the selected Season + Mode + Source is included. A prior
+-- `HAVING SUM(rounds_played) >= 50` floor (sized for a 5v5 competitive map)
+-- silently emptied this leaderboard for Duel/Wingman and early-season data,
+-- where a single map is far short of 50 rounds.
 -- ============================================================
 CREATE OR REPLACE FUNCTION public._leaderboard_hltv_metric(
   _metric TEXT,
@@ -876,7 +933,6 @@ BEGIN
       AND (lower(_source) = 'overall' OR public._leaderboard_match_source(h.match_id) = lower(_source))
       AND (_role IS NULL OR r.role = _role)
     GROUP BY h.steam_id
-    HAVING SUM(h.rounds_played) >= 50
   )
   SELECT
     a.steam_id::text   AS player_steam_id,
@@ -906,6 +962,8 @@ $$;
 -- ============================================================
 -- Utility-damage-per-round leaderboard
 -- value = UDR, secondary = total utility damage, tertiary = rounds played
+--
+-- No minimum-rounds floor: see _leaderboard_hltv_metric above for why.
 -- ============================================================
 CREATE OR REPLACE FUNCTION public._leaderboard_udr(
   _window_days INT,
@@ -961,7 +1019,6 @@ BEGIN
       AND (lower(_source) = 'overall' OR public._leaderboard_match_source(s.match_id) = lower(_source))
       AND (_role IS NULL OR r.role = _role)
     GROUP BY s.steam_id
-    HAVING SUM(s.rounds_played) >= 50
   )
   SELECT
     a.steam_id::text          AS player_steam_id,

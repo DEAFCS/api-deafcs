@@ -437,13 +437,44 @@ describe("read-side views and aggregations (SQL-driven)", () => {
     // A finished '5stack' match with a materialized map to hang kills on. The
     // stat categories inner-join match_options, so bareMatch (optionless, the
     // demo-import shape) would be invisible to them.
-    const statMatch = async () => {
+    //
+    // `participants`, if given, are seeded into match_lineup_players (split
+    // across both lineups) and the match is marked Finished -- required by
+    // the participant-driven stat categories (KDR, HS%) so a player with no
+    // kill/death row still shows up on the ladder. `endedAt` lets a caller
+    // backdate the match to line up with backdated kill/death rows for
+    // window-filter tests.
+    const statMatch = async (
+      participants: string[] = [],
+      endedAt: string | null = null,
+    ) => {
       const { poolId } = await fx.mapPool(1);
       const match = await fx.match({ mapPoolId: poolId });
+      const half = Math.ceil(participants.length / 2);
+      for (const [i, steamId] of participants.entries()) {
+        await fx.lineupPlayer(
+          i < half ? match.lineup_1_id : match.lineup_2_id,
+          steamId,
+        );
+      }
       const [map] = await postgres.query<Array<{ id: string }>>(
         "SELECT id FROM match_maps WHERE match_id = $1",
         [match.id],
       );
+      if (participants.length > 0) {
+        // Two updates: the tbi_matches trigger forces ended_at = NOW() on
+        // the status transition into 'Finished' itself, so a custom
+        // endedAt must be applied in a separate statement afterward (same
+        // pattern as the ratedDuel helper above).
+        await postgres.query(
+          "UPDATE matches SET status = 'Finished' WHERE id = $1",
+          [match.id],
+        );
+        await postgres.query("UPDATE matches SET ended_at = $2 WHERE id = $1", [
+          match.id,
+          endedAt ?? new Date().toISOString(),
+        ]);
+      }
       return { match, ctx: { matchId: match.id, mapId: map.id } };
     };
 
@@ -1083,9 +1114,9 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       expect(Number(excludedPeak.value)).toBe(5100);
     });
 
-    it("best_kdr divides kills by deaths, falling back to kill count for the deathless", async () => {
-      const { ctx } = await statMatch();
+    it("best_kdr divides kills by deaths, falling back to kill count for the deathless, and keeps zero-kill participants at value 0", async () => {
       const [ace, feeder, cleaner, target] = await fx.players(4);
+      const { ctx } = await statMatch([ace, feeder, cleaner, target]);
       for (const round of [1, 2, 3]) {
         await fx.kill(ctx, ace, feeder, { round });
       }
@@ -1094,11 +1125,13 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       await fx.kill(ctx, cleaner, target, { round: 2 });
 
       const rows = await leaderboard("best_kdr", 30, "Competitive");
-      // ace 3/1, cleaner deathless (value = raw kill count 2), feeder 1/3.
+      // ace 3/1, cleaner deathless (value = raw kill count 2), feeder 1/3,
+      // target never got a kill but IS a participant: 0 kills / 2 deaths = 0.
       expect(rows.map((r) => r.player_steam_id)).toEqual([
         ace,
         cleaner,
         feeder,
+        target,
       ]);
       const byId = new Map(rows.map((r) => [r.player_steam_id, r]));
       expect(Number(byId.get(ace)!.value)).toBe(3);
@@ -1107,8 +1140,10 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       expect(Number(byId.get(cleaner)!.value)).toBe(2);
       expect(Number(byId.get(cleaner)!.tertiary_value)).toBe(0);
       expect(Number(byId.get(feeder)!.value)).toBeCloseTo(0.33, 2);
-      // Never got a kill: not on the board, despite the deaths.
-      expect(byId.has(target)).toBe(false);
+      // Never got a kill, but participated: shown at 0, not dropped.
+      expect(Number(byId.get(target)!.value)).toBe(0);
+      expect(Number(byId.get(target)!.secondary_value)).toBe(0); // kills
+      expect(Number(byId.get(target)!.tertiary_value)).toBe(2); // deaths
     });
 
     it("best_win_rate is the finished-match win percentage with win/loss detail", async () => {
@@ -1127,29 +1162,73 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       expect(Number(bottom.value)).toBeCloseTo(33.33, 2);
     });
 
-    it("highest_hs_pct ranks headshot ratios from the kill feed", async () => {
-      const { ctx } = await statMatch();
+    it("highest_hs_pct ranks headshot ratios from the kill feed, keeping the zero-kill victim at 0%", async () => {
       const [surgeon, sprayer, victim] = await fx.players(3);
+      const { ctx } = await statMatch([surgeon, sprayer, victim]);
       await fx.kill(ctx, surgeon, victim, { headshot: true });
       await fx.kill(ctx, sprayer, victim, { headshot: true });
       await fx.kill(ctx, sprayer, victim, { headshot: false, round: 2 });
       await fx.kill(ctx, sprayer, victim, { headshot: false, round: 3 });
 
       const rows = await leaderboard("highest_hs_pct", 30, "Competitive");
-      expect(rows.map((r) => r.player_steam_id)).toEqual([surgeon, sprayer]);
+      // victim never lands a kill but did participate: shown at 0%, not dropped.
+      expect(rows.map((r) => r.player_steam_id)).toEqual([
+        surgeon,
+        sprayer,
+        victim,
+      ]);
       expect(Number(rows[0].value)).toBe(100);
       expect(Number(rows[0].secondary_value)).toBe(1); // total kills
       expect(Number(rows[1].value)).toBeCloseTo(33.33, 2);
       expect(Number(rows[1].secondary_value)).toBe(3);
+      expect(Number(rows[2].value)).toBe(0);
+      expect(Number(rows[2].secondary_value)).toBe(0);
     });
 
-    it("stat categories respect the day window, with 0 meaning all time", async () => {
-      const { ctx } = await statMatch();
+    it("best_rating/best_adr/best_kpr/best_kast/best_udr surface a 9-round Duel match with no minimum-rounds floor", async () => {
+      // A Duel (1v1) match, 9 rounds -- a completed match, but far short of
+      // the removed `HAVING SUM(rounds_played) >= 50` floor that was sized
+      // for a 5v5 map and previously emptied these leaderboards for
+      // Duel/Wingman and early-season data.
+      const { poolId } = await fx.mapPool(1);
+      const match = await fx.match({ mapPoolId: poolId, type: "Duel" });
+      const [map] = await postgres.query<Array<{ id: string }>>(
+        "SELECT id FROM match_maps WHERE match_id = $1",
+        [match.id],
+      );
+      const ctx = { matchId: match.id, mapId: map.id };
+      const [ace, opponent] = await fx.players(2);
+      for (let round = 1; round <= 9; round++) {
+        await fx.kill(ctx, ace, opponent, { round, time: T(60 - round) });
+        await fx.damage(ctx, ace, opponent, 90, { round });
+        await fx.round(ctx.mapId, round, { time: T(59 - round) });
+      }
+
+      const rating = await leaderboard("best_rating", 30, "Duel");
+      const adr = await leaderboard("best_adr", 30, "Duel");
+      const kpr = await leaderboard("best_kpr", 30, "Duel");
+      const kast = await leaderboard("best_kast", 30, "Duel");
+      const udr = await leaderboard("best_udr", 30, "Duel");
+
+      for (const rows of [rating, adr, kpr, kast, udr]) {
+        expect(rows.map((r) => r.player_steam_id)).toContain(ace);
+      }
+      const aceRating = rating.find((r) => r.player_steam_id === ace)!;
+      // tertiary_value is rounds played: 9, well under the old 50-round floor.
+      expect(Number(aceRating.tertiary_value)).toBe(9);
+      const aceAdr = adr.find((r) => r.player_steam_id === ace)!;
+      expect(Number(aceAdr.value)).toBeCloseTo(90, 1);
+    });
+
+    it("stat categories respect the day window, with 0 meaning all time -- and no longer drop the zero-kill participant", async () => {
       const [a, b] = await fx.players(2);
-      await fx.kill(ctx, a, b, { time: T(60 * 24 * 40) }); // 40 days back
+      const oldTime = T(60 * 24 * 40); // 40 days back
+      const { ctx } = await statMatch([a, b], oldTime);
+      await fx.kill(ctx, a, b, { time: oldTime });
 
       expect((await leaderboard("best_kdr", 30, "Competitive")).length).toBe(0);
-      expect((await leaderboard("best_kdr", 0, "Competitive")).length).toBe(1);
+      // All-time: both participants surface now, including b (0 kills).
+      expect((await leaderboard("best_kdr", 0, "Competitive")).length).toBe(2);
     });
 
     it("get_player_leaderboard_rank locates a player inside the ladder", async () => {
@@ -1387,11 +1466,14 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       });
 
       it("best_kdr buckets kills into Matchmaking vs Tournament, Overall combines both", async () => {
-        const { ctx: mmCtx } = await statMatch();
-        const { match: tourneyMatch, ctx: tourneyCtx } = await statMatch();
+        const [player, victim] = await fx.players(2);
+        const { ctx: mmCtx } = await statMatch([player, victim]);
+        const { match: tourneyMatch, ctx: tourneyCtx } = await statMatch([
+          player,
+          victim,
+        ]);
         await attachTournamentBracket(tourneyMatch.id);
 
-        const [player, victim] = await fx.players(2);
         await fx.kill(mmCtx, player, victim);
         await fx.kill(mmCtx, player, victim, { round: 2 });
         await fx.kill(tourneyCtx, player, victim);
@@ -1450,8 +1532,8 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       });
 
       it("League with no league-backed matches returns an empty leaderboard cleanly (non-ELO category)", async () => {
-        const { ctx } = await statMatch();
         const [a, b] = await fx.players(2);
+        const { ctx } = await statMatch([a, b]);
         await fx.kill(ctx, a, b);
 
         const league = await leaderboardSource(
@@ -1464,16 +1546,19 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       });
 
       it("classifies a league-backed tournament match distinctly from a standalone tournament match", async () => {
-        const { match: leagueMatch, ctx: leagueCtx } = await statMatch();
+        const [player, victim] = await fx.players(2);
+        const { match: leagueMatch, ctx: leagueCtx } = await statMatch([
+          player,
+          victim,
+        ]);
         const leagueTournament = await attachTournamentBracket(
           leagueMatch.id,
           { league: true },
         );
         const { match: standaloneMatch, ctx: standaloneCtx } =
-          await statMatch();
+          await statMatch([player, victim]);
         await attachTournamentBracket(standaloneMatch.id);
 
-        const [player, victim] = await fx.players(2);
         await fx.kill(leagueCtx, player, victim);
         await fx.kill(leagueCtx, player, victim, { round: 2 });
         await fx.kill(standaloneCtx, player, victim);
