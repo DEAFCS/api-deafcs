@@ -66,6 +66,38 @@ export class ChatService {
         }
 
         break;
+      case ChatLobbyType.MatchTeam: {
+        const [matchId, lineupId] = id.split(":");
+
+        if (!matchId || !lineupId) {
+          return;
+        }
+
+        const { match_lineups_by_pk } = await this.hasuraService.query(
+          {
+            match_lineups_by_pk: {
+              __args: { id: lineupId },
+              id: true,
+              match_id: true,
+              coach_steam_id: true,
+              is_on_lineup: true,
+            },
+          },
+          user.steam_id,
+        );
+
+        if (
+          !match_lineups_by_pk ||
+          match_lineups_by_pk.match_id !== matchId ||
+          (!match_lineups_by_pk.is_on_lineup &&
+            String(match_lineups_by_pk.coach_steam_id) !==
+              String(user.steam_id))
+        ) {
+          return;
+        }
+
+        break;
+      }
       case ChatLobbyType.MatchMaking:
         const { lobby_players_by_pk } = await this.hasuraService.query({
           lobby_players_by_pk: {
