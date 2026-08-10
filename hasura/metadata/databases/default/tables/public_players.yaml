@@ -328,6 +328,11 @@ computed_fields:
       function:
         name: is_banned
         schema: public
+  - name: is_leaver_in_match
+    definition:
+      function:
+        name: is_leaver_in_match
+        schema: public
   - name: is_gagged
     definition:
       function:
@@ -453,6 +458,7 @@ select_permissions:
         - is_admin_sanctioned
         - is_banned
         - is_gagged
+        - is_leaver_in_match
         - is_muted
         - losses
         - losses_competitive
@@ -505,6 +511,7 @@ select_permissions:
         - is_in_another_match
         - is_in_draft
         - is_in_lobby
+        - is_leaver_in_match
         - is_muted
         - losses
         - losses_competitive
@@ -556,6 +563,7 @@ select_permissions:
         - is_in_another_match
         - is_in_draft
         - is_in_lobby
+        - is_leaver_in_match
         - is_muted
         - losses
         - losses_competitive
