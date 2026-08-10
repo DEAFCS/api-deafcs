@@ -44,23 +44,27 @@ DECLARE
     status text;
     match_type text;
     is_tournament boolean;
+    is_draft boolean;
+    sanction_only boolean;
     lineup_count INT;
     _max_players_per_lineup INT;
 BEGIN
-    SELECT mo.type, m.status, COALESCE(is_tournament_match(m), false)
-        INTO match_type, status, is_tournament
+    SELECT mo.type, m.status, COALESCE(is_tournament_match(m), false), COALESCE(is_draft_match(m), false)
+        INTO match_type, status, is_tournament, is_draft
     FROM matches m
     INNER JOIN match_lineups ml ON ml.match_id = m.id
     INNER JOIN match_options mo ON mo.id = m.match_options_id
     WHERE ml.id = COALESCE(NEW.match_lineup_id, OLD.match_lineup_id);
 
+    sanction_only := is_tournament OR is_draft;
+
     IF TG_OP = 'INSERT' THEN
-        -- Tournament matches only care about a real admin sanction, not an
-        -- automatic leaver/no-show ban ("Abandoned") -- everything else
-        -- (MM etc.) keeps blocking on any active ban, same as before.
+        -- Tournament and draft matches only care about a real admin
+        -- sanction, not an automatic leaver/no-show ban ("Abandoned") --
+        -- MM keeps blocking on any active ban, same as before.
         IF (
-            (is_tournament AND is_admin_sanctioned((SELECT p FROM players p WHERE steam_id = NEW.steam_id)))
-            OR (NOT is_tournament AND is_banned((SELECT p FROM players p WHERE steam_id = NEW.steam_id)))
+            (sanction_only AND is_admin_sanctioned((SELECT p FROM players p WHERE steam_id = NEW.steam_id)))
+            OR (NOT sanction_only AND is_banned((SELECT p FROM players p WHERE steam_id = NEW.steam_id)))
         ) THEN
             RAISE EXCEPTION 'Player is Currently Banned' USING ERRCODE = '22000';
         END IF;

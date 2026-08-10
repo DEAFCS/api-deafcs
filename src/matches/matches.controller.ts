@@ -131,6 +131,20 @@ export class MatchesController {
     return new Set(rows.map((row) => row.steam_id));
   }
 
+  // Draft matches (Open Match/AUTO-SPLIT pickup lobbies) get the same
+  // Sanction-vs-Abandoned treatment as tournament matches above -- an
+  // automatic leaver/no-show ban shouldn't block a draft match either.
+  // is_tournament_match is an existing computed field; draft matches have
+  // no equivalent one yet, so check directly via draft_games.match_id.
+  private async isDraftMatch(matchId: string): Promise<boolean> {
+    const rows = await this.postgres.query<Array<{ exists: boolean }>>(
+      `SELECT EXISTS (SELECT 1 FROM public.draft_games WHERE match_id = $1) AS "exists"`,
+      [matchId],
+    );
+
+    return rows[0]?.exists ?? false;
+  }
+
   @Get("stream-viewers")
   public async getStreamViewers(
     @Query("match_ids") matchIdsParam?: string,
@@ -413,8 +427,8 @@ export class MatchesController {
       return Number.isFinite(parsed) ? parsed : 5000;
     };
 
-    // Tournament matches only care about a real admin sanction, not an
-    // automatic leaver/no-show ban -- override the blanket is_banned
+    // Tournament and draft matches only care about a real admin sanction,
+    // not an automatic leaver/no-show ban -- override the blanket is_banned
     // computed field (which can't tell the two apart) before it reaches
     // the game server, which otherwise kicks anyone with is_banned=true
     // the moment they try to connect, regardless of match type.
@@ -425,7 +439,10 @@ export class MatchesController {
       .map((player) => player.steam_id)
       .filter((steamId): steamId is string => !!steamId);
 
-    const adminSanctionedSteamIds = match.is_tournament_match
+    const isSanctionOnlyMatch =
+      match.is_tournament_match || (await this.isDraftMatch(match.id));
+
+    const adminSanctionedSteamIds = isSanctionOnlyMatch
       ? await this.getAdminSanctionedSteamIds(allRosterSteamIds)
       : null;
 
