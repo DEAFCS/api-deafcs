@@ -4,6 +4,7 @@ import { ForbiddenException, Injectable, Logger } from "@nestjs/common";
 import { S3Service } from "../s3/s3.service";
 import { HasuraService } from "../hasura/hasura.service";
 import { User } from "../auth/types/User";
+import { isRoleAbove } from "src/utilities/isRoleAbove";
 
 export type AvatarKind =
   | "teams"
@@ -195,9 +196,9 @@ export class AvatarsService {
     buffer: Buffer,
     mimetype: string,
   ): Promise<string> {
-    if (steamId !== user.steam_id && user.role !== "administrator") {
+    if (!isRoleAbove(user.role, "tournament_organizer")) {
       throw new ForbiddenException(
-        "You cannot change this player's roster image",
+        "You do not have permission to manage roster images",
       );
     }
 
@@ -238,9 +239,9 @@ export class AvatarsService {
   }
 
   async removePlayerRosterImage(steamId: string, user: User): Promise<void> {
-    if (steamId !== user.steam_id && user.role !== "administrator") {
+    if (!isRoleAbove(user.role, "tournament_organizer")) {
       throw new ForbiddenException(
-        "You cannot change this player's roster image",
+        "You do not have permission to manage roster images",
       );
     }
 
@@ -553,46 +554,22 @@ export class AvatarsService {
     teamId: string,
     user: User,
   ): Promise<void> {
-    if (
-      user.role === "administrator" ||
-      user.role === "tournament_organizer" ||
-      user.role === "match_organizer"
-    ) {
-      return;
+    if (!isRoleAbove(user.role, "tournament_organizer")) {
+      throw new ForbiddenException(
+        "You do not have permission to manage this team's roster images",
+      );
     }
 
     const { teams_by_pk } = await this.hasura.query({
       teams_by_pk: {
         __args: { id: teamId },
-        owner_steam_id: true,
-        roster: {
-          __args: {
-            where: {
-              player_steam_id: { _eq: user.steam_id },
-            },
-            limit: 1,
-          },
-          role: true,
-        },
+        id: true,
       },
     });
 
     if (!teams_by_pk) {
       throw new ForbiddenException("Team not found");
     }
-
-    if (teams_by_pk.owner_steam_id === user.steam_id) {
-      return;
-    }
-
-    const rosterEntry = teams_by_pk.roster?.[0];
-    if (rosterEntry?.role === "Admin") {
-      return;
-    }
-
-    throw new ForbiddenException(
-      "You do not have permission to manage this team's roster images",
-    );
   }
 
   private guessContentType(filename: string): string {
