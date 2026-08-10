@@ -81,9 +81,16 @@ CREATE OR REPLACE FUNCTION public.tad_draft_games() RETURNS TRIGGER
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF OLD.match_options_id IS NOT NULL THEN
-        DELETE FROM public.match_options WHERE id = OLD.match_options_id;
-    END IF;
+    -- Was an unconditional DELETE, which fires (via tbd_matches ->
+    -- draft_games delete -> this trigger) *before* the owning matches row is
+    -- actually gone -- matches.match_options_id still points at the same
+    -- row at that point, so ON DELETE RESTRICT on
+    -- matches_match_options_id_fkey always rejected it. Deleting/canceling
+    -- any draft game with a linked match always failed as a result.
+    -- cleanup_orphaned_match_options() (already used by tad_matches for the
+    -- same cleanup) only deletes once nothing references the row anymore,
+    -- so it's safe regardless of ordering.
+    PERFORM cleanup_orphaned_match_options(OLD.match_options_id);
     RETURN OLD;
 END;
 $$;
