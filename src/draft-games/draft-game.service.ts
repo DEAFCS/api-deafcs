@@ -655,7 +655,6 @@ export class DraftGameService {
       players: {
         __args: { where: { steam_id: { _in: steamIds } } },
         steam_id: true,
-        matchmaking_cooldown: true,
         is_in_another_match: true,
         elo: true,
       },
@@ -664,10 +663,15 @@ export class DraftGameService {
     const adminSanctionedSteamIds =
       await this.getAdminSanctionedSteamIds(steamIds);
 
+    // matchmaking_cooldown is intentionally NOT checked here -- it's purely
+    // the automatic leaver/no-show (Abandoned) cooldown (see
+    // get_player_matchmaking_cooldown.sql), which is only meant to gate MM
+    // (see matchmaking-lobby.service.ts). Draft follows the same rule as
+    // tournament: an Abandoned/leaver ban doesn't block joining, only a real
+    // admin Sanction does.
     for (const player of players) {
       const eligible =
         !adminSanctionedSteamIds.has(player.steam_id) &&
-        !player.matchmaking_cooldown &&
         !player.is_in_another_match;
 
       const eloMap = player.elo as Record<string, unknown> | null | undefined;
@@ -1538,7 +1542,6 @@ export class DraftGameService {
           steam_id: steamId,
         },
         name: true,
-        matchmaking_cooldown: true,
         is_in_another_match: true,
       },
     });
@@ -1551,10 +1554,8 @@ export class DraftGameService {
       throw new DraftGameError(`${player.name} is already in a match`);
     }
 
-    if (player.matchmaking_cooldown) {
-      throw new DraftGameError(`${player.name} is in matchmaking cooldown`);
-    }
-
+    // matchmaking_cooldown intentionally not checked -- see comment in
+    // getDraftCandidates above. Draft only blocks on a real admin Sanction.
     const adminSanctionedSteamIds = await this.getAdminSanctionedSteamIds([
       steamId,
     ]);
