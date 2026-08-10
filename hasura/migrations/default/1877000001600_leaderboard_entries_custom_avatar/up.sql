@@ -1,0 +1,34 @@
+-- leaderboard_entries is a zero-row "type-definition" table (see
+-- 1771545600000_leaderboard_functions/up.sql) used purely as the SETOF
+-- return type for get_leaderboard()/get_event_leaderboard()/
+-- get_league_season_leaderboard(). It only ever carried player_avatar_url
+-- (players.avatar_url, the Steam-synced avatar), so those leaderboards
+-- could never reflect a player's custom uploaded avatar the way /players
+-- and player profiles already do.
+--
+-- Nullable, no default: instant metadata-only change on a permanent
+-- zero-row table.
+--
+-- IMPORTANT: every function declared RETURNS SETOF public.leaderboard_entries
+-- must be updated to select this column in the SAME deploy as this
+-- migration (see hasura/functions/leaderboard/get_leaderboard.sql,
+-- hasura/functions/events/get_event_leaderboard.sql, and
+-- hasura/functions/leaderboard/get_league_season_leaderboard.sql). The
+-- moment this column exists, PostgreSQL requires every RETURN QUERY SELECT
+-- targeting this composite type to match its new column count exactly --
+-- src/hasura/hasura.service.ts's setup() already runs migrations to
+-- completion (or aborts boot entirely on failure) before it re-applies
+-- hasura/functions/, so within one deploy there is no window where a
+-- function can run against a schema it doesn't match. Do not ship this
+-- migration without also shipping the function-file edits in the same
+-- deploy.
+--
+-- POSITIONAL, NOT NAMED: RETURN QUERY SELECT matches a composite return type
+-- by column POSITION, not by name -- ADD COLUMN always appends, so
+-- player_custom_avatar_url is position 9 (last) on this type. Every producer
+-- SELECT must select it LAST (after matches_played), matching this table's
+-- actual column order, or every single call fails with "structure of query
+-- does not match function result type" even though every column name is
+-- present and correctly spelled.
+ALTER TABLE public.leaderboard_entries
+  ADD COLUMN IF NOT EXISTS player_custom_avatar_url TEXT;

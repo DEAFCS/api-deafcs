@@ -447,7 +447,8 @@ BEGIN
     CASE WHEN lower(_source) <> 'overall'
       THEN COALESCE(sc.source_matches_played, 0)
       ELSE COALESCE(mc.matches_played, 0)
-    END::int                   as matches_played
+    END::int                   as matches_played,
+    p.custom_avatar_url        as player_custom_avatar_url
   FROM filtered_players d
   LEFT JOIN last_elo le ON le.steam_id = d.steam_id
   LEFT JOIN peak_elo pk ON pk.steam_id = d.steam_id
@@ -562,12 +563,13 @@ BEGIN
     END                        as value,
     COALESCE(k.kill_count, 0)::float  as secondary_value,
     COALESCE(d.death_count, 0)::float as tertiary_value,
-    COUNT(DISTINCT part.match_id)::int as matches_played
+    COUNT(DISTINCT part.match_id)::int as matches_played,
+    p.custom_avatar_url        as player_custom_avatar_url
   FROM participants part
   LEFT JOIN kills k ON k.steam_id = part.steam_id
   LEFT JOIN deaths d ON d.steam_id = part.steam_id
   JOIN players p ON p.steam_id = part.steam_id
-  GROUP BY part.steam_id, p.name, p.avatar_url, p.country, k.kill_count, d.death_count
+  GROUP BY part.steam_id, p.name, p.avatar_url, p.custom_avatar_url, p.country, k.kill_count, d.death_count
   ORDER BY value DESC;
 END;
 $$;
@@ -634,10 +636,11 @@ BEGIN
     ROUND((SUM(pm.won)::numeric / COUNT(*)::numeric) * 100, 2)::float as value,
     SUM(pm.won)::float         as secondary_value,
     (COUNT(*) - SUM(pm.won))::float as tertiary_value,
-    COUNT(*)::int              as matches_played
+    COUNT(*)::int              as matches_played,
+    p.custom_avatar_url        as player_custom_avatar_url
   FROM player_matches pm
   JOIN players p ON p.steam_id = pm.steam_id
-  GROUP BY pm.steam_id, p.name, p.avatar_url, p.country
+  GROUP BY pm.steam_id, p.name, p.avatar_url, p.custom_avatar_url, p.country
   ORDER BY value DESC;
 END;
 $$;
@@ -725,11 +728,12 @@ BEGIN
     END                        as value,
     COALESCE(k.kill_count, 0)::float as secondary_value,
     NULL::float                as tertiary_value,
-    COUNT(DISTINCT part.match_id)::int as matches_played
+    COUNT(DISTINCT part.match_id)::int as matches_played,
+    p.custom_avatar_url        as player_custom_avatar_url
   FROM participants part
   LEFT JOIN kills k ON k.steam_id = part.steam_id
   JOIN players p ON p.steam_id = part.steam_id
-  GROUP BY part.steam_id, p.name, p.avatar_url, p.country, k.kill_count, k.hs_count
+  GROUP BY part.steam_id, p.name, p.avatar_url, p.custom_avatar_url, p.country, k.kill_count, k.hs_count
   ORDER BY value DESC;
 END;
 $$;
@@ -800,7 +804,8 @@ BEGIN
     c.gold::float             as value,
     c.silver::float           as secondary_value,
     c.bronze::float           as tertiary_value,
-    c.mvp                     as matches_played
+    c.mvp                     as matches_played,
+    p.custom_avatar_url       as player_custom_avatar_url
   FROM counts c
   JOIN players p ON p.steam_id = c.player_steam_id
   WHERE c.total > 0
@@ -952,7 +957,8 @@ BEGIN
       WHEN 'kast'   THEN ROUND(a.rating::numeric, 2)
     END)::float        AS secondary_value,
     a.rounds::float    AS tertiary_value,
-    a.match_count      AS matches_played
+    a.match_count      AS matches_played,
+    p.custom_avatar_url AS player_custom_avatar_url
   FROM agg a
   JOIN players p ON p.steam_id = a.steam_id
   ORDER BY value DESC NULLS LAST;
@@ -1028,7 +1034,8 @@ BEGIN
     ROUND(a.udr, 1)::float    AS value,
     a.util_damage::float      AS secondary_value,
     a.rounds::float           AS tertiary_value,
-    a.match_count             AS matches_played
+    a.match_count             AS matches_played,
+    p.custom_avatar_url       AS player_custom_avatar_url
   FROM agg a
   JOIN players p ON p.steam_id = a.steam_id
   ORDER BY value DESC NULLS LAST;
