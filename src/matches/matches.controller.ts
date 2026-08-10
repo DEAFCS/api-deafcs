@@ -328,6 +328,7 @@ export class MatchesController {
 
     const match = matches_by_pk as typeof matches_by_pk & {
       is_lan: boolean;
+      is_draft_match: boolean;
       options: typeof matches_by_pk.options & {
         use_playcast: boolean;
         show_elo_ranks: boolean;
@@ -439,8 +440,13 @@ export class MatchesController {
       .map((player) => player.steam_id)
       .filter((steamId): steamId is string => !!steamId);
 
-    const isSanctionOnlyMatch =
-      match.is_tournament_match || (await this.isDraftMatch(match.id));
+    const isDraftMatch = await this.isDraftMatch(match.id);
+    // Exposed to the game server so it can allow .tech (technical pause)
+    // for draft matches the same way it already does for tournament
+    // matches -- MM stays .tac-only.
+    match.is_draft_match = isDraftMatch;
+
+    const isSanctionOnlyMatch = match.is_tournament_match || isDraftMatch;
 
     const adminSanctionedSteamIds = isSanctionOnlyMatch
       ? await this.getAdminSanctionedSteamIds(allRosterSteamIds)
