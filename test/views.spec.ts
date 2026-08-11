@@ -454,6 +454,177 @@ describe("read-side views and aggregations (SQL-driven)", () => {
       // Lifetime-latest rows used directly, same as before this change.
       expect(Number(ranks.avg_elo)).toBe(5000);
     });
+
+    it("active season: Wingman and Duel use each player's current-season row for that type independently of Competitive", async () => {
+      await fx.enableSeasons();
+      const activeSeasonId = await fx.season("2020-01-01", null);
+
+      const team = await fx.team(1);
+      const roster = await postgres.query<Array<{ player_steam_id: string }>>(
+        "SELECT player_steam_id FROM team_roster WHERE team_id = $1 ORDER BY player_steam_id",
+        [team.id],
+      );
+      const [p1] = roster.map((r) => r.player_steam_id);
+
+      const { matchId } = await fx.bareMatch(T(60));
+      await postgres.query(
+        `INSERT INTO player_elo (steam_id, match_id, type, "current", change, created_at, season_id)
+         VALUES ($1, $2, 'Wingman', 5800, 0, now() - interval '1 hour', $3),
+                ($1, $2, 'Duel', 4600, 0, now() - interval '1 hour', $3)`,
+        [p1, matchId, activeSeasonId],
+      );
+      // p1 has no Competitive row this season, p2 has no rows at all in any type.
+
+      const [ranks] = await postgres.query<
+        Array<{
+          avg_elo: number;
+          avg_wingman_elo: number;
+          avg_duel_elo: number;
+        }>
+      >(
+        "SELECT avg_elo, avg_wingman_elo, avg_duel_elo FROM v_team_ranks WHERE team_id = $1",
+        [team.id],
+      );
+
+      // Competitive: neither player has a row -> both default 5000 -> 5000.
+      expect(Number(ranks.avg_elo)).toBe(5000);
+      // Wingman: (5800 + 5000) / 2 = 5400.
+      expect(Number(ranks.avg_wingman_elo)).toBe(5400);
+      // Duel: (4600 + 5000) / 2 = 4800.
+      expect(Number(ranks.avg_duel_elo)).toBe(4800);
+    });
+
+    it("active season: a player's older/lifetime Wingman row does not leak into avg_wingman_elo when they have none in the current season", async () => {
+      await fx.enableSeasons();
+      const oldSeasonId = await fx.season("2020-01-01", "2020-06-01");
+      await fx.season("2020-06-01", null); // open-ended, contains now()
+
+      const team = await fx.team(1);
+      const roster = await postgres.query<Array<{ player_steam_id: string }>>(
+        "SELECT player_steam_id FROM team_roster WHERE team_id = $1 ORDER BY player_steam_id",
+        [team.id],
+      );
+      const [p1] = roster.map((r) => r.player_steam_id);
+
+      const { matchId: oldMatch } = await fx.bareMatch(T(60));
+      await postgres.query(
+        `INSERT INTO player_elo (steam_id, match_id, type, "current", change, created_at, season_id)
+         VALUES ($1, $2, 'Wingman', 6500, 0, now() - interval '1 hour', $3)`,
+        [p1, oldMatch, oldSeasonId],
+      );
+
+      const [ranks] = await postgres.query<Array<{ avg_wingman_elo: number }>>(
+        "SELECT avg_wingman_elo FROM v_team_ranks WHERE team_id = $1",
+        [team.id],
+      );
+
+      // Both players show the season-starting 5000 (p1's stale 6500 ignored).
+      expect(Number(ranks.avg_wingman_elo)).toBe(5000);
+    });
+
+    it("a coach's ELO does not influence the Wingman or Duel team average", async () => {
+      await fx.enableSeasons();
+      const activeSeasonId = await fx.season("2020-01-01", null);
+
+      const team = await fx.team(1);
+      const coach = await fx.player();
+      await runAsUser(postgres, team.owner, "admin", (query) =>
+        query(
+          "INSERT INTO team_roster (team_id, player_steam_id, status, coach) VALUES ($1, $2, 'Starter', true)",
+          [team.id, coach],
+        ),
+      );
+
+      const { matchId } = await fx.bareMatch(T(60));
+      await postgres.query(
+        `INSERT INTO player_elo (steam_id, match_id, type, "current", change, created_at, season_id)
+         VALUES ($1, $2, 'Wingman', 9000, 0, now() - interval '1 hour', $3),
+                ($1, $2, 'Duel', 9000, 0, now() - interval '1 hour', $3)`,
+        [coach, matchId, activeSeasonId],
+      );
+
+      const [ranks] = await postgres.query<
+        Array<{
+          roster_size: number;
+          avg_wingman_elo: number;
+          avg_duel_elo: number;
+        }>
+      >(
+        "SELECT roster_size, avg_wingman_elo, avg_duel_elo FROM v_team_ranks WHERE team_id = $1",
+        [team.id],
+      );
+
+      // Both real players default to 5000 (no season row); the coach's 9000
+      // must not be counted in roster_size or dragged into either average.
+      expect(Number(ranks.roster_size)).toBe(2);
+      expect(Number(ranks.avg_wingman_elo)).toBe(5000);
+      expect(Number(ranks.avg_duel_elo)).toBe(5000);
+    });
+
+    it("substitute and benched non-coach roster members are still included in Wingman/Duel averages", async () => {
+      await fx.enableSeasons();
+      const activeSeasonId = await fx.season("2020-01-01", null);
+
+      const team = await fx.team(1); // owner + 1 starter mate, both default 5000
+      const substitute = await fx.player();
+      const benched = await fx.player();
+      await runAsUser(postgres, team.owner, "admin", async (query) => {
+        await query(
+          "INSERT INTO team_roster (team_id, player_steam_id, status) VALUES ($1, $2, 'Substitute')",
+          [team.id, substitute],
+        );
+        await query(
+          "INSERT INTO team_roster (team_id, player_steam_id, status) VALUES ($1, $2, 'Benched')",
+          [team.id, benched],
+        );
+      });
+
+      const { matchId } = await fx.bareMatch(T(60));
+      await postgres.query(
+        `INSERT INTO player_elo (steam_id, match_id, type, "current", change, created_at, season_id)
+         VALUES ($1, $2, 'Duel', 7000, 0, now() - interval '1 hour', $3)`,
+        [substitute, matchId, activeSeasonId],
+      );
+      // benched player has no row -> 5000.
+
+      const [ranks] = await postgres.query<
+        Array<{ roster_size: number; avg_duel_elo: number }>
+      >(
+        "SELECT roster_size, avg_duel_elo FROM v_team_ranks WHERE team_id = $1",
+        [team.id],
+      );
+
+      // 4 players total: owner 5000, mate 5000, substitute 7000, benched 5000
+      // -> avg 5500.
+      expect(Number(ranks.roster_size)).toBe(4);
+      expect(Number(ranks.avg_duel_elo)).toBe(5500);
+    });
+
+    it("seasons disabled: Wingman and Duel fall back to existing lifetime ELO behavior, same as Competitive", async () => {
+      // No fx.enableSeasons() call -- seasons are off by default per beforeEach.
+      const team = await fx.team(1);
+      const roster = await postgres.query<Array<{ player_steam_id: string }>>(
+        "SELECT player_steam_id FROM team_roster WHERE team_id = $1 ORDER BY player_steam_id",
+        [team.id],
+      );
+      const [p1, p2] = roster.map((r) => r.player_steam_id);
+
+      const { matchId } = await fx.bareMatch(T(60));
+      await postgres.query(
+        `INSERT INTO player_elo (steam_id, match_id, type, "current", change, created_at)
+         VALUES ($1, $3, 'Wingman', 6000, 0, now() - interval '1 hour'),
+                ($2, $3, 'Wingman', 4000, 0, now() - interval '1 hour')`,
+        [p1, p2, matchId],
+      );
+
+      const [ranks] = await postgres.query<Array<{ avg_wingman_elo: number }>>(
+        "SELECT avg_wingman_elo FROM v_team_ranks WHERE team_id = $1",
+        [team.id],
+      );
+
+      // Lifetime-latest rows used directly, same fallback as Competitive.
+      expect(Number(ranks.avg_wingman_elo)).toBe(5000);
+    });
   });
 
   describe("v_team_reputation", () => {
