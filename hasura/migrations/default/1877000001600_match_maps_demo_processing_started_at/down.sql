@@ -1,32 +1,3 @@
-CREATE OR REPLACE FUNCTION public.tau_match_maps() RETURNS TRIGGER
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    PERFORM update_match_state(NEW);
-	RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS tau_match_maps ON public.match_maps;
--- Transition-only: post-finish touches of a Finished row (clip counters, demo
--- metadata) must not re-run the series recount while a later map is in play.
-CREATE TRIGGER tau_match_maps AFTER UPDATE ON public.match_maps FOR EACH ROW
-    WHEN (NEW.status = 'Finished' AND OLD.status IS DISTINCT FROM NEW.status)
-    EXECUTE FUNCTION public.tau_match_maps();
-
-CREATE OR REPLACE FUNCTION public.tbi_match_maps() RETURNS TRIGGER
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    PERFORM check_match_map_count(NEW);
-	RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS tbi_match_maps ON public.match_maps;
-CREATE TRIGGER tbi_match_maps BEFORE INSERT ON public.match_maps FOR EACH ROW EXECUTE FUNCTION public.tbi_match_maps();
-
-
 CREATE OR REPLACE FUNCTION public.tbu_match_maps() RETURNS TRIGGER
     LANGUAGE plpgsql
     AS $$
@@ -73,14 +44,6 @@ BEGIN
         END IF;
     END IF;
 
-    -- Marks when demo recording/upload actually started, so the web
-    -- "stats ready in" countdown (MatchInfo.vue) can anchor on a real
-    -- timestamp instead of a client-only Date.now() that reset back to
-    -- its full estimate on every page refresh.
-    IF NEW.status = 'WaitingForTV' AND OLD.status IS DISTINCT FROM NEW.status THEN
-        NEW.demo_processing_started_at = NOW();
-    END IF;
-
     IF NEW.status = 'Finished' AND OLD.status IS DISTINCT FROM NEW.status THEN
         NEW.ended_at = NOW();
     END IF;
@@ -89,6 +52,5 @@ BEGIN
 END;
 $$;
 
-
-DROP TRIGGER IF EXISTS tbu_match_maps ON public.match_maps;
-CREATE TRIGGER tbu_match_maps BEFORE UPDATE ON public.match_maps FOR EACH ROW EXECUTE FUNCTION public.tbu_match_maps();
+ALTER TABLE public.match_maps
+    DROP COLUMN IF EXISTS demo_processing_started_at;
