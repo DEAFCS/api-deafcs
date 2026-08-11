@@ -9,6 +9,9 @@ DECLARE
     i INT;
     pool_size INT;
     _type TEXT;
+    ban_count INT;
+    pre_bans INT;
+    post_bans INT;
 BEGIN
     SELECT mo.best_of INTO best_of
     FROM matches m
@@ -30,39 +33,38 @@ BEGIN
     -- https://github.com/ValveSoftware/counter-strike_rules_and_regs/blob/main/major-supplemental-rulebook.md#map-pick-ban
 
     IF best_of = 1 THEN
+        -- No picks in BO1: ban every map but one, the last is the Decider.
+        -- This is already a pool-size-generic formula (pool_size - 1 bans),
+        -- unlike the BO3/BO5 case below.
         FOR i IN 1..(pool_size - 1) LOOP
             base_pattern := array_append(base_pattern, 'Ban');
         END LOOP;
         base_pattern := array_append(base_pattern, 'Decider');
-    ELSIF pool_size = best_of THEN
-         FOR i IN 1..(pool_size - 1) LOOP
-            base_pattern := array_append(base_pattern, 'Pick');
-        END LOOP;
-        base_pattern := array_append(base_pattern, 'Decider');
-    ELSIF best_of = 3 THEN
-        IF pool_size = 4 THEN
-            base_pattern := ARRAY['Ban', 'Pick', 'Pick', 'Decider'];
-        ELSIF pool_size = 5 THEN
-            base_pattern := ARRAY['Ban', 'Pick', 'Pick', 'Ban', 'Decider'];
-        ELSIF pool_size = 6 THEN
-            base_pattern := ARRAY['Ban', 'Ban', 'Pick', 'Pick', 'Ban', 'Decider'];
-        ELSE
-            base_pattern := ARRAY['Ban', 'Ban', 'Pick', 'Pick', 'Ban', 'Ban', 'Decider'];
-        END IF;
-    ELSIF best_of = 5 THEN
-        if pool_size = 6 THEN
-            base_pattern := ARRAY['Ban', 'Pick', 'Pick', 'Pick', 'Pick', 'Decider'];
-        ELSE
-            base_pattern := ARRAY['Ban', 'Ban', 'Pick', 'Pick', 'Pick', 'Pick', 'Decider'];
-        END IF;
-    END IF;
+    ELSIF best_of = 3 OR best_of = 5 THEN
+        -- ban_count maps must be removed so exactly best_of maps remain
+        -- (best_of - 1 picks + 1 decider). Up to 2 bans open the veto --
+        -- the normal CS opening -- before the picks; any bans a larger
+        -- pool still requires land after the picks, immediately before
+        -- the decider, instead of being appended past it. This keeps
+        -- Decider the final action and the base_pattern length exactly
+        -- pool_size for every pool size, so no separate padding step is
+        -- needed (or safe to have) afterwards.
+        ban_count := pool_size - best_of;
+        pre_bans := LEAST(ban_count, 2);
+        post_bans := ban_count - pre_bans;
 
-    IF pool_size > array_length(base_pattern, 1) THEN
-        FOR i IN 1..(pool_size - array_length(base_pattern, 1)) LOOP
+        FOR i IN 1..pre_bans LOOP
             base_pattern := array_append(base_pattern, 'Ban');
         END LOOP;
+        FOR i IN 1..(best_of - 1) LOOP
+            base_pattern := array_append(base_pattern, 'Pick');
+        END LOOP;
+        FOR i IN 1..post_bans LOOP
+            base_pattern := array_append(base_pattern, 'Ban');
+        END LOOP;
+        base_pattern := array_append(base_pattern, 'Decider');
     END IF;
-  
+
     FOR i IN 1..(pool_size) LOOP
         _type := base_pattern[i];
 

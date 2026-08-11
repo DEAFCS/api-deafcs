@@ -27,7 +27,12 @@ BEGIN
 
     SELECT map_id INTO _map_id FROM _map_pool WHERE map_pool_id = _map_pool_id LIMIT 1;
 
-    IF _map_pool_count != _best_of THEN
+    -- Auto-assignment (skipping veto entirely) is only correct when there is
+    -- no real decision to make: a best-of-1 whose pool is already exactly
+    -- one map. For BO3/BO5, a pool that happens to equal best_of still
+    -- requires teams to Pick/Side the map order (and the Decider), so it
+    -- must go through the normal veto flow rather than being auto-assigned.
+    IF _best_of != 1 OR _map_pool_count != _best_of THEN
         return;
     END IF;
 

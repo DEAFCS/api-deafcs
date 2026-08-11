@@ -281,4 +281,299 @@ describe("map veto (SQL-driven)", () => {
     );
     expect(picks.length).toBe(0);
   });
+
+  // Arbitrary pool sizes (fix for the >7-map deadlock): get_map_veto_pattern
+  // used to hardcode a fixed 7-element BO3/BO5 array and pad any excess maps
+  // as Bans appended AFTER the Decider, which get_map_veto_type would then
+  // report as the next required step while real maps still remained --
+  // permanently deadlocking the veto (nothing could satisfy that step: the
+  // client has no Decider control, and create_match_map_from_veto only
+  // auto-inserts a Decider once exactly one real map is left). The fix
+  // computes the pattern directly at the correct length for every pool size:
+  // ban_count = pool_size - best_of maps must be removed, up to 2 of them
+  // open the veto (the normal CS opening) before the best_of-1 picks, and
+  // any remainder lands after the picks but always before the Decider.
+  describe("arbitrary map pool sizes (BO3/BO5 >7-map fix)", () => {
+    // Mirrors the SQL formula in get_map_veto_pattern.sql exactly, so the
+    // matrix below exercises the real algorithm as a black box across every
+    // pool size instead of hand-writing each expected array.
+    const expectedPattern = (bestOf: number, poolSize: number): string[] => {
+      const base: string[] = [];
+      if (bestOf === 1) {
+        for (let i = 0; i < poolSize - 1; i++) base.push("Ban");
+        base.push("Decider");
+      } else {
+        const banCount = poolSize - bestOf;
+        const preBans = Math.min(banCount, 2);
+        const postBans = banCount - preBans;
+        for (let i = 0; i < preBans; i++) base.push("Ban");
+        for (let i = 0; i < bestOf - 1; i++) base.push("Pick");
+        for (let i = 0; i < postBans; i++) base.push("Ban");
+        base.push("Decider");
+      }
+      const actual: string[] = [];
+      for (const type of base) {
+        if (type === "Pick") actual.push("Pick", "Side");
+        else actual.push(type);
+      }
+      return actual;
+    };
+
+    it.each([
+      [1, 1],
+      [1, 3],
+      [1, 7],
+      [1, 15],
+      [1, 20],
+      [3, 3],
+      [3, 5],
+      [3, 7],
+      [3, 8],
+      [3, 15],
+      [3, 20],
+      [5, 5],
+      [5, 6],
+      [5, 7],
+      [5, 8],
+      [5, 15],
+      [5, 20],
+    ])(
+      "BO%i pool %i: correct pattern, ban/pick/side/decider counts, Decider last with nothing after it",
+      async (bestOf, poolSize) => {
+        const match = await createVetoMatch(bestOf, poolSize);
+        const [{ pattern }] = await postgres.query<
+          Array<{ pattern: string[] }>
+        >(
+          "SELECT get_map_veto_pattern(m) AS pattern FROM matches m WHERE id = $1",
+          [match.id],
+        );
+
+        expect(pattern).toEqual(expectedPattern(bestOf, poolSize));
+
+        const banCount = pattern.filter((t) => t === "Ban").length;
+        const pickCount = pattern.filter((t) => t === "Pick").length;
+        const sideCount = pattern.filter((t) => t === "Side").length;
+        const deciderCount = pattern.filter((t) => t === "Decider").length;
+
+        expect(banCount).toBe(poolSize - bestOf);
+        expect(pickCount).toBe(bestOf === 1 ? 0 : bestOf - 1);
+        // Every Pick is immediately followed by a Side.
+        expect(sideCount).toBe(pickCount);
+        expect(deciderCount).toBe(1);
+        // Decider is the pattern's final element -- nothing after it.
+        expect(pattern[pattern.length - 1]).toBe("Decider");
+        expect(pattern.indexOf("Decider")).toBe(pattern.length - 1);
+      },
+    );
+
+    // Explicit, formula-independent regression locks (hand-written, not
+    // derived from expectedPattern above) for the three cases called out by
+    // name in the investigation.
+    it("regression lock: BO3 pool 5 is Ban,Ban,Pick,Side,Pick,Side,Decider (was the wrong-order bug)", async () => {
+      const match = await createVetoMatch(3, 5);
+      const [{ pattern }] = await postgres.query<
+        Array<{ pattern: string[] }>
+      >(
+        "SELECT get_map_veto_pattern(m) AS pattern FROM matches m WHERE id = $1",
+        [match.id],
+      );
+      expect(pattern).toEqual([
+        "Ban",
+        "Ban",
+        "Pick",
+        "Side",
+        "Pick",
+        "Side",
+        "Decider",
+      ]);
+    });
+
+    it("regression lock: BO3 pool 7 is unchanged", async () => {
+      const match = await createVetoMatch(3, 7);
+      const [{ pattern }] = await postgres.query<
+        Array<{ pattern: string[] }>
+      >(
+        "SELECT get_map_veto_pattern(m) AS pattern FROM matches m WHERE id = $1",
+        [match.id],
+      );
+      expect(pattern).toEqual([
+        "Ban",
+        "Ban",
+        "Pick",
+        "Side",
+        "Pick",
+        "Side",
+        "Ban",
+        "Ban",
+        "Decider",
+      ]);
+    });
+
+    it("regression lock: BO5 pool 7 is unchanged", async () => {
+      const match = await createVetoMatch(5, 7);
+      const [{ pattern }] = await postgres.query<
+        Array<{ pattern: string[] }>
+      >(
+        "SELECT get_map_veto_pattern(m) AS pattern FROM matches m WHERE id = $1",
+        [match.id],
+      );
+      expect(pattern).toEqual([
+        "Ban",
+        "Ban",
+        "Pick",
+        "Side",
+        "Pick",
+        "Side",
+        "Pick",
+        "Side",
+        "Pick",
+        "Side",
+        "Decider",
+      ]);
+    });
+
+    it("BO1/pool1 still auto-assigns without entering veto (the one genuinely decisionless case)", async () => {
+      const match = await createVetoMatch(1, 1);
+      const state = await vetoState(match.id);
+      expect(state.status).toBe("Live");
+
+      const maps = await postgres.query<Array<{ map_id: string }>>(
+        "SELECT map_id FROM match_maps WHERE match_id = $1",
+        [match.id],
+      );
+      expect(maps.length).toBe(1);
+      expect(maps[0].map_id).toBe(match.mapIds[0]);
+    });
+
+    it.each([
+      [3, 3],
+      [5, 5],
+    ])(
+      "BO%i/pool%i now enters veto instead of auto-skipping it (setup_match_maps fix)",
+      async (bestOf, poolSize) => {
+        const match = await createVetoMatch(bestOf, poolSize);
+        const state = await vetoState(match.id);
+        expect(state.status).toBe("Veto");
+        // No bans required (ban_count = poolSize - bestOf = 0): the first
+        // step is straight into the picks.
+        expect(state.veto_type).toBe("Pick");
+
+        const maps = await postgres.query<Array<{ id: string }>>(
+          "SELECT id FROM match_maps WHERE match_id = $1",
+          [match.id],
+        );
+        expect(maps.length).toBe(0);
+      },
+    );
+
+    it("BO5: opponent of the picker chooses the Side for every one of the 4 picks", async () => {
+      const match = await createVetoMatch(5, 7);
+
+      // Two opening bans (pre_bans = min(2, 2) = 2).
+      let state = await vetoState(match.id);
+      await insertPick(match.id, "Ban", state.picking!, match.mapIds[0]);
+      state = await vetoState(match.id);
+      await insertPick(match.id, "Ban", state.picking!, match.mapIds[1]);
+
+      for (let i = 0; i < 4; i++) {
+        state = await vetoState(match.id);
+        expect(state.veto_type).toBe("Pick");
+        const picker = state.picking!;
+        const mapId = match.mapIds[2 + i];
+        await insertPick(match.id, "Pick", picker, mapId);
+
+        state = await vetoState(match.id);
+        expect(state.veto_type).toBe("Side");
+        const opponent =
+          picker === match.lineup_1_id ? match.lineup_2_id : match.lineup_1_id;
+        expect(state.picking).toBe(opponent);
+        await insertPick(match.id, "Side", opponent, mapId, "CT");
+      }
+
+      expect((await vetoState(match.id)).status).toBe("Live");
+    });
+
+    // Drives a full veto end-to-end by always submitting whatever the SQL
+    // reports as the next required step/lineup, rather than only inspecting
+    // the pattern array -- this is the direct proof that a large pool
+    // completes without deadlocking, not just that the literal matches.
+    const runFullVeto = async (match: {
+      id: string;
+      lineup_1_id: string;
+      lineup_2_id: string;
+      mapIds: string[];
+    }) => {
+      const usedMapIds = new Set<string>();
+      let lastPickedMapId: string | null = null;
+
+      for (let guard = 0; guard < 200; guard++) {
+        const state = await vetoState(match.id);
+        if (state.status !== "Veto") return state;
+
+        // The bug this fix targets: get_map_veto_type must never report
+        // Decider as the next step while more than one real map remains --
+        // Decider is exclusively auto-inserted by create_match_map_from_veto,
+        // never submitted here, so this would otherwise hang forever.
+        expect(state.veto_type).not.toBe("Decider");
+
+        if (state.veto_type === "Side") {
+          await insertPick(
+            match.id,
+            "Side",
+            state.picking!,
+            lastPickedMapId!,
+            "CT",
+          );
+        } else {
+          const mapId = match.mapIds.find((id) => !usedMapIds.has(id))!;
+          usedMapIds.add(mapId);
+          if (state.veto_type === "Pick") lastPickedMapId = mapId;
+          await insertPick(match.id, state.veto_type!, state.picking!, mapId);
+        }
+      }
+      throw new Error(
+        "Veto did not complete within guard limit -- likely deadlocked",
+      );
+    };
+
+    it("drives a large BO3 pool (15 maps) through veto to completion without deadlocking", async () => {
+      const match = await createVetoMatch(3, 15);
+      const finalState = await runFullVeto(match);
+      expect(finalState!.status).toBe("Live");
+
+      const maps = await postgres.query<Array<{ map_id: string }>>(
+        "SELECT map_id FROM match_maps WHERE match_id = $1",
+        [match.id],
+      );
+      expect(maps.length).toBe(3);
+
+      const picks = await postgres.query<Array<{ type: string }>>(
+        "SELECT type FROM match_map_veto_picks WHERE match_id = $1",
+        [match.id],
+      );
+      expect(picks.filter((p) => p.type === "Ban").length).toBe(12);
+      expect(picks.filter((p) => p.type === "Pick").length).toBe(2);
+      expect(picks.filter((p) => p.type === "Decider").length).toBe(1);
+    });
+
+    it("drives a large BO5 pool (15 maps) through veto to completion without deadlocking", async () => {
+      const match = await createVetoMatch(5, 15);
+      const finalState = await runFullVeto(match);
+      expect(finalState!.status).toBe("Live");
+
+      const maps = await postgres.query<Array<{ map_id: string }>>(
+        "SELECT map_id FROM match_maps WHERE match_id = $1",
+        [match.id],
+      );
+      expect(maps.length).toBe(5);
+
+      const picks = await postgres.query<Array<{ type: string }>>(
+        "SELECT type FROM match_map_veto_picks WHERE match_id = $1",
+        [match.id],
+      );
+      expect(picks.filter((p) => p.type === "Ban").length).toBe(10);
+      expect(picks.filter((p) => p.type === "Pick").length).toBe(4);
+      expect(picks.filter((p) => p.type === "Decider").length).toBe(1);
+    });
+  });
 });
