@@ -1076,6 +1076,15 @@ export class DraftGameService {
       object.map_pool_id = source.map_pool_id;
     }
 
+    // Regular players never see this toggle in the UI (MatchOptions.vue
+    // gates it the same way) — enforced here too so a forged request
+    // can't set it either. Anyone able to host/edit a draft is at
+    // least "user" role, so this has to be an explicit role check, not
+    // just "whoever can edit this draft's settings".
+    if (isRoleAbove(user.role, "match_organizer")) {
+      object.camera_required = source.camera_required;
+    }
+
     if (isRoleAbove(user.role, "tournament_organizer")) {
       object.auto_cancellation = source.auto_cancellation;
       object.match_mode = source.match_mode;

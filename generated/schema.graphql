@@ -27546,17 +27546,6 @@ type match_camera_tokens_aggregate {
   nodes: [match_camera_tokens!]!
 }
 
-input match_camera_tokens_aggregate_bool_exp {
-  count: match_camera_tokens_aggregate_bool_exp_count
-}
-
-input match_camera_tokens_aggregate_bool_exp_count {
-  arguments: [match_camera_tokens_select_column!]
-  distinct: Boolean
-  filter: match_camera_tokens_bool_exp
-  predicate: Int_comparison_exp!
-}
-
 """
 aggregate fields of "match_camera_tokens"
 """
@@ -27574,43 +27563,9 @@ type match_camera_tokens_aggregate_fields {
   variance: match_camera_tokens_variance_fields
 }
 
-"""
-order by aggregate values of table "match_camera_tokens"
-"""
-input match_camera_tokens_aggregate_order_by {
-  avg: match_camera_tokens_avg_order_by
-  count: order_by
-  max: match_camera_tokens_max_order_by
-  min: match_camera_tokens_min_order_by
-  stddev: match_camera_tokens_stddev_order_by
-  stddev_pop: match_camera_tokens_stddev_pop_order_by
-  stddev_samp: match_camera_tokens_stddev_samp_order_by
-  sum: match_camera_tokens_sum_order_by
-  var_pop: match_camera_tokens_var_pop_order_by
-  var_samp: match_camera_tokens_var_samp_order_by
-  variance: match_camera_tokens_variance_order_by
-}
-
-"""
-input type for inserting array relation for remote table "match_camera_tokens"
-"""
-input match_camera_tokens_arr_rel_insert_input {
-  data: [match_camera_tokens_insert_input!]!
-
-  """upsert condition"""
-  on_conflict: match_camera_tokens_on_conflict
-}
-
 """aggregate avg on columns"""
 type match_camera_tokens_avg_fields {
   steam_id: Float
-}
-
-"""
-order by avg() on columns of table "match_camera_tokens"
-"""
-input match_camera_tokens_avg_order_by {
-  steam_id: order_by
 }
 
 """
@@ -27676,17 +27631,6 @@ type match_camera_tokens_max_fields {
   token: uuid
 }
 
-"""
-order by max() on columns of table "match_camera_tokens"
-"""
-input match_camera_tokens_max_order_by {
-  created_at: order_by
-  id: order_by
-  match_id: order_by
-  steam_id: order_by
-  token: order_by
-}
-
 """aggregate min on columns"""
 type match_camera_tokens_min_fields {
   created_at: timestamptz
@@ -27694,17 +27638,6 @@ type match_camera_tokens_min_fields {
   match_id: uuid
   steam_id: bigint
   token: uuid
-}
-
-"""
-order by min() on columns of table "match_camera_tokens"
-"""
-input match_camera_tokens_min_order_by {
-  created_at: order_by
-  id: order_by
-  match_id: order_by
-  steam_id: order_by
-  token: order_by
 }
 
 """
@@ -27778,35 +27711,14 @@ type match_camera_tokens_stddev_fields {
   steam_id: Float
 }
 
-"""
-order by stddev() on columns of table "match_camera_tokens"
-"""
-input match_camera_tokens_stddev_order_by {
-  steam_id: order_by
-}
-
 """aggregate stddev_pop on columns"""
 type match_camera_tokens_stddev_pop_fields {
   steam_id: Float
 }
 
-"""
-order by stddev_pop() on columns of table "match_camera_tokens"
-"""
-input match_camera_tokens_stddev_pop_order_by {
-  steam_id: order_by
-}
-
 """aggregate stddev_samp on columns"""
 type match_camera_tokens_stddev_samp_fields {
   steam_id: Float
-}
-
-"""
-order by stddev_samp() on columns of table "match_camera_tokens"
-"""
-input match_camera_tokens_stddev_samp_order_by {
-  steam_id: order_by
 }
 
 """
@@ -27832,13 +27744,6 @@ input match_camera_tokens_stream_cursor_value_input {
 """aggregate sum on columns"""
 type match_camera_tokens_sum_fields {
   steam_id: bigint
-}
-
-"""
-order by sum() on columns of table "match_camera_tokens"
-"""
-input match_camera_tokens_sum_order_by {
-  steam_id: order_by
 }
 
 """
@@ -27877,35 +27782,14 @@ type match_camera_tokens_var_pop_fields {
   steam_id: Float
 }
 
-"""
-order by var_pop() on columns of table "match_camera_tokens"
-"""
-input match_camera_tokens_var_pop_order_by {
-  steam_id: order_by
-}
-
 """aggregate var_samp on columns"""
 type match_camera_tokens_var_samp_fields {
   steam_id: Float
 }
 
-"""
-order by var_samp() on columns of table "match_camera_tokens"
-"""
-input match_camera_tokens_var_samp_order_by {
-  steam_id: order_by
-}
-
 """aggregate variance on columns"""
 type match_camera_tokens_variance_fields {
   steam_id: Float
-}
-
-"""
-order by variance() on columns of table "match_camera_tokens"
-"""
-input match_camera_tokens_variance_order_by {
-  steam_id: order_by
 }
 
 """
@@ -35319,42 +35203,6 @@ input match_type_cfgs_updates {
 columns and relationships of "matches"
 """
 type matches {
-  """An array relationship"""
-  camera_tokens(
-    """distinct select on columns"""
-    distinct_on: [match_camera_tokens_select_column!]
-
-    """limit the number of rows returned"""
-    limit: Int
-
-    """skip the first n rows. Use only with order_by"""
-    offset: Int
-
-    """sort the rows by one or more columns"""
-    order_by: [match_camera_tokens_order_by!]
-
-    """filter the rows returned"""
-    where: match_camera_tokens_bool_exp
-  ): [match_camera_tokens!]!
-
-  """An aggregate relationship"""
-  camera_tokens_aggregate(
-    """distinct select on columns"""
-    distinct_on: [match_camera_tokens_select_column!]
-
-    """limit the number of rows returned"""
-    limit: Int
-
-    """skip the first n rows. Use only with order_by"""
-    offset: Int
-
-    """sort the rows by one or more columns"""
-    order_by: [match_camera_tokens_order_by!]
-
-    """filter the rows returned"""
-    where: match_camera_tokens_bool_exp
-  ): match_camera_tokens_aggregate!
-
   """
   A computed field, executes function "can_assign_server_to_match"
   """
@@ -36282,8 +36130,6 @@ input matches_bool_exp {
   _and: [matches_bool_exp!]
   _not: matches_bool_exp
   _or: [matches_bool_exp!]
-  camera_tokens: match_camera_tokens_bool_exp
-  camera_tokens_aggregate: match_camera_tokens_aggregate_bool_exp
   can_assign_server: Boolean_comparison_exp
   can_cancel: Boolean_comparison_exp
   can_check_in: Boolean_comparison_exp
@@ -36422,7 +36268,6 @@ input matches_inc_input {
 input type for inserting data into table "matches"
 """
 input matches_insert_input {
-  camera_tokens: match_camera_tokens_arr_rel_insert_input
   cancels_at: timestamptz
   clutches: v_match_clutches_arr_rel_insert_input
   created_at: timestamptz
@@ -36732,7 +36577,6 @@ input matches_on_conflict {
 
 """Ordering options when selecting data from "matches"."""
 input matches_order_by {
-  camera_tokens_aggregate: match_camera_tokens_aggregate_order_by
   can_assign_server: order_by
   can_cancel: order_by
   can_check_in: order_by

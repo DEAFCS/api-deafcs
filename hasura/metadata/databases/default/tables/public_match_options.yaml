@@ -98,7 +98,6 @@ insert_permissions:
         - type
         - halftime_pausematch
         - round_restart_delay
-        - camera_required
     comment: ""
 select_permissions:
   - role: guest
@@ -218,7 +217,6 @@ update_permissions:
         - type
         - halftime_pausematch
         - round_restart_delay
-        - camera_required
       filter:
         _or:
           - matches:
