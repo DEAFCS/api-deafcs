@@ -43,6 +43,13 @@ export class CameraService {
     return `camera-${matchId}-${steamId}`;
   }
 
+  // Separate path for admin's video-call ("talk") stream to a specific
+  // player — kept distinct from the player's own required-camera path
+  // above so a call starting/ending never touches that publish.
+  public static talkPathForPlayer(matchId: string, steamId: string): string {
+    return `camera-talk-${matchId}-${steamId}`;
+  }
+
   // Every camera route is reached either by an anonymous phone/browser
   // holding nothing but the token, or by an admin's session — neither
   // carries a Hasura user JWT, so these reads intentionally go through
@@ -209,6 +216,96 @@ export class CameraService {
     ]);
 
     return { lineup_1, lineup_2 };
+  }
+
+  // --- Talk mode: admin video-calls a specific player ---
+  // Admin's browser WHIP-publishes mic+cam to the talk path; the
+  // player's join page polls talk status and, once ready, WHEP-pulls
+  // it automatically (no accept/decline step, mirrors the proven POC
+  // behavior). Either side can end the call — both routes converge on
+  // the same kickTalkSession, which forces MediaMTX to drop the
+  // admin's publish, which is what actually ends it for both ends.
+
+  public async proxyAdminTalkWhip(
+    matchId: string,
+    steamId: string,
+    user: User,
+    sdp: string,
+  ): Promise<string> {
+    await this.assertCanWatch(matchId, user);
+    const path = CameraService.talkPathForPlayer(matchId, steamId);
+    return this.proxySdp(`/${path}/whip`, sdp);
+  }
+
+  public async proxyPlayerTalkWhep(token: string, sdp: string): Promise<string> {
+    const lookup = await this.validateToken(token);
+    if (!lookup) {
+      throw new Error("invalid or expired camera link");
+    }
+    const path = CameraService.talkPathForPlayer(lookup.matchId, lookup.steamId);
+    return this.proxySdp(`/${path}/whep`, sdp);
+  }
+
+  public async getTalkStatusForToken(token: string): Promise<{ ready: boolean }> {
+    const lookup = await this.validateToken(token);
+    if (!lookup) return { ready: false };
+    const path = CameraService.talkPathForPlayer(lookup.matchId, lookup.steamId);
+    return this.getPathStatus(path);
+  }
+
+  public async getTalkStatusForAdmin(
+    matchId: string,
+    steamId: string,
+    user: User,
+  ): Promise<{ ready: boolean }> {
+    await this.assertCanWatch(matchId, user);
+    const path = CameraService.talkPathForPlayer(matchId, steamId);
+    return this.getPathStatus(path);
+  }
+
+  public async hangupAdminTalk(
+    matchId: string,
+    steamId: string,
+    user: User,
+  ): Promise<void> {
+    await this.assertCanWatch(matchId, user);
+    await this.kickTalkSession(CameraService.talkPathForPlayer(matchId, steamId));
+  }
+
+  public async hangupPlayerTalk(token: string): Promise<void> {
+    const lookup = await this.validateToken(token);
+    if (!lookup) return;
+    await this.kickTalkSession(
+      CameraService.talkPathForPlayer(lookup.matchId, lookup.steamId),
+    );
+  }
+
+  private async kickTalkSession(path: string): Promise<void> {
+    try {
+      const res = await fetch(
+        `http://${this.mediaMtxHost}:${this.apiPort}/v3/webrtcsessions/list`,
+        { signal: AbortSignal.timeout(5_000) },
+      );
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        items?: Array<{ id: string; path?: string }>;
+      };
+      const matches = (data.items ?? []).filter((s) => s.path === path);
+      await Promise.all(
+        matches.map((s) =>
+          fetch(
+            `http://${this.mediaMtxHost}:${this.apiPort}/v3/webrtcsessions/kick/${s.id}`,
+            { method: "POST", signal: AbortSignal.timeout(5_000) },
+          ).catch(() => {}),
+        ),
+      );
+    } catch (error) {
+      // best-effort — if MediaMTX's API is unreachable the WebRTC
+      // connection will still time out and settle on its own.
+      this.logger.warn(
+        `[camera] kickTalkSession(${path}) failed: ${(error as Error)?.message}`,
+      );
+    }
   }
 
   private async proxySdp(targetPath: string, sdp: string): Promise<string> {

@@ -60,6 +60,35 @@ export class CameraController {
     return this.camera.getStatusForToken(token);
   }
 
+  // Player side of an admin video call: pull the admin's talk stream,
+  // poll whether one is currently live, and hang up on it.
+
+  @Post("player/:token/talk/whep")
+  public async playerTalkWhep(
+    @Param("token") token: string,
+    @Req() request: Request,
+    @Res() response: Response,
+  ) {
+    const sdp = await readRawBody(request);
+    try {
+      const answer = await this.camera.proxyPlayerTalkWhep(token, sdp);
+      response.status(200).type("application/sdp").send(answer);
+    } catch (error) {
+      response.status(400).type("text/plain").send((error as Error).message);
+    }
+  }
+
+  @Get("player/:token/talk/status")
+  public async playerTalkStatus(@Param("token") token: string) {
+    return this.camera.getTalkStatusForToken(token);
+  }
+
+  @Post("player/:token/talk/hangup")
+  public async playerTalkHangup(@Param("token") token: string) {
+    await this.camera.hangupPlayerTalk(token);
+    return { ok: true };
+  }
+
   // --- Admin-facing: session-gated, organizer/administrator only ---
 
   @Post("admin/:matchId/:steamId/whep")
@@ -94,5 +123,50 @@ export class CameraController {
       throw new BadRequestException("matchId is required");
     }
     return this.camera.getPlayersWithCameraStatus(matchId, user);
+  }
+
+  // Admin side of a video call to one specific player.
+
+  @Post("admin/:matchId/:steamId/talk/whip")
+  public async adminTalkWhip(
+    @Param("matchId") matchId: string,
+    @Param("steamId") steamId: string,
+    @Req() request: Request,
+    @Res() response: Response,
+  ) {
+    const user = this.requireUser(request);
+    const sdp = await readRawBody(request);
+    try {
+      const answer = await this.camera.proxyAdminTalkWhip(
+        matchId,
+        steamId,
+        user,
+        sdp,
+      );
+      response.status(200).type("application/sdp").send(answer);
+    } catch (error) {
+      response.status(400).type("text/plain").send((error as Error).message);
+    }
+  }
+
+  @Get("admin/:matchId/:steamId/talk/status")
+  public async adminTalkStatus(
+    @Param("matchId") matchId: string,
+    @Param("steamId") steamId: string,
+    @Req() request: Request,
+  ) {
+    const user = this.requireUser(request);
+    return this.camera.getTalkStatusForAdmin(matchId, steamId, user);
+  }
+
+  @Post("admin/:matchId/:steamId/talk/hangup")
+  public async adminTalkHangup(
+    @Param("matchId") matchId: string,
+    @Param("steamId") steamId: string,
+    @Req() request: Request,
+  ) {
+    const user = this.requireUser(request);
+    await this.camera.hangupAdminTalk(matchId, steamId, user);
+    return { ok: true };
   }
 }
