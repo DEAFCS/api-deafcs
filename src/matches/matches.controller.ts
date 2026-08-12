@@ -624,6 +624,20 @@ export class MatchesController {
       await this.tournamentVoice.movePlayersToMatchChannels(matchId);
     }
 
+    // Veto finishing is what flips a match to "Live" (see
+    // create_match_map_from_veto() in Postgres). That's the moment the
+    // camera-requirement overlay should start blocking players, so this
+    // is where we mint each player's one-time secret camera token —
+    // never earlier (lineups can still change before this point) and
+    // idempotent (ON CONFLICT DO NOTHING) in case the event fires twice.
+    if (
+      data.op === "UPDATE" &&
+      data.new.status === "Live" &&
+      data.old.status !== "Live"
+    ) {
+      await this.generateCameraTokensIfRequired(matchId);
+    }
+
     if (data.op === "DELETE") {
       await this.chatService.removeLobby(ChatLobbyType.Match, matchId);
     }
@@ -792,6 +806,71 @@ export class MatchesController {
     }
 
     await this.discordMatchOverview.updateMatchOverview(matchId);
+  }
+
+  // Mints one secret camera-pairing token per player (both lineups) for
+  // this match, if — and only if — the match's own match_options row has
+  // camera_required on. Tokens are plain uuid rows in match_camera_tokens;
+  // Hasura only ever exposes a player's own token to that player
+  // (public_match_camera_tokens.yaml scopes select to steam_id =
+  // X-Hasura-User-Id) — nothing reads/writes this table over GraphQL
+  // otherwise, it's strictly this raw Postgres insert.
+  private async generateCameraTokensIfRequired(matchId: string) {
+    const { matches_by_pk: match } = await this.hasura.query({
+      matches_by_pk: {
+        __args: {
+          id: matchId,
+        },
+        options: {
+          camera_required: true,
+        },
+        lineup_1: {
+          lineup_players: {
+            steam_id: true,
+          },
+        },
+        lineup_2: {
+          lineup_players: {
+            steam_id: true,
+          },
+        },
+      },
+    });
+
+    if (!match?.options?.camera_required) {
+      return;
+    }
+
+    const steamIds = [
+      ...(match.lineup_1?.lineup_players ?? []),
+      ...(match.lineup_2?.lineup_players ?? []),
+    ]
+      .map((lineupPlayer) => lineupPlayer.steam_id)
+      .filter((steamId): steamId is string => Boolean(steamId));
+
+    if (steamIds.length === 0) {
+      this.logger.warn(
+        `[${matchId}] camera_required is on but no lineup players were found — skipping token generation`,
+      );
+      return;
+    }
+
+    try {
+      await this.postgres.query(
+        `insert into match_camera_tokens (match_id, steam_id)
+         select $1, unnest($2::bigint[])
+         on conflict (match_id, steam_id) do nothing`,
+        [matchId, steamIds],
+      );
+      this.logger.log(
+        `[${matchId}] generated camera tokens for ${steamIds.length} player(s)`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `[${matchId}] failed to generate camera tokens: ${(error as Error)?.message}`,
+        error,
+      );
+    }
   }
 
   private async maybePauseRendersForServerNode(

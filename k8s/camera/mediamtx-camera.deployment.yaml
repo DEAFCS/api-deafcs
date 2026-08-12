@@ -1,0 +1,111 @@
+# Deployed the same way the production `mediamtx` was: applied
+# directly with kubectl (this repo has no other static k8s manifests —
+# everything else is created programmatically via @kubernetes/client-node,
+# see src/matches/game-streamer/). Kept here as a committed,
+# reproducible copy of what's actually running, unlike the production
+# mediamtx which only exists as a live cluster object today.
+#
+# NOTE: the mediamtx-camera-config ConfigMap is deliberately NOT
+# defined in this file. It's created separately from
+# ./mediamtx-camera.yml via `kubectl create configmap --from-file`
+# (see README.md) — a placeholder ConfigMap resource used to live here
+# too "just to be self-describing", but `kubectl apply -f` on this
+# whole file would then blindly overwrite the real --from-file config
+# with that empty placeholder every time. Learned that the hard way:
+# don't duplicate a ConfigMap's identity across two apply sources.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mediamtx-camera
+  namespace: 5stack
+  labels:
+    app: mediamtx-camera
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mediamtx-camera
+  template:
+    metadata:
+      labels:
+        app: mediamtx-camera
+    spec:
+      # Same node as the production mediamtx (and thus the same public
+      # IP the VPS/UFW rules and MTX_WEBRTCADDITIONALHOSTS assume).
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: 5stack-mediamtx
+                    operator: In
+                    values: ["true"]
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: mediamtx-camera
+          image: bluenviron/mediamtx:latest
+          env:
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: MTX_WEBRTCLOCALUDPADDRESS
+              value: ":8191"
+            - name: MTX_WEBRTCADDITIONALHOSTS
+              value: "$(HOST_IP)"
+            - name: MTX_WEBRTCICESERVERS2_0_URL
+              value: "stun:stun.l.google.com:19302"
+          ports:
+            - containerPort: 9998
+              name: api
+              protocol: TCP
+            - containerPort: 8891
+              name: whip
+              protocol: TCP
+            - containerPort: 8191
+              name: webrtc
+              protocol: UDP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: config
+              mountPath: /mediamtx.yml
+              subPath: mediamtx.yml
+      volumes:
+        - name: config
+          configMap:
+            name: mediamtx-camera-config
+---
+# ClusterIP only — nothing here needs a public Service. The WHIP/WHEP
+# HTTP signaling is reached by api-deafcs pods over the cluster network
+# (this Service); the WebRTC media itself bypasses Kubernetes services
+# entirely via hostNetwork + the VPS's public IP (needs the matching
+# UFW rule, see README in this folder).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mediamtx-camera
+  namespace: 5stack
+  labels:
+    app: mediamtx-camera
+spec:
+  type: ClusterIP
+  selector:
+    app: mediamtx-camera
+  ports:
+    - name: api
+      port: 9998
+      targetPort: 9998
+      protocol: TCP
+    - name: whip
+      port: 8891
+      targetPort: 8891
+      protocol: TCP

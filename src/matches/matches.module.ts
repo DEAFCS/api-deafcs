@@ -69,6 +69,8 @@ import { ClipsModule } from "./clips/clips.module";
 import { SteamMatchHistoryModule } from "../steam-match-history/steam-match-history.module";
 import { LeaguesModule } from "../leagues/leagues.module";
 import { DisconnectBudgetService } from "./disconnect-budget/disconnect-budget.service";
+import { CameraController } from "./camera/camera.controller";
+import { CameraService } from "./camera/camera.service";
 
 @Module({
   imports: [
@@ -150,13 +152,14 @@ import { DisconnectBudgetService } from "./disconnect-budget/disconnect-budget.s
       },
     ),
   ],
-  controllers: [MatchesController, MatchRelayController],
+  controllers: [MatchesController, MatchRelayController, CameraController],
   exports: [MatchAssistantService, PlayerEloRecomputeService],
   providers: [
     MatchEventsGateway,
     MatchAssistantService,
     DisconnectBudgetService,
     MatchRelayService,
+    CameraService,
     CheckOnDemandServerJob,
     CheckOnDemandServerJobEvents,
     CancelExpiredMatches,

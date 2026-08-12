@@ -1,0 +1,62 @@
+# Dedicated MediaMTX instance for the "camera required" tournament
+# feature — deliberately separate from the production `mediamtx`
+# deployment (which serves GOTV/live-match streaming for the whole
+# site). Rationale: camera streams are WHIP publishes from potentially
+# many concurrent players' phones/webcams, a very different load and
+# failure profile than GOTV playback — isolating them means a problem
+# here can never take down live-match streaming.
+#
+# WHIP/WHEP signaling itself is proxied through api-deafcs (like every
+# other API route, behind Cloudflare + TLS) — this instance never needs
+# its own public DNS name. Only the raw WebRTC media (ICE/UDP) has to
+# reach the VPS's public IP directly, since Cloudflare's HTTP(S) proxy
+# can't carry it — same pattern the production MediaMTX already uses.
+#
+# Ports are deliberately disjoint from the production mediamtx (both
+# run hostNetwork on the same node, so they must never collide):
+#   production (GOTV): 8888 hls, 8889 whip/whep, 8890 srt, 1935 rtmp, 9997 api, 8189 webrtc-udp
+#   camera (this):                8891 whip/whep,                    9998 api, 8191 webrtc-udp
+# hls/srt/rtmp are omitted entirely — camera streams are WebRTC-only.
+logLevel: info
+logDestinations: [stdout]
+
+api: yes
+apiAddress: :9998
+
+# MediaMTX enables rtsp/rtmp/hls/srt by default (each with its own
+# default port — rtsp: 8554 + UDP 8000/8001, rtmp: 1935, hls: 8888,
+# srt: 8890) even when nothing in this file mentions them. All of it
+# is disabled outright: camera streams are WHIP/WHEP-only, and every
+# one of those default ports would otherwise collide with the
+# production mediamtx, which runs hostNetwork on this same node.
+rtsp: no
+rtmp: no
+hls: no
+srt: no
+# Newer MediaMTX versions also default-enable "Media over QUIC" (its
+# own listener, port 8892 by default) — same collision risk as the
+# others above.
+moq: no
+
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+      - action: api
+      - action: metrics
+      - action: pprof
+
+webrtc: yes
+webrtcAddress: :8891
+webrtcAllowOrigins: ["*"]
+
+pathDefaults:
+  source: publisher
+  sourceOnDemand: no
+
+paths:
+  all_others:
