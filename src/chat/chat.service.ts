@@ -209,6 +209,41 @@ export class ChatService {
         ) {
           return;
         }
+
+        // Admins can DM anyone; everyone else can only DM an accepted
+        // friend -- opening a DM used to only check that the requester
+        // was one of the two parties in the id, which anyone can derive
+        // from any two steam ids (it's just a sorted pair), so this was
+        // the only thing actually stopping unsolicited DMs to strangers.
+        if (!isRoleAbove(user.role, "administrator")) {
+          const otherSteamId = parties.find(
+            (p) => p !== String(user.steam_id),
+          );
+          const { friends } = await this.hasuraService.query({
+            friends: {
+              __args: {
+                where: {
+                  status: { _eq: "Accepted" },
+                  _or: [
+                    {
+                      player_steam_id: { _eq: user.steam_id },
+                      other_player_steam_id: { _eq: otherSteamId },
+                    },
+                    {
+                      player_steam_id: { _eq: otherSteamId },
+                      other_player_steam_id: { _eq: user.steam_id },
+                    },
+                  ],
+                },
+                limit: 1,
+              },
+              player_steam_id: true,
+            },
+          });
+          if (friends.length === 0) {
+            return;
+          }
+        }
         break;
       }
       default:
