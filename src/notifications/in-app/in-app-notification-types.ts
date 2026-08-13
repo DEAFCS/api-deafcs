@@ -16,6 +16,7 @@ export const IN_APP_TOGGLEABLE_TYPES: InAppNotificationTypeConfig[] = [
   { type: "ChatMessage", defaultEnabled: true, adminOnly: false },
   { type: "GlobalChatMessage", defaultEnabled: true, adminOnly: false },
   { type: "MatchImported", defaultEnabled: false, adminOnly: false },
+  { type: "NewsPublished", defaultEnabled: true, adminOnly: false },
   { type: "DedicatedServerRconStatus", defaultEnabled: true, adminOnly: true },
   { type: "DedicatedServerStatus", defaultEnabled: true, adminOnly: true },
   { type: "EloRecompute", defaultEnabled: true, adminOnly: true },

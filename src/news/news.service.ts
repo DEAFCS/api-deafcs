@@ -1,8 +1,12 @@
 import crypto from "crypto";
 import { Readable } from "stream";
 import { Injectable, Logger, BadRequestException } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { PostgresService } from "src/postgres/postgres.service";
 import { S3Service } from "src/s3/s3.service";
+import { NotificationsService } from "src/notifications/notifications.service";
+import { AppConfig } from "src/configs/types/AppConfig";
+import { e_notification_types_enum, e_player_roles_enum } from "generated/schema";
 
 export interface NewsPostRow {
   id: string;
@@ -38,12 +42,17 @@ const EXTENSION_BY_MIMETYPE: Record<string, string> = {
 @Injectable()
 export class NewsService {
   private static readonly IMAGE_PREFIX = "news";
+  private readonly appConfig: AppConfig;
 
   constructor(
     private readonly logger: Logger,
     private readonly postgres: PostgresService,
     private readonly s3: S3Service,
-  ) {}
+    private readonly notifications: NotificationsService,
+    private readonly configService: ConfigService,
+  ) {
+    this.appConfig = this.configService.get<AppConfig>("app");
+  }
 
   public async listPosts(limit = 200): Promise<NewsPostRow[]> {
     return await this.postgres.query<NewsPostRow[]>(
@@ -170,13 +179,16 @@ export class NewsService {
       return row;
     }
 
-    const [current] = await this.postgres.query<Array<{ title: string }>>(
-      `SELECT title FROM public.news_articles WHERE id = $1`,
-      [id],
-    );
+    const [current] = await this.postgres.query<
+      Array<{ title: string; status: string }>
+    >(`SELECT title, status FROM public.news_articles WHERE id = $1`, [id]);
     if (!current) {
       throw new BadRequestException("News post not found");
     }
+    // Only a genuine draft -> published transition should notify --
+    // without this, re-saving an already-published article (title tweak,
+    // etc.) would re-notify everyone every time.
+    const isFirstPublish = current.status !== "published";
 
     const baseSlug = this.slugify(current.title);
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -198,6 +210,13 @@ export class NewsService {
            RETURNING *`,
           [id, slug],
         );
+        if (isFirstPublish) {
+          void this.notifyArticlePublished(row).catch((error) =>
+            this.logger.warn(
+              `[news] failed to send publish notification: ${(error as Error)?.message}`,
+            ),
+          );
+        }
         return row;
       } catch (error) {
         if (this.isSlugConflict(error) && attempt < 4) {
@@ -208,6 +227,28 @@ export class NewsService {
     }
 
     throw new BadRequestException("Could not generate a unique slug");
+  }
+
+  private async notifyArticlePublished(article: NewsPostRow): Promise<void> {
+    const url = `${this.appConfig.webDomain}/news/${article.slug}`;
+    await this.notifications.send(
+      "NewsPublished" as e_notification_types_enum,
+      {
+        title: "New article",
+        message: `<a href="${url}"><b>${NewsService.escapeHtml(article.title)}</b></a> was just published.`,
+        role: "user" as e_player_roles_enum,
+        entity_id: article.id,
+      },
+    );
+  }
+
+  private static escapeHtml(value: string): string {
+    return value
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   public async trackView(slug: string): Promise<void> {

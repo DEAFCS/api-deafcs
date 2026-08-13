@@ -10,6 +10,7 @@ export const NOTIFICATION_CATEGORIES: Record<string, string[]> = {
   // defaults to OFF (see CATEGORY_DEFAULT_ENABLED below) unlike every
   // other category, which defaults to on.
   global_chat: ["GlobalChatMessage"],
+  news: ["NewsPublished"],
   tournaments: ["TournamentCreated", "TournamentReminder"],
   matches: ["MatchStatusChange", "MatchImported", "MatchSupport"],
   sanctions: ["PlayerSanctioned"],

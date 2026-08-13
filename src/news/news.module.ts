@@ -1,14 +1,23 @@
 import { Module } from "@nestjs/common";
+import { ConfigModule } from "@nestjs/config";
 import { HasuraModule } from "src/hasura/hasura.module";
 import { PostgresModule } from "src/postgres/postgres.module";
 import { SystemModule } from "src/system/system.module";
 import { S3Module } from "src/s3/s3.module";
+import { NotificationsModule } from "src/notifications/notifications.module";
 import { loggerFactory } from "src/utilities/LoggerFactory";
 import { NewsService } from "./news.service";
 import { NewsController } from "./news.controller";
 
 @Module({
-  imports: [HasuraModule, PostgresModule, SystemModule, S3Module],
+  imports: [
+    HasuraModule,
+    PostgresModule,
+    SystemModule,
+    S3Module,
+    NotificationsModule,
+    ConfigModule,
+  ],
   controllers: [NewsController],
   providers: [NewsService, loggerFactory()],
   exports: [NewsService],
