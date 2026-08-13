@@ -4506,7 +4506,7 @@ export interface e_notification_types_aggregate_fields {
 /** unique or primary key constraints on table "e_notification_types" */
 export type e_notification_types_constraint = 'e_notification_types_pkey'
 
-export type e_notification_types_enum = 'DedicatedServerRconStatus' | 'DedicatedServerStatus' | 'EloRecompute' | 'FormTeamSuggestion' | 'GameNodeStatus' | 'GameUpdate' | 'LeagueMatchUnscheduled' | 'LeagueProposalAccepted' | 'LeagueProposalDeclined' | 'LeagueProposalReceived' | 'LeagueRegistrationDecision' | 'LeagueRosterUndersized' | 'MatchImported' | 'MatchStatusChange' | 'MatchSupport' | 'NameChangeApproved' | 'NameChangeDenied' | 'NameChangeRequest' | 'PlayerReindex' | 'PlayerSanctioned' | 'ScrimAlertMatch' | 'ScrimMatchCanceled' | 'ScrimMatchScheduled' | 'ScrimRequestAccepted' | 'ScrimRequestCountered' | 'ScrimRequestDeclined' | 'ScrimRequestExpired' | 'ScrimRequestReceived' | 'ScrimTimeChanged' | 'StorageScan'
+export type e_notification_types_enum = 'ChatMessage' | 'DedicatedServerRconStatus' | 'DedicatedServerStatus' | 'EloRecompute' | 'FormTeamSuggestion' | 'GameNodeStatus' | 'GameUpdate' | 'LeagueMatchUnscheduled' | 'LeagueProposalAccepted' | 'LeagueProposalDeclined' | 'LeagueProposalReceived' | 'LeagueRegistrationDecision' | 'LeagueRosterUndersized' | 'MatchImported' | 'MatchStatusChange' | 'MatchSupport' | 'NameChangeApproved' | 'NameChangeDenied' | 'NameChangeRequest' | 'PlayerReindex' | 'PlayerSanctioned' | 'ScrimAlertMatch' | 'ScrimMatchCanceled' | 'ScrimMatchScheduled' | 'ScrimRequestAccepted' | 'ScrimRequestCountered' | 'ScrimRequestDeclined' | 'ScrimRequestExpired' | 'ScrimRequestReceived' | 'ScrimTimeChanged' | 'StorageScan' | 'TournamentCreated' | 'TournamentReminder'
 
 
 /** aggregate max on columns */
@@ -12978,6 +12978,14 @@ export interface mutation_root {
     delete_plugin_versions: (plugin_versions_mutation_response | null)
     /** delete single row from the table: "plugin_versions" */
     delete_plugin_versions_by_pk: (plugin_versions | null)
+    /** delete data from the table: "push_notification_preferences" */
+    delete_push_notification_preferences: (push_notification_preferences_mutation_response | null)
+    /** delete single row from the table: "push_notification_preferences" */
+    delete_push_notification_preferences_by_pk: (push_notification_preferences | null)
+    /** delete data from the table: "push_subscriptions" */
+    delete_push_subscriptions: (push_subscriptions_mutation_response | null)
+    /** delete single row from the table: "push_subscriptions" */
+    delete_push_subscriptions_by_pk: (push_subscriptions | null)
     /** delete data from the table: "seasons" */
     delete_seasons: (seasons_mutation_response | null)
     /** delete single row from the table: "seasons" */
@@ -13619,6 +13627,14 @@ export interface mutation_root {
     insert_plugin_versions: (plugin_versions_mutation_response | null)
     /** insert a single row into the table: "plugin_versions" */
     insert_plugin_versions_one: (plugin_versions | null)
+    /** insert data into the table: "push_notification_preferences" */
+    insert_push_notification_preferences: (push_notification_preferences_mutation_response | null)
+    /** insert a single row into the table: "push_notification_preferences" */
+    insert_push_notification_preferences_one: (push_notification_preferences | null)
+    /** insert data into the table: "push_subscriptions" */
+    insert_push_subscriptions: (push_subscriptions_mutation_response | null)
+    /** insert a single row into the table: "push_subscriptions" */
+    insert_push_subscriptions_one: (push_subscriptions | null)
     /** insert data into the table: "seasons" */
     insert_seasons: (seasons_mutation_response | null)
     /** insert a single row into the table: "seasons" */
@@ -14646,6 +14662,18 @@ export interface mutation_root {
     update_plugin_versions_by_pk: (plugin_versions | null)
     /** update multiples rows of table: "plugin_versions" */
     update_plugin_versions_many: ((plugin_versions_mutation_response | null)[] | null)
+    /** update data of the table: "push_notification_preferences" */
+    update_push_notification_preferences: (push_notification_preferences_mutation_response | null)
+    /** update single row of the table: "push_notification_preferences" */
+    update_push_notification_preferences_by_pk: (push_notification_preferences | null)
+    /** update multiples rows of table: "push_notification_preferences" */
+    update_push_notification_preferences_many: ((push_notification_preferences_mutation_response | null)[] | null)
+    /** update data of the table: "push_subscriptions" */
+    update_push_subscriptions: (push_subscriptions_mutation_response | null)
+    /** update single row of the table: "push_subscriptions" */
+    update_push_subscriptions_by_pk: (push_subscriptions | null)
+    /** update multiples rows of table: "push_subscriptions" */
+    update_push_subscriptions_many: ((push_subscriptions_mutation_response | null)[] | null)
     /** update data of the table: "seasons" */
     update_seasons: (seasons_mutation_response | null)
     /** update single row of the table: "seasons" */
@@ -22997,6 +23025,282 @@ export interface plugin_versions_variance_fields {
     __typename: 'plugin_versions_variance_fields'
 }
 
+
+/** columns and relationships of "push_notification_preferences" */
+export interface push_notification_preferences {
+    category: Scalars['String']
+    enabled: Scalars['Boolean']
+    steam_id: Scalars['bigint']
+    updated_at: Scalars['timestamptz']
+    __typename: 'push_notification_preferences'
+}
+
+
+/** aggregated selection of "push_notification_preferences" */
+export interface push_notification_preferences_aggregate {
+    aggregate: (push_notification_preferences_aggregate_fields | null)
+    nodes: push_notification_preferences[]
+    __typename: 'push_notification_preferences_aggregate'
+}
+
+
+/** aggregate fields of "push_notification_preferences" */
+export interface push_notification_preferences_aggregate_fields {
+    avg: (push_notification_preferences_avg_fields | null)
+    count: Scalars['Int']
+    max: (push_notification_preferences_max_fields | null)
+    min: (push_notification_preferences_min_fields | null)
+    stddev: (push_notification_preferences_stddev_fields | null)
+    stddev_pop: (push_notification_preferences_stddev_pop_fields | null)
+    stddev_samp: (push_notification_preferences_stddev_samp_fields | null)
+    sum: (push_notification_preferences_sum_fields | null)
+    var_pop: (push_notification_preferences_var_pop_fields | null)
+    var_samp: (push_notification_preferences_var_samp_fields | null)
+    variance: (push_notification_preferences_variance_fields | null)
+    __typename: 'push_notification_preferences_aggregate_fields'
+}
+
+
+/** aggregate avg on columns */
+export interface push_notification_preferences_avg_fields {
+    steam_id: (Scalars['Float'] | null)
+    __typename: 'push_notification_preferences_avg_fields'
+}
+
+
+/** unique or primary key constraints on table "push_notification_preferences" */
+export type push_notification_preferences_constraint = 'push_notification_preferences_pkey'
+
+
+/** aggregate max on columns */
+export interface push_notification_preferences_max_fields {
+    category: (Scalars['String'] | null)
+    steam_id: (Scalars['bigint'] | null)
+    updated_at: (Scalars['timestamptz'] | null)
+    __typename: 'push_notification_preferences_max_fields'
+}
+
+
+/** aggregate min on columns */
+export interface push_notification_preferences_min_fields {
+    category: (Scalars['String'] | null)
+    steam_id: (Scalars['bigint'] | null)
+    updated_at: (Scalars['timestamptz'] | null)
+    __typename: 'push_notification_preferences_min_fields'
+}
+
+
+/** response of any mutation on the table "push_notification_preferences" */
+export interface push_notification_preferences_mutation_response {
+    /** number of rows affected by the mutation */
+    affected_rows: Scalars['Int']
+    /** data from the rows affected by the mutation */
+    returning: push_notification_preferences[]
+    __typename: 'push_notification_preferences_mutation_response'
+}
+
+
+/** select columns of table "push_notification_preferences" */
+export type push_notification_preferences_select_column = 'category' | 'enabled' | 'steam_id' | 'updated_at'
+
+
+/** aggregate stddev on columns */
+export interface push_notification_preferences_stddev_fields {
+    steam_id: (Scalars['Float'] | null)
+    __typename: 'push_notification_preferences_stddev_fields'
+}
+
+
+/** aggregate stddev_pop on columns */
+export interface push_notification_preferences_stddev_pop_fields {
+    steam_id: (Scalars['Float'] | null)
+    __typename: 'push_notification_preferences_stddev_pop_fields'
+}
+
+
+/** aggregate stddev_samp on columns */
+export interface push_notification_preferences_stddev_samp_fields {
+    steam_id: (Scalars['Float'] | null)
+    __typename: 'push_notification_preferences_stddev_samp_fields'
+}
+
+
+/** aggregate sum on columns */
+export interface push_notification_preferences_sum_fields {
+    steam_id: (Scalars['bigint'] | null)
+    __typename: 'push_notification_preferences_sum_fields'
+}
+
+
+/** update columns of table "push_notification_preferences" */
+export type push_notification_preferences_update_column = 'category' | 'enabled' | 'steam_id' | 'updated_at'
+
+
+/** aggregate var_pop on columns */
+export interface push_notification_preferences_var_pop_fields {
+    steam_id: (Scalars['Float'] | null)
+    __typename: 'push_notification_preferences_var_pop_fields'
+}
+
+
+/** aggregate var_samp on columns */
+export interface push_notification_preferences_var_samp_fields {
+    steam_id: (Scalars['Float'] | null)
+    __typename: 'push_notification_preferences_var_samp_fields'
+}
+
+
+/** aggregate variance on columns */
+export interface push_notification_preferences_variance_fields {
+    steam_id: (Scalars['Float'] | null)
+    __typename: 'push_notification_preferences_variance_fields'
+}
+
+
+/** columns and relationships of "push_subscriptions" */
+export interface push_subscriptions {
+    auth: Scalars['String']
+    created_at: Scalars['timestamptz']
+    endpoint: Scalars['String']
+    id: Scalars['uuid']
+    last_used_at: (Scalars['timestamptz'] | null)
+    p256dh: Scalars['String']
+    steam_id: Scalars['bigint']
+    user_agent: (Scalars['String'] | null)
+    __typename: 'push_subscriptions'
+}
+
+
+/** aggregated selection of "push_subscriptions" */
+export interface push_subscriptions_aggregate {
+    aggregate: (push_subscriptions_aggregate_fields | null)
+    nodes: push_subscriptions[]
+    __typename: 'push_subscriptions_aggregate'
+}
+
+
+/** aggregate fields of "push_subscriptions" */
+export interface push_subscriptions_aggregate_fields {
+    avg: (push_subscriptions_avg_fields | null)
+    count: Scalars['Int']
+    max: (push_subscriptions_max_fields | null)
+    min: (push_subscriptions_min_fields | null)
+    stddev: (push_subscriptions_stddev_fields | null)
+    stddev_pop: (push_subscriptions_stddev_pop_fields | null)
+    stddev_samp: (push_subscriptions_stddev_samp_fields | null)
+    sum: (push_subscriptions_sum_fields | null)
+    var_pop: (push_subscriptions_var_pop_fields | null)
+    var_samp: (push_subscriptions_var_samp_fields | null)
+    variance: (push_subscriptions_variance_fields | null)
+    __typename: 'push_subscriptions_aggregate_fields'
+}
+
+
+/** aggregate avg on columns */
+export interface push_subscriptions_avg_fields {
+    steam_id: (Scalars['Float'] | null)
+    __typename: 'push_subscriptions_avg_fields'
+}
+
+
+/** unique or primary key constraints on table "push_subscriptions" */
+export type push_subscriptions_constraint = 'push_subscriptions_endpoint_key' | 'push_subscriptions_pkey'
+
+
+/** aggregate max on columns */
+export interface push_subscriptions_max_fields {
+    auth: (Scalars['String'] | null)
+    created_at: (Scalars['timestamptz'] | null)
+    endpoint: (Scalars['String'] | null)
+    id: (Scalars['uuid'] | null)
+    last_used_at: (Scalars['timestamptz'] | null)
+    p256dh: (Scalars['String'] | null)
+    steam_id: (Scalars['bigint'] | null)
+    user_agent: (Scalars['String'] | null)
+    __typename: 'push_subscriptions_max_fields'
+}
+
+
+/** aggregate min on columns */
+export interface push_subscriptions_min_fields {
+    auth: (Scalars['String'] | null)
+    created_at: (Scalars['timestamptz'] | null)
+    endpoint: (Scalars['String'] | null)
+    id: (Scalars['uuid'] | null)
+    last_used_at: (Scalars['timestamptz'] | null)
+    p256dh: (Scalars['String'] | null)
+    steam_id: (Scalars['bigint'] | null)
+    user_agent: (Scalars['String'] | null)
+    __typename: 'push_subscriptions_min_fields'
+}
+
+
+/** response of any mutation on the table "push_subscriptions" */
+export interface push_subscriptions_mutation_response {
+    /** number of rows affected by the mutation */
+    affected_rows: Scalars['Int']
+    /** data from the rows affected by the mutation */
+    returning: push_subscriptions[]
+    __typename: 'push_subscriptions_mutation_response'
+}
+
+
+/** select columns of table "push_subscriptions" */
+export type push_subscriptions_select_column = 'auth' | 'created_at' | 'endpoint' | 'id' | 'last_used_at' | 'p256dh' | 'steam_id' | 'user_agent'
+
+
+/** aggregate stddev on columns */
+export interface push_subscriptions_stddev_fields {
+    steam_id: (Scalars['Float'] | null)
+    __typename: 'push_subscriptions_stddev_fields'
+}
+
+
+/** aggregate stddev_pop on columns */
+export interface push_subscriptions_stddev_pop_fields {
+    steam_id: (Scalars['Float'] | null)
+    __typename: 'push_subscriptions_stddev_pop_fields'
+}
+
+
+/** aggregate stddev_samp on columns */
+export interface push_subscriptions_stddev_samp_fields {
+    steam_id: (Scalars['Float'] | null)
+    __typename: 'push_subscriptions_stddev_samp_fields'
+}
+
+
+/** aggregate sum on columns */
+export interface push_subscriptions_sum_fields {
+    steam_id: (Scalars['bigint'] | null)
+    __typename: 'push_subscriptions_sum_fields'
+}
+
+
+/** update columns of table "push_subscriptions" */
+export type push_subscriptions_update_column = 'auth' | 'created_at' | 'endpoint' | 'id' | 'last_used_at' | 'p256dh' | 'steam_id' | 'user_agent'
+
+
+/** aggregate var_pop on columns */
+export interface push_subscriptions_var_pop_fields {
+    steam_id: (Scalars['Float'] | null)
+    __typename: 'push_subscriptions_var_pop_fields'
+}
+
+
+/** aggregate var_samp on columns */
+export interface push_subscriptions_var_samp_fields {
+    steam_id: (Scalars['Float'] | null)
+    __typename: 'push_subscriptions_var_samp_fields'
+}
+
+
+/** aggregate variance on columns */
+export interface push_subscriptions_variance_fields {
+    steam_id: (Scalars['Float'] | null)
+    __typename: 'push_subscriptions_variance_fields'
+}
+
 export interface query_root {
     /** fetch data from the table: "_map_pool" */
     _map_pool: _map_pool[]
@@ -23827,6 +24131,18 @@ export interface query_root {
     plugin_versions_aggregate: plugin_versions_aggregate
     /** fetch data from the table: "plugin_versions" using primary key columns */
     plugin_versions_by_pk: (plugin_versions | null)
+    /** fetch data from the table: "push_notification_preferences" */
+    push_notification_preferences: push_notification_preferences[]
+    /** fetch aggregated fields from the table: "push_notification_preferences" */
+    push_notification_preferences_aggregate: push_notification_preferences_aggregate
+    /** fetch data from the table: "push_notification_preferences" using primary key columns */
+    push_notification_preferences_by_pk: (push_notification_preferences | null)
+    /** fetch data from the table: "push_subscriptions" */
+    push_subscriptions: push_subscriptions[]
+    /** fetch aggregated fields from the table: "push_subscriptions" */
+    push_subscriptions_aggregate: push_subscriptions_aggregate
+    /** fetch data from the table: "push_subscriptions" using primary key columns */
+    push_subscriptions_by_pk: (push_subscriptions | null)
     /** Read file content from game server */
     readServerFile: FileContentResponse
     /** fetch data from the table: "seasons" */
@@ -26056,6 +26372,22 @@ export interface subscription_root {
     plugin_versions_by_pk: (plugin_versions | null)
     /** fetch data from the table in a streaming manner: "plugin_versions" */
     plugin_versions_stream: plugin_versions[]
+    /** fetch data from the table: "push_notification_preferences" */
+    push_notification_preferences: push_notification_preferences[]
+    /** fetch aggregated fields from the table: "push_notification_preferences" */
+    push_notification_preferences_aggregate: push_notification_preferences_aggregate
+    /** fetch data from the table: "push_notification_preferences" using primary key columns */
+    push_notification_preferences_by_pk: (push_notification_preferences | null)
+    /** fetch data from the table in a streaming manner: "push_notification_preferences" */
+    push_notification_preferences_stream: push_notification_preferences[]
+    /** fetch data from the table: "push_subscriptions" */
+    push_subscriptions: push_subscriptions[]
+    /** fetch aggregated fields from the table: "push_subscriptions" */
+    push_subscriptions_aggregate: push_subscriptions_aggregate
+    /** fetch data from the table: "push_subscriptions" using primary key columns */
+    push_subscriptions_by_pk: (push_subscriptions | null)
+    /** fetch data from the table in a streaming manner: "push_subscriptions" */
+    push_subscriptions_stream: push_subscriptions[]
     /** fetch data from the table: "seasons" */
     seasons: seasons[]
     /** fetch aggregated fields from the table: "seasons" */
@@ -57844,6 +58176,18 @@ export interface mutation_rootGenqlSelection{
     where: plugin_versions_bool_exp} })
     /** delete single row from the table: "plugin_versions" */
     delete_plugin_versions_by_pk?: (plugin_versionsGenqlSelection & { __args: {runtime: e_plugin_runtimes_enum, version: Scalars['String']} })
+    /** delete data from the table: "push_notification_preferences" */
+    delete_push_notification_preferences?: (push_notification_preferences_mutation_responseGenqlSelection & { __args: {
+    /** filter the rows which have to be deleted */
+    where: push_notification_preferences_bool_exp} })
+    /** delete single row from the table: "push_notification_preferences" */
+    delete_push_notification_preferences_by_pk?: (push_notification_preferencesGenqlSelection & { __args: {category: Scalars['String'], steam_id: Scalars['bigint']} })
+    /** delete data from the table: "push_subscriptions" */
+    delete_push_subscriptions?: (push_subscriptions_mutation_responseGenqlSelection & { __args: {
+    /** filter the rows which have to be deleted */
+    where: push_subscriptions_bool_exp} })
+    /** delete single row from the table: "push_subscriptions" */
+    delete_push_subscriptions_by_pk?: (push_subscriptionsGenqlSelection & { __args: {id: Scalars['uuid']} })
     /** delete data from the table: "seasons" */
     delete_seasons?: (seasons_mutation_responseGenqlSelection & { __args: {
     /** filter the rows which have to be deleted */
@@ -59551,6 +59895,30 @@ export interface mutation_rootGenqlSelection{
     object: plugin_versions_insert_input, 
     /** upsert condition */
     on_conflict?: (plugin_versions_on_conflict | null)} })
+    /** insert data into the table: "push_notification_preferences" */
+    insert_push_notification_preferences?: (push_notification_preferences_mutation_responseGenqlSelection & { __args: {
+    /** the rows to be inserted */
+    objects: push_notification_preferences_insert_input[], 
+    /** upsert condition */
+    on_conflict?: (push_notification_preferences_on_conflict | null)} })
+    /** insert a single row into the table: "push_notification_preferences" */
+    insert_push_notification_preferences_one?: (push_notification_preferencesGenqlSelection & { __args: {
+    /** the row to be inserted */
+    object: push_notification_preferences_insert_input, 
+    /** upsert condition */
+    on_conflict?: (push_notification_preferences_on_conflict | null)} })
+    /** insert data into the table: "push_subscriptions" */
+    insert_push_subscriptions?: (push_subscriptions_mutation_responseGenqlSelection & { __args: {
+    /** the rows to be inserted */
+    objects: push_subscriptions_insert_input[], 
+    /** upsert condition */
+    on_conflict?: (push_subscriptions_on_conflict | null)} })
+    /** insert a single row into the table: "push_subscriptions" */
+    insert_push_subscriptions_one?: (push_subscriptionsGenqlSelection & { __args: {
+    /** the row to be inserted */
+    object: push_subscriptions_insert_input, 
+    /** upsert condition */
+    on_conflict?: (push_subscriptions_on_conflict | null)} })
     /** insert data into the table: "seasons" */
     insert_seasons?: (seasons_mutation_responseGenqlSelection & { __args: {
     /** the rows to be inserted */
@@ -62404,6 +62772,42 @@ export interface mutation_rootGenqlSelection{
     update_plugin_versions_many?: (plugin_versions_mutation_responseGenqlSelection & { __args: {
     /** updates to execute, in order */
     updates: plugin_versions_updates[]} })
+    /** update data of the table: "push_notification_preferences" */
+    update_push_notification_preferences?: (push_notification_preferences_mutation_responseGenqlSelection & { __args: {
+    /** increments the numeric columns with given value of the filtered values */
+    _inc?: (push_notification_preferences_inc_input | null), 
+    /** sets the columns of the filtered rows to the given values */
+    _set?: (push_notification_preferences_set_input | null), 
+    /** filter the rows which have to be updated */
+    where: push_notification_preferences_bool_exp} })
+    /** update single row of the table: "push_notification_preferences" */
+    update_push_notification_preferences_by_pk?: (push_notification_preferencesGenqlSelection & { __args: {
+    /** increments the numeric columns with given value of the filtered values */
+    _inc?: (push_notification_preferences_inc_input | null), 
+    /** sets the columns of the filtered rows to the given values */
+    _set?: (push_notification_preferences_set_input | null), pk_columns: push_notification_preferences_pk_columns_input} })
+    /** update multiples rows of table: "push_notification_preferences" */
+    update_push_notification_preferences_many?: (push_notification_preferences_mutation_responseGenqlSelection & { __args: {
+    /** updates to execute, in order */
+    updates: push_notification_preferences_updates[]} })
+    /** update data of the table: "push_subscriptions" */
+    update_push_subscriptions?: (push_subscriptions_mutation_responseGenqlSelection & { __args: {
+    /** increments the numeric columns with given value of the filtered values */
+    _inc?: (push_subscriptions_inc_input | null), 
+    /** sets the columns of the filtered rows to the given values */
+    _set?: (push_subscriptions_set_input | null), 
+    /** filter the rows which have to be updated */
+    where: push_subscriptions_bool_exp} })
+    /** update single row of the table: "push_subscriptions" */
+    update_push_subscriptions_by_pk?: (push_subscriptionsGenqlSelection & { __args: {
+    /** increments the numeric columns with given value of the filtered values */
+    _inc?: (push_subscriptions_inc_input | null), 
+    /** sets the columns of the filtered rows to the given values */
+    _set?: (push_subscriptions_set_input | null), pk_columns: push_subscriptions_pk_columns_input} })
+    /** update multiples rows of table: "push_subscriptions" */
+    update_push_subscriptions_many?: (push_subscriptions_mutation_responseGenqlSelection & { __args: {
+    /** updates to execute, in order */
+    updates: push_subscriptions_updates[]} })
     /** update data of the table: "seasons" */
     update_seasons?: (seasons_mutation_responseGenqlSelection & { __args: {
     /** increments the numeric columns with given value of the filtered values */
@@ -74571,6 +74975,382 @@ export interface plugin_versions_variance_fieldsGenqlSelection{
     __scalar?: boolean | number
 }
 
+
+/** columns and relationships of "push_notification_preferences" */
+export interface push_notification_preferencesGenqlSelection{
+    category?: boolean | number
+    enabled?: boolean | number
+    steam_id?: boolean | number
+    updated_at?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregated selection of "push_notification_preferences" */
+export interface push_notification_preferences_aggregateGenqlSelection{
+    aggregate?: push_notification_preferences_aggregate_fieldsGenqlSelection
+    nodes?: push_notification_preferencesGenqlSelection
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregate fields of "push_notification_preferences" */
+export interface push_notification_preferences_aggregate_fieldsGenqlSelection{
+    avg?: push_notification_preferences_avg_fieldsGenqlSelection
+    count?: { __args: {columns?: (push_notification_preferences_select_column[] | null), distinct?: (Scalars['Boolean'] | null)} } | boolean | number
+    max?: push_notification_preferences_max_fieldsGenqlSelection
+    min?: push_notification_preferences_min_fieldsGenqlSelection
+    stddev?: push_notification_preferences_stddev_fieldsGenqlSelection
+    stddev_pop?: push_notification_preferences_stddev_pop_fieldsGenqlSelection
+    stddev_samp?: push_notification_preferences_stddev_samp_fieldsGenqlSelection
+    sum?: push_notification_preferences_sum_fieldsGenqlSelection
+    var_pop?: push_notification_preferences_var_pop_fieldsGenqlSelection
+    var_samp?: push_notification_preferences_var_samp_fieldsGenqlSelection
+    variance?: push_notification_preferences_variance_fieldsGenqlSelection
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregate avg on columns */
+export interface push_notification_preferences_avg_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** Boolean expression to filter rows from the table "push_notification_preferences". All fields are combined with a logical 'AND'. */
+export interface push_notification_preferences_bool_exp {_and?: (push_notification_preferences_bool_exp[] | null),_not?: (push_notification_preferences_bool_exp | null),_or?: (push_notification_preferences_bool_exp[] | null),category?: (String_comparison_exp | null),enabled?: (Boolean_comparison_exp | null),steam_id?: (bigint_comparison_exp | null),updated_at?: (timestamptz_comparison_exp | null)}
+
+
+/** input type for incrementing numeric columns in table "push_notification_preferences" */
+export interface push_notification_preferences_inc_input {steam_id?: (Scalars['bigint'] | null)}
+
+
+/** input type for inserting data into table "push_notification_preferences" */
+export interface push_notification_preferences_insert_input {category?: (Scalars['String'] | null),enabled?: (Scalars['Boolean'] | null),steam_id?: (Scalars['bigint'] | null),updated_at?: (Scalars['timestamptz'] | null)}
+
+
+/** aggregate max on columns */
+export interface push_notification_preferences_max_fieldsGenqlSelection{
+    category?: boolean | number
+    steam_id?: boolean | number
+    updated_at?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregate min on columns */
+export interface push_notification_preferences_min_fieldsGenqlSelection{
+    category?: boolean | number
+    steam_id?: boolean | number
+    updated_at?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** response of any mutation on the table "push_notification_preferences" */
+export interface push_notification_preferences_mutation_responseGenqlSelection{
+    /** number of rows affected by the mutation */
+    affected_rows?: boolean | number
+    /** data from the rows affected by the mutation */
+    returning?: push_notification_preferencesGenqlSelection
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** on_conflict condition type for table "push_notification_preferences" */
+export interface push_notification_preferences_on_conflict {constraint: push_notification_preferences_constraint,update_columns?: push_notification_preferences_update_column[],where?: (push_notification_preferences_bool_exp | null)}
+
+
+/** Ordering options when selecting data from "push_notification_preferences". */
+export interface push_notification_preferences_order_by {category?: (order_by | null),enabled?: (order_by | null),steam_id?: (order_by | null),updated_at?: (order_by | null)}
+
+
+/** primary key columns input for table: push_notification_preferences */
+export interface push_notification_preferences_pk_columns_input {category: Scalars['String'],steam_id: Scalars['bigint']}
+
+
+/** input type for updating data in table "push_notification_preferences" */
+export interface push_notification_preferences_set_input {category?: (Scalars['String'] | null),enabled?: (Scalars['Boolean'] | null),steam_id?: (Scalars['bigint'] | null),updated_at?: (Scalars['timestamptz'] | null)}
+
+
+/** aggregate stddev on columns */
+export interface push_notification_preferences_stddev_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregate stddev_pop on columns */
+export interface push_notification_preferences_stddev_pop_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregate stddev_samp on columns */
+export interface push_notification_preferences_stddev_samp_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** Streaming cursor of the table "push_notification_preferences" */
+export interface push_notification_preferences_stream_cursor_input {
+/** Stream column input with initial value */
+initial_value: push_notification_preferences_stream_cursor_value_input,
+/** cursor ordering */
+ordering?: (cursor_ordering | null)}
+
+
+/** Initial value of the column from where the streaming should start */
+export interface push_notification_preferences_stream_cursor_value_input {category?: (Scalars['String'] | null),enabled?: (Scalars['Boolean'] | null),steam_id?: (Scalars['bigint'] | null),updated_at?: (Scalars['timestamptz'] | null)}
+
+
+/** aggregate sum on columns */
+export interface push_notification_preferences_sum_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+export interface push_notification_preferences_updates {
+/** increments the numeric columns with given value of the filtered values */
+_inc?: (push_notification_preferences_inc_input | null),
+/** sets the columns of the filtered rows to the given values */
+_set?: (push_notification_preferences_set_input | null),
+/** filter the rows which have to be updated */
+where: push_notification_preferences_bool_exp}
+
+
+/** aggregate var_pop on columns */
+export interface push_notification_preferences_var_pop_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregate var_samp on columns */
+export interface push_notification_preferences_var_samp_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregate variance on columns */
+export interface push_notification_preferences_variance_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** columns and relationships of "push_subscriptions" */
+export interface push_subscriptionsGenqlSelection{
+    auth?: boolean | number
+    created_at?: boolean | number
+    endpoint?: boolean | number
+    id?: boolean | number
+    last_used_at?: boolean | number
+    p256dh?: boolean | number
+    steam_id?: boolean | number
+    user_agent?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregated selection of "push_subscriptions" */
+export interface push_subscriptions_aggregateGenqlSelection{
+    aggregate?: push_subscriptions_aggregate_fieldsGenqlSelection
+    nodes?: push_subscriptionsGenqlSelection
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregate fields of "push_subscriptions" */
+export interface push_subscriptions_aggregate_fieldsGenqlSelection{
+    avg?: push_subscriptions_avg_fieldsGenqlSelection
+    count?: { __args: {columns?: (push_subscriptions_select_column[] | null), distinct?: (Scalars['Boolean'] | null)} } | boolean | number
+    max?: push_subscriptions_max_fieldsGenqlSelection
+    min?: push_subscriptions_min_fieldsGenqlSelection
+    stddev?: push_subscriptions_stddev_fieldsGenqlSelection
+    stddev_pop?: push_subscriptions_stddev_pop_fieldsGenqlSelection
+    stddev_samp?: push_subscriptions_stddev_samp_fieldsGenqlSelection
+    sum?: push_subscriptions_sum_fieldsGenqlSelection
+    var_pop?: push_subscriptions_var_pop_fieldsGenqlSelection
+    var_samp?: push_subscriptions_var_samp_fieldsGenqlSelection
+    variance?: push_subscriptions_variance_fieldsGenqlSelection
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregate avg on columns */
+export interface push_subscriptions_avg_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** Boolean expression to filter rows from the table "push_subscriptions". All fields are combined with a logical 'AND'. */
+export interface push_subscriptions_bool_exp {_and?: (push_subscriptions_bool_exp[] | null),_not?: (push_subscriptions_bool_exp | null),_or?: (push_subscriptions_bool_exp[] | null),auth?: (String_comparison_exp | null),created_at?: (timestamptz_comparison_exp | null),endpoint?: (String_comparison_exp | null),id?: (uuid_comparison_exp | null),last_used_at?: (timestamptz_comparison_exp | null),p256dh?: (String_comparison_exp | null),steam_id?: (bigint_comparison_exp | null),user_agent?: (String_comparison_exp | null)}
+
+
+/** input type for incrementing numeric columns in table "push_subscriptions" */
+export interface push_subscriptions_inc_input {steam_id?: (Scalars['bigint'] | null)}
+
+
+/** input type for inserting data into table "push_subscriptions" */
+export interface push_subscriptions_insert_input {auth?: (Scalars['String'] | null),created_at?: (Scalars['timestamptz'] | null),endpoint?: (Scalars['String'] | null),id?: (Scalars['uuid'] | null),last_used_at?: (Scalars['timestamptz'] | null),p256dh?: (Scalars['String'] | null),steam_id?: (Scalars['bigint'] | null),user_agent?: (Scalars['String'] | null)}
+
+
+/** aggregate max on columns */
+export interface push_subscriptions_max_fieldsGenqlSelection{
+    auth?: boolean | number
+    created_at?: boolean | number
+    endpoint?: boolean | number
+    id?: boolean | number
+    last_used_at?: boolean | number
+    p256dh?: boolean | number
+    steam_id?: boolean | number
+    user_agent?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregate min on columns */
+export interface push_subscriptions_min_fieldsGenqlSelection{
+    auth?: boolean | number
+    created_at?: boolean | number
+    endpoint?: boolean | number
+    id?: boolean | number
+    last_used_at?: boolean | number
+    p256dh?: boolean | number
+    steam_id?: boolean | number
+    user_agent?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** response of any mutation on the table "push_subscriptions" */
+export interface push_subscriptions_mutation_responseGenqlSelection{
+    /** number of rows affected by the mutation */
+    affected_rows?: boolean | number
+    /** data from the rows affected by the mutation */
+    returning?: push_subscriptionsGenqlSelection
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** on_conflict condition type for table "push_subscriptions" */
+export interface push_subscriptions_on_conflict {constraint: push_subscriptions_constraint,update_columns?: push_subscriptions_update_column[],where?: (push_subscriptions_bool_exp | null)}
+
+
+/** Ordering options when selecting data from "push_subscriptions". */
+export interface push_subscriptions_order_by {auth?: (order_by | null),created_at?: (order_by | null),endpoint?: (order_by | null),id?: (order_by | null),last_used_at?: (order_by | null),p256dh?: (order_by | null),steam_id?: (order_by | null),user_agent?: (order_by | null)}
+
+
+/** primary key columns input for table: push_subscriptions */
+export interface push_subscriptions_pk_columns_input {id: Scalars['uuid']}
+
+
+/** input type for updating data in table "push_subscriptions" */
+export interface push_subscriptions_set_input {auth?: (Scalars['String'] | null),created_at?: (Scalars['timestamptz'] | null),endpoint?: (Scalars['String'] | null),id?: (Scalars['uuid'] | null),last_used_at?: (Scalars['timestamptz'] | null),p256dh?: (Scalars['String'] | null),steam_id?: (Scalars['bigint'] | null),user_agent?: (Scalars['String'] | null)}
+
+
+/** aggregate stddev on columns */
+export interface push_subscriptions_stddev_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregate stddev_pop on columns */
+export interface push_subscriptions_stddev_pop_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregate stddev_samp on columns */
+export interface push_subscriptions_stddev_samp_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** Streaming cursor of the table "push_subscriptions" */
+export interface push_subscriptions_stream_cursor_input {
+/** Stream column input with initial value */
+initial_value: push_subscriptions_stream_cursor_value_input,
+/** cursor ordering */
+ordering?: (cursor_ordering | null)}
+
+
+/** Initial value of the column from where the streaming should start */
+export interface push_subscriptions_stream_cursor_value_input {auth?: (Scalars['String'] | null),created_at?: (Scalars['timestamptz'] | null),endpoint?: (Scalars['String'] | null),id?: (Scalars['uuid'] | null),last_used_at?: (Scalars['timestamptz'] | null),p256dh?: (Scalars['String'] | null),steam_id?: (Scalars['bigint'] | null),user_agent?: (Scalars['String'] | null)}
+
+
+/** aggregate sum on columns */
+export interface push_subscriptions_sum_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+export interface push_subscriptions_updates {
+/** increments the numeric columns with given value of the filtered values */
+_inc?: (push_subscriptions_inc_input | null),
+/** sets the columns of the filtered rows to the given values */
+_set?: (push_subscriptions_set_input | null),
+/** filter the rows which have to be updated */
+where: push_subscriptions_bool_exp}
+
+
+/** aggregate var_pop on columns */
+export interface push_subscriptions_var_pop_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregate var_samp on columns */
+export interface push_subscriptions_var_samp_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
+
+/** aggregate variance on columns */
+export interface push_subscriptions_variance_fieldsGenqlSelection{
+    steam_id?: boolean | number
+    __typename?: boolean | number
+    __scalar?: boolean | number
+}
+
 export interface query_rootGenqlSelection{
     /** fetch data from the table: "_map_pool" */
     _map_pool?: (_map_poolGenqlSelection & { __args?: {
@@ -78117,6 +78897,58 @@ export interface query_rootGenqlSelection{
     where?: (plugin_versions_bool_exp | null)} })
     /** fetch data from the table: "plugin_versions" using primary key columns */
     plugin_versions_by_pk?: (plugin_versionsGenqlSelection & { __args: {runtime: e_plugin_runtimes_enum, version: Scalars['String']} })
+    /** fetch data from the table: "push_notification_preferences" */
+    push_notification_preferences?: (push_notification_preferencesGenqlSelection & { __args?: {
+    /** distinct select on columns */
+    distinct_on?: (push_notification_preferences_select_column[] | null), 
+    /** limit the number of rows returned */
+    limit?: (Scalars['Int'] | null), 
+    /** skip the first n rows. Use only with order_by */
+    offset?: (Scalars['Int'] | null), 
+    /** sort the rows by one or more columns */
+    order_by?: (push_notification_preferences_order_by[] | null), 
+    /** filter the rows returned */
+    where?: (push_notification_preferences_bool_exp | null)} })
+    /** fetch aggregated fields from the table: "push_notification_preferences" */
+    push_notification_preferences_aggregate?: (push_notification_preferences_aggregateGenqlSelection & { __args?: {
+    /** distinct select on columns */
+    distinct_on?: (push_notification_preferences_select_column[] | null), 
+    /** limit the number of rows returned */
+    limit?: (Scalars['Int'] | null), 
+    /** skip the first n rows. Use only with order_by */
+    offset?: (Scalars['Int'] | null), 
+    /** sort the rows by one or more columns */
+    order_by?: (push_notification_preferences_order_by[] | null), 
+    /** filter the rows returned */
+    where?: (push_notification_preferences_bool_exp | null)} })
+    /** fetch data from the table: "push_notification_preferences" using primary key columns */
+    push_notification_preferences_by_pk?: (push_notification_preferencesGenqlSelection & { __args: {category: Scalars['String'], steam_id: Scalars['bigint']} })
+    /** fetch data from the table: "push_subscriptions" */
+    push_subscriptions?: (push_subscriptionsGenqlSelection & { __args?: {
+    /** distinct select on columns */
+    distinct_on?: (push_subscriptions_select_column[] | null), 
+    /** limit the number of rows returned */
+    limit?: (Scalars['Int'] | null), 
+    /** skip the first n rows. Use only with order_by */
+    offset?: (Scalars['Int'] | null), 
+    /** sort the rows by one or more columns */
+    order_by?: (push_subscriptions_order_by[] | null), 
+    /** filter the rows returned */
+    where?: (push_subscriptions_bool_exp | null)} })
+    /** fetch aggregated fields from the table: "push_subscriptions" */
+    push_subscriptions_aggregate?: (push_subscriptions_aggregateGenqlSelection & { __args?: {
+    /** distinct select on columns */
+    distinct_on?: (push_subscriptions_select_column[] | null), 
+    /** limit the number of rows returned */
+    limit?: (Scalars['Int'] | null), 
+    /** skip the first n rows. Use only with order_by */
+    offset?: (Scalars['Int'] | null), 
+    /** sort the rows by one or more columns */
+    order_by?: (push_subscriptions_order_by[] | null), 
+    /** filter the rows returned */
+    where?: (push_subscriptions_bool_exp | null)} })
+    /** fetch data from the table: "push_subscriptions" using primary key columns */
+    push_subscriptions_by_pk?: (push_subscriptionsGenqlSelection & { __args: {id: Scalars['uuid']} })
     /** Read file content from game server */
     readServerFile?: (FileContentResponseGenqlSelection & { __args: {file_path: Scalars['String'], node_id: Scalars['String'], server_id?: (Scalars['String'] | null)} })
     /** fetch data from the table: "seasons" */
@@ -85545,6 +86377,74 @@ export interface subscription_rootGenqlSelection{
     cursor: (plugin_versions_stream_cursor_input | null)[], 
     /** filter the rows returned */
     where?: (plugin_versions_bool_exp | null)} })
+    /** fetch data from the table: "push_notification_preferences" */
+    push_notification_preferences?: (push_notification_preferencesGenqlSelection & { __args?: {
+    /** distinct select on columns */
+    distinct_on?: (push_notification_preferences_select_column[] | null), 
+    /** limit the number of rows returned */
+    limit?: (Scalars['Int'] | null), 
+    /** skip the first n rows. Use only with order_by */
+    offset?: (Scalars['Int'] | null), 
+    /** sort the rows by one or more columns */
+    order_by?: (push_notification_preferences_order_by[] | null), 
+    /** filter the rows returned */
+    where?: (push_notification_preferences_bool_exp | null)} })
+    /** fetch aggregated fields from the table: "push_notification_preferences" */
+    push_notification_preferences_aggregate?: (push_notification_preferences_aggregateGenqlSelection & { __args?: {
+    /** distinct select on columns */
+    distinct_on?: (push_notification_preferences_select_column[] | null), 
+    /** limit the number of rows returned */
+    limit?: (Scalars['Int'] | null), 
+    /** skip the first n rows. Use only with order_by */
+    offset?: (Scalars['Int'] | null), 
+    /** sort the rows by one or more columns */
+    order_by?: (push_notification_preferences_order_by[] | null), 
+    /** filter the rows returned */
+    where?: (push_notification_preferences_bool_exp | null)} })
+    /** fetch data from the table: "push_notification_preferences" using primary key columns */
+    push_notification_preferences_by_pk?: (push_notification_preferencesGenqlSelection & { __args: {category: Scalars['String'], steam_id: Scalars['bigint']} })
+    /** fetch data from the table in a streaming manner: "push_notification_preferences" */
+    push_notification_preferences_stream?: (push_notification_preferencesGenqlSelection & { __args: {
+    /** maximum number of rows returned in a single batch */
+    batch_size: Scalars['Int'], 
+    /** cursor to stream the results returned by the query */
+    cursor: (push_notification_preferences_stream_cursor_input | null)[], 
+    /** filter the rows returned */
+    where?: (push_notification_preferences_bool_exp | null)} })
+    /** fetch data from the table: "push_subscriptions" */
+    push_subscriptions?: (push_subscriptionsGenqlSelection & { __args?: {
+    /** distinct select on columns */
+    distinct_on?: (push_subscriptions_select_column[] | null), 
+    /** limit the number of rows returned */
+    limit?: (Scalars['Int'] | null), 
+    /** skip the first n rows. Use only with order_by */
+    offset?: (Scalars['Int'] | null), 
+    /** sort the rows by one or more columns */
+    order_by?: (push_subscriptions_order_by[] | null), 
+    /** filter the rows returned */
+    where?: (push_subscriptions_bool_exp | null)} })
+    /** fetch aggregated fields from the table: "push_subscriptions" */
+    push_subscriptions_aggregate?: (push_subscriptions_aggregateGenqlSelection & { __args?: {
+    /** distinct select on columns */
+    distinct_on?: (push_subscriptions_select_column[] | null), 
+    /** limit the number of rows returned */
+    limit?: (Scalars['Int'] | null), 
+    /** skip the first n rows. Use only with order_by */
+    offset?: (Scalars['Int'] | null), 
+    /** sort the rows by one or more columns */
+    order_by?: (push_subscriptions_order_by[] | null), 
+    /** filter the rows returned */
+    where?: (push_subscriptions_bool_exp | null)} })
+    /** fetch data from the table: "push_subscriptions" using primary key columns */
+    push_subscriptions_by_pk?: (push_subscriptionsGenqlSelection & { __args: {id: Scalars['uuid']} })
+    /** fetch data from the table in a streaming manner: "push_subscriptions" */
+    push_subscriptions_stream?: (push_subscriptionsGenqlSelection & { __args: {
+    /** maximum number of rows returned in a single batch */
+    batch_size: Scalars['Int'], 
+    /** cursor to stream the results returned by the query */
+    cursor: (push_subscriptions_stream_cursor_input | null)[], 
+    /** filter the rows returned */
+    where?: (push_subscriptions_bool_exp | null)} })
     /** fetch data from the table: "seasons" */
     seasons?: (seasonsGenqlSelection & { __args?: {
     /** distinct select on columns */
@@ -113276,6 +114176,230 @@ export type SubscriptionGenqlSelection = subscription_rootGenqlSelection
     
 
 
+    const push_notification_preferences_possibleTypes: string[] = ['push_notification_preferences']
+    export const ispush_notification_preferences = (obj?: { __typename?: any } | null): obj is push_notification_preferences => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_notification_preferences"')
+      return push_notification_preferences_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_notification_preferences_aggregate_possibleTypes: string[] = ['push_notification_preferences_aggregate']
+    export const ispush_notification_preferences_aggregate = (obj?: { __typename?: any } | null): obj is push_notification_preferences_aggregate => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_notification_preferences_aggregate"')
+      return push_notification_preferences_aggregate_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_notification_preferences_aggregate_fields_possibleTypes: string[] = ['push_notification_preferences_aggregate_fields']
+    export const ispush_notification_preferences_aggregate_fields = (obj?: { __typename?: any } | null): obj is push_notification_preferences_aggregate_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_notification_preferences_aggregate_fields"')
+      return push_notification_preferences_aggregate_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_notification_preferences_avg_fields_possibleTypes: string[] = ['push_notification_preferences_avg_fields']
+    export const ispush_notification_preferences_avg_fields = (obj?: { __typename?: any } | null): obj is push_notification_preferences_avg_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_notification_preferences_avg_fields"')
+      return push_notification_preferences_avg_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_notification_preferences_max_fields_possibleTypes: string[] = ['push_notification_preferences_max_fields']
+    export const ispush_notification_preferences_max_fields = (obj?: { __typename?: any } | null): obj is push_notification_preferences_max_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_notification_preferences_max_fields"')
+      return push_notification_preferences_max_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_notification_preferences_min_fields_possibleTypes: string[] = ['push_notification_preferences_min_fields']
+    export const ispush_notification_preferences_min_fields = (obj?: { __typename?: any } | null): obj is push_notification_preferences_min_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_notification_preferences_min_fields"')
+      return push_notification_preferences_min_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_notification_preferences_mutation_response_possibleTypes: string[] = ['push_notification_preferences_mutation_response']
+    export const ispush_notification_preferences_mutation_response = (obj?: { __typename?: any } | null): obj is push_notification_preferences_mutation_response => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_notification_preferences_mutation_response"')
+      return push_notification_preferences_mutation_response_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_notification_preferences_stddev_fields_possibleTypes: string[] = ['push_notification_preferences_stddev_fields']
+    export const ispush_notification_preferences_stddev_fields = (obj?: { __typename?: any } | null): obj is push_notification_preferences_stddev_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_notification_preferences_stddev_fields"')
+      return push_notification_preferences_stddev_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_notification_preferences_stddev_pop_fields_possibleTypes: string[] = ['push_notification_preferences_stddev_pop_fields']
+    export const ispush_notification_preferences_stddev_pop_fields = (obj?: { __typename?: any } | null): obj is push_notification_preferences_stddev_pop_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_notification_preferences_stddev_pop_fields"')
+      return push_notification_preferences_stddev_pop_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_notification_preferences_stddev_samp_fields_possibleTypes: string[] = ['push_notification_preferences_stddev_samp_fields']
+    export const ispush_notification_preferences_stddev_samp_fields = (obj?: { __typename?: any } | null): obj is push_notification_preferences_stddev_samp_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_notification_preferences_stddev_samp_fields"')
+      return push_notification_preferences_stddev_samp_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_notification_preferences_sum_fields_possibleTypes: string[] = ['push_notification_preferences_sum_fields']
+    export const ispush_notification_preferences_sum_fields = (obj?: { __typename?: any } | null): obj is push_notification_preferences_sum_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_notification_preferences_sum_fields"')
+      return push_notification_preferences_sum_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_notification_preferences_var_pop_fields_possibleTypes: string[] = ['push_notification_preferences_var_pop_fields']
+    export const ispush_notification_preferences_var_pop_fields = (obj?: { __typename?: any } | null): obj is push_notification_preferences_var_pop_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_notification_preferences_var_pop_fields"')
+      return push_notification_preferences_var_pop_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_notification_preferences_var_samp_fields_possibleTypes: string[] = ['push_notification_preferences_var_samp_fields']
+    export const ispush_notification_preferences_var_samp_fields = (obj?: { __typename?: any } | null): obj is push_notification_preferences_var_samp_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_notification_preferences_var_samp_fields"')
+      return push_notification_preferences_var_samp_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_notification_preferences_variance_fields_possibleTypes: string[] = ['push_notification_preferences_variance_fields']
+    export const ispush_notification_preferences_variance_fields = (obj?: { __typename?: any } | null): obj is push_notification_preferences_variance_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_notification_preferences_variance_fields"')
+      return push_notification_preferences_variance_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_subscriptions_possibleTypes: string[] = ['push_subscriptions']
+    export const ispush_subscriptions = (obj?: { __typename?: any } | null): obj is push_subscriptions => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_subscriptions"')
+      return push_subscriptions_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_subscriptions_aggregate_possibleTypes: string[] = ['push_subscriptions_aggregate']
+    export const ispush_subscriptions_aggregate = (obj?: { __typename?: any } | null): obj is push_subscriptions_aggregate => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_subscriptions_aggregate"')
+      return push_subscriptions_aggregate_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_subscriptions_aggregate_fields_possibleTypes: string[] = ['push_subscriptions_aggregate_fields']
+    export const ispush_subscriptions_aggregate_fields = (obj?: { __typename?: any } | null): obj is push_subscriptions_aggregate_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_subscriptions_aggregate_fields"')
+      return push_subscriptions_aggregate_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_subscriptions_avg_fields_possibleTypes: string[] = ['push_subscriptions_avg_fields']
+    export const ispush_subscriptions_avg_fields = (obj?: { __typename?: any } | null): obj is push_subscriptions_avg_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_subscriptions_avg_fields"')
+      return push_subscriptions_avg_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_subscriptions_max_fields_possibleTypes: string[] = ['push_subscriptions_max_fields']
+    export const ispush_subscriptions_max_fields = (obj?: { __typename?: any } | null): obj is push_subscriptions_max_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_subscriptions_max_fields"')
+      return push_subscriptions_max_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_subscriptions_min_fields_possibleTypes: string[] = ['push_subscriptions_min_fields']
+    export const ispush_subscriptions_min_fields = (obj?: { __typename?: any } | null): obj is push_subscriptions_min_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_subscriptions_min_fields"')
+      return push_subscriptions_min_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_subscriptions_mutation_response_possibleTypes: string[] = ['push_subscriptions_mutation_response']
+    export const ispush_subscriptions_mutation_response = (obj?: { __typename?: any } | null): obj is push_subscriptions_mutation_response => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_subscriptions_mutation_response"')
+      return push_subscriptions_mutation_response_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_subscriptions_stddev_fields_possibleTypes: string[] = ['push_subscriptions_stddev_fields']
+    export const ispush_subscriptions_stddev_fields = (obj?: { __typename?: any } | null): obj is push_subscriptions_stddev_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_subscriptions_stddev_fields"')
+      return push_subscriptions_stddev_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_subscriptions_stddev_pop_fields_possibleTypes: string[] = ['push_subscriptions_stddev_pop_fields']
+    export const ispush_subscriptions_stddev_pop_fields = (obj?: { __typename?: any } | null): obj is push_subscriptions_stddev_pop_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_subscriptions_stddev_pop_fields"')
+      return push_subscriptions_stddev_pop_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_subscriptions_stddev_samp_fields_possibleTypes: string[] = ['push_subscriptions_stddev_samp_fields']
+    export const ispush_subscriptions_stddev_samp_fields = (obj?: { __typename?: any } | null): obj is push_subscriptions_stddev_samp_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_subscriptions_stddev_samp_fields"')
+      return push_subscriptions_stddev_samp_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_subscriptions_sum_fields_possibleTypes: string[] = ['push_subscriptions_sum_fields']
+    export const ispush_subscriptions_sum_fields = (obj?: { __typename?: any } | null): obj is push_subscriptions_sum_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_subscriptions_sum_fields"')
+      return push_subscriptions_sum_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_subscriptions_var_pop_fields_possibleTypes: string[] = ['push_subscriptions_var_pop_fields']
+    export const ispush_subscriptions_var_pop_fields = (obj?: { __typename?: any } | null): obj is push_subscriptions_var_pop_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_subscriptions_var_pop_fields"')
+      return push_subscriptions_var_pop_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_subscriptions_var_samp_fields_possibleTypes: string[] = ['push_subscriptions_var_samp_fields']
+    export const ispush_subscriptions_var_samp_fields = (obj?: { __typename?: any } | null): obj is push_subscriptions_var_samp_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_subscriptions_var_samp_fields"')
+      return push_subscriptions_var_samp_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
+    const push_subscriptions_variance_fields_possibleTypes: string[] = ['push_subscriptions_variance_fields']
+    export const ispush_subscriptions_variance_fields = (obj?: { __typename?: any } | null): obj is push_subscriptions_variance_fields => {
+      if (!obj?.__typename) throw new Error('__typename is missing in "ispush_subscriptions_variance_fields"')
+      return push_subscriptions_variance_fields_possibleTypes.includes(obj.__typename)
+    }
+    
+
+
     const query_root_possibleTypes: string[] = ['query_root']
     export const isquery_root = (obj?: { __typename?: any } | null): obj is query_root => {
       if (!obj?.__typename) throw new Error('__typename is missing in "isquery_root"')
@@ -120648,6 +121772,7 @@ export const enumENotificationTypesConstraint = {
 }
 
 export const enumENotificationTypesEnum = {
+   ChatMessage: 'ChatMessage' as const,
    DedicatedServerRconStatus: 'DedicatedServerRconStatus' as const,
    DedicatedServerStatus: 'DedicatedServerStatus' as const,
    EloRecompute: 'EloRecompute' as const,
@@ -120677,7 +121802,9 @@ export const enumENotificationTypesEnum = {
    ScrimRequestExpired: 'ScrimRequestExpired' as const,
    ScrimRequestReceived: 'ScrimRequestReceived' as const,
    ScrimTimeChanged: 'ScrimTimeChanged' as const,
-   StorageScan: 'StorageScan' as const
+   StorageScan: 'StorageScan' as const,
+   TournamentCreated: 'TournamentCreated' as const,
+   TournamentReminder: 'TournamentReminder' as const
 }
 
 export const enumENotificationTypesSelectColumn = {
@@ -123608,6 +124735,51 @@ export const enumPluginVersionsUpdateColumn = {
    published_at: 'published_at' as const,
    runtime: 'runtime' as const,
    version: 'version' as const
+}
+
+export const enumPushNotificationPreferencesConstraint = {
+   push_notification_preferences_pkey: 'push_notification_preferences_pkey' as const
+}
+
+export const enumPushNotificationPreferencesSelectColumn = {
+   category: 'category' as const,
+   enabled: 'enabled' as const,
+   steam_id: 'steam_id' as const,
+   updated_at: 'updated_at' as const
+}
+
+export const enumPushNotificationPreferencesUpdateColumn = {
+   category: 'category' as const,
+   enabled: 'enabled' as const,
+   steam_id: 'steam_id' as const,
+   updated_at: 'updated_at' as const
+}
+
+export const enumPushSubscriptionsConstraint = {
+   push_subscriptions_endpoint_key: 'push_subscriptions_endpoint_key' as const,
+   push_subscriptions_pkey: 'push_subscriptions_pkey' as const
+}
+
+export const enumPushSubscriptionsSelectColumn = {
+   auth: 'auth' as const,
+   created_at: 'created_at' as const,
+   endpoint: 'endpoint' as const,
+   id: 'id' as const,
+   last_used_at: 'last_used_at' as const,
+   p256dh: 'p256dh' as const,
+   steam_id: 'steam_id' as const,
+   user_agent: 'user_agent' as const
+}
+
+export const enumPushSubscriptionsUpdateColumn = {
+   auth: 'auth' as const,
+   created_at: 'created_at' as const,
+   endpoint: 'endpoint' as const,
+   id: 'id' as const,
+   last_used_at: 'last_used_at' as const,
+   p256dh: 'p256dh' as const,
+   steam_id: 'steam_id' as const,
+   user_agent: 'user_agent' as const
 }
 
 export const enumSeasonsConstraint = {

@@ -11875,6 +11875,9 @@ enum e_notification_types_constraint {
 }
 
 enum e_notification_types_enum {
+  """New chat message"""
+  ChatMessage
+
   """DedicatedServerRconStatus"""
   DedicatedServerRconStatus
 
@@ -11964,6 +11967,12 @@ enum e_notification_types_enum {
 
   """Storage Scan"""
   StorageScan
+
+  """A new tournament was created"""
+  TournamentCreated
+
+  """A tournament you are registered for starts soon"""
+  TournamentReminder
 }
 
 """
@@ -38977,6 +38986,32 @@ type mutation_root {
   delete_plugin_versions_by_pk(runtime: e_plugin_runtimes_enum!, version: String!): plugin_versions
 
   """
+  delete data from the table: "push_notification_preferences"
+  """
+  delete_push_notification_preferences(
+    """filter the rows which have to be deleted"""
+    where: push_notification_preferences_bool_exp!
+  ): push_notification_preferences_mutation_response
+
+  """
+  delete single row from the table: "push_notification_preferences"
+  """
+  delete_push_notification_preferences_by_pk(category: String!, steam_id: bigint!): push_notification_preferences
+
+  """
+  delete data from the table: "push_subscriptions"
+  """
+  delete_push_subscriptions(
+    """filter the rows which have to be deleted"""
+    where: push_subscriptions_bool_exp!
+  ): push_subscriptions_mutation_response
+
+  """
+  delete single row from the table: "push_subscriptions"
+  """
+  delete_push_subscriptions_by_pk(id: uuid!): push_subscriptions
+
+  """
   delete data from the table: "seasons"
   """
   delete_seasons(
@@ -42170,6 +42205,50 @@ type mutation_root {
     """upsert condition"""
     on_conflict: plugin_versions_on_conflict
   ): plugin_versions
+
+  """
+  insert data into the table: "push_notification_preferences"
+  """
+  insert_push_notification_preferences(
+    """the rows to be inserted"""
+    objects: [push_notification_preferences_insert_input!]!
+
+    """upsert condition"""
+    on_conflict: push_notification_preferences_on_conflict
+  ): push_notification_preferences_mutation_response
+
+  """
+  insert a single row into the table: "push_notification_preferences"
+  """
+  insert_push_notification_preferences_one(
+    """the row to be inserted"""
+    object: push_notification_preferences_insert_input!
+
+    """upsert condition"""
+    on_conflict: push_notification_preferences_on_conflict
+  ): push_notification_preferences
+
+  """
+  insert data into the table: "push_subscriptions"
+  """
+  insert_push_subscriptions(
+    """the rows to be inserted"""
+    objects: [push_subscriptions_insert_input!]!
+
+    """upsert condition"""
+    on_conflict: push_subscriptions_on_conflict
+  ): push_subscriptions_mutation_response
+
+  """
+  insert a single row into the table: "push_subscriptions"
+  """
+  insert_push_subscriptions_one(
+    """the row to be inserted"""
+    object: push_subscriptions_insert_input!
+
+    """upsert condition"""
+    on_conflict: push_subscriptions_on_conflict
+  ): push_subscriptions
 
   """
   insert data into the table: "seasons"
@@ -47628,6 +47707,74 @@ type mutation_root {
     """updates to execute, in order"""
     updates: [plugin_versions_updates!]!
   ): [plugin_versions_mutation_response]
+
+  """
+  update data of the table: "push_notification_preferences"
+  """
+  update_push_notification_preferences(
+    """increments the numeric columns with given value of the filtered values"""
+    _inc: push_notification_preferences_inc_input
+
+    """sets the columns of the filtered rows to the given values"""
+    _set: push_notification_preferences_set_input
+
+    """filter the rows which have to be updated"""
+    where: push_notification_preferences_bool_exp!
+  ): push_notification_preferences_mutation_response
+
+  """
+  update single row of the table: "push_notification_preferences"
+  """
+  update_push_notification_preferences_by_pk(
+    """increments the numeric columns with given value of the filtered values"""
+    _inc: push_notification_preferences_inc_input
+
+    """sets the columns of the filtered rows to the given values"""
+    _set: push_notification_preferences_set_input
+    pk_columns: push_notification_preferences_pk_columns_input!
+  ): push_notification_preferences
+
+  """
+  update multiples rows of table: "push_notification_preferences"
+  """
+  update_push_notification_preferences_many(
+    """updates to execute, in order"""
+    updates: [push_notification_preferences_updates!]!
+  ): [push_notification_preferences_mutation_response]
+
+  """
+  update data of the table: "push_subscriptions"
+  """
+  update_push_subscriptions(
+    """increments the numeric columns with given value of the filtered values"""
+    _inc: push_subscriptions_inc_input
+
+    """sets the columns of the filtered rows to the given values"""
+    _set: push_subscriptions_set_input
+
+    """filter the rows which have to be updated"""
+    where: push_subscriptions_bool_exp!
+  ): push_subscriptions_mutation_response
+
+  """
+  update single row of the table: "push_subscriptions"
+  """
+  update_push_subscriptions_by_pk(
+    """increments the numeric columns with given value of the filtered values"""
+    _inc: push_subscriptions_inc_input
+
+    """sets the columns of the filtered rows to the given values"""
+    _set: push_subscriptions_set_input
+    pk_columns: push_subscriptions_pk_columns_input!
+  ): push_subscriptions
+
+  """
+  update multiples rows of table: "push_subscriptions"
+  """
+  update_push_subscriptions_many(
+    """updates to execute, in order"""
+    updates: [push_subscriptions_updates!]!
+  ): [push_subscriptions_mutation_response]
 
   """
   update data of the table: "seasons"
@@ -70391,6 +70538,544 @@ type plugin_versions_variance_fields {
   min_game_build_id: Float
 }
 
+"""
+columns and relationships of "push_notification_preferences"
+"""
+type push_notification_preferences {
+  category: String!
+  enabled: Boolean!
+  steam_id: bigint!
+  updated_at: timestamptz!
+}
+
+"""
+aggregated selection of "push_notification_preferences"
+"""
+type push_notification_preferences_aggregate {
+  aggregate: push_notification_preferences_aggregate_fields
+  nodes: [push_notification_preferences!]!
+}
+
+"""
+aggregate fields of "push_notification_preferences"
+"""
+type push_notification_preferences_aggregate_fields {
+  avg: push_notification_preferences_avg_fields
+  count(columns: [push_notification_preferences_select_column!], distinct: Boolean): Int!
+  max: push_notification_preferences_max_fields
+  min: push_notification_preferences_min_fields
+  stddev: push_notification_preferences_stddev_fields
+  stddev_pop: push_notification_preferences_stddev_pop_fields
+  stddev_samp: push_notification_preferences_stddev_samp_fields
+  sum: push_notification_preferences_sum_fields
+  var_pop: push_notification_preferences_var_pop_fields
+  var_samp: push_notification_preferences_var_samp_fields
+  variance: push_notification_preferences_variance_fields
+}
+
+"""aggregate avg on columns"""
+type push_notification_preferences_avg_fields {
+  steam_id: Float
+}
+
+"""
+Boolean expression to filter rows from the table "push_notification_preferences". All fields are combined with a logical 'AND'.
+"""
+input push_notification_preferences_bool_exp {
+  _and: [push_notification_preferences_bool_exp!]
+  _not: push_notification_preferences_bool_exp
+  _or: [push_notification_preferences_bool_exp!]
+  category: String_comparison_exp
+  enabled: Boolean_comparison_exp
+  steam_id: bigint_comparison_exp
+  updated_at: timestamptz_comparison_exp
+}
+
+"""
+unique or primary key constraints on table "push_notification_preferences"
+"""
+enum push_notification_preferences_constraint {
+  """
+  unique or primary key constraint on columns "steam_id", "category"
+  """
+  push_notification_preferences_pkey
+}
+
+"""
+input type for incrementing numeric columns in table "push_notification_preferences"
+"""
+input push_notification_preferences_inc_input {
+  steam_id: bigint
+}
+
+"""
+input type for inserting data into table "push_notification_preferences"
+"""
+input push_notification_preferences_insert_input {
+  category: String
+  enabled: Boolean
+  steam_id: bigint
+  updated_at: timestamptz
+}
+
+"""aggregate max on columns"""
+type push_notification_preferences_max_fields {
+  category: String
+  steam_id: bigint
+  updated_at: timestamptz
+}
+
+"""aggregate min on columns"""
+type push_notification_preferences_min_fields {
+  category: String
+  steam_id: bigint
+  updated_at: timestamptz
+}
+
+"""
+response of any mutation on the table "push_notification_preferences"
+"""
+type push_notification_preferences_mutation_response {
+  """number of rows affected by the mutation"""
+  affected_rows: Int!
+
+  """data from the rows affected by the mutation"""
+  returning: [push_notification_preferences!]!
+}
+
+"""
+on_conflict condition type for table "push_notification_preferences"
+"""
+input push_notification_preferences_on_conflict {
+  constraint: push_notification_preferences_constraint!
+  update_columns: [push_notification_preferences_update_column!]! = []
+  where: push_notification_preferences_bool_exp
+}
+
+"""
+Ordering options when selecting data from "push_notification_preferences".
+"""
+input push_notification_preferences_order_by {
+  category: order_by
+  enabled: order_by
+  steam_id: order_by
+  updated_at: order_by
+}
+
+"""primary key columns input for table: push_notification_preferences"""
+input push_notification_preferences_pk_columns_input {
+  category: String!
+  steam_id: bigint!
+}
+
+"""
+select columns of table "push_notification_preferences"
+"""
+enum push_notification_preferences_select_column {
+  """column name"""
+  category
+
+  """column name"""
+  enabled
+
+  """column name"""
+  steam_id
+
+  """column name"""
+  updated_at
+}
+
+"""
+input type for updating data in table "push_notification_preferences"
+"""
+input push_notification_preferences_set_input {
+  category: String
+  enabled: Boolean
+  steam_id: bigint
+  updated_at: timestamptz
+}
+
+"""aggregate stddev on columns"""
+type push_notification_preferences_stddev_fields {
+  steam_id: Float
+}
+
+"""aggregate stddev_pop on columns"""
+type push_notification_preferences_stddev_pop_fields {
+  steam_id: Float
+}
+
+"""aggregate stddev_samp on columns"""
+type push_notification_preferences_stddev_samp_fields {
+  steam_id: Float
+}
+
+"""
+Streaming cursor of the table "push_notification_preferences"
+"""
+input push_notification_preferences_stream_cursor_input {
+  """Stream column input with initial value"""
+  initial_value: push_notification_preferences_stream_cursor_value_input!
+
+  """cursor ordering"""
+  ordering: cursor_ordering
+}
+
+"""Initial value of the column from where the streaming should start"""
+input push_notification_preferences_stream_cursor_value_input {
+  category: String
+  enabled: Boolean
+  steam_id: bigint
+  updated_at: timestamptz
+}
+
+"""aggregate sum on columns"""
+type push_notification_preferences_sum_fields {
+  steam_id: bigint
+}
+
+"""
+update columns of table "push_notification_preferences"
+"""
+enum push_notification_preferences_update_column {
+  """column name"""
+  category
+
+  """column name"""
+  enabled
+
+  """column name"""
+  steam_id
+
+  """column name"""
+  updated_at
+}
+
+input push_notification_preferences_updates {
+  """increments the numeric columns with given value of the filtered values"""
+  _inc: push_notification_preferences_inc_input
+
+  """sets the columns of the filtered rows to the given values"""
+  _set: push_notification_preferences_set_input
+
+  """filter the rows which have to be updated"""
+  where: push_notification_preferences_bool_exp!
+}
+
+"""aggregate var_pop on columns"""
+type push_notification_preferences_var_pop_fields {
+  steam_id: Float
+}
+
+"""aggregate var_samp on columns"""
+type push_notification_preferences_var_samp_fields {
+  steam_id: Float
+}
+
+"""aggregate variance on columns"""
+type push_notification_preferences_variance_fields {
+  steam_id: Float
+}
+
+"""
+columns and relationships of "push_subscriptions"
+"""
+type push_subscriptions {
+  auth: String!
+  created_at: timestamptz!
+  endpoint: String!
+  id: uuid!
+  last_used_at: timestamptz
+  p256dh: String!
+  steam_id: bigint!
+  user_agent: String
+}
+
+"""
+aggregated selection of "push_subscriptions"
+"""
+type push_subscriptions_aggregate {
+  aggregate: push_subscriptions_aggregate_fields
+  nodes: [push_subscriptions!]!
+}
+
+"""
+aggregate fields of "push_subscriptions"
+"""
+type push_subscriptions_aggregate_fields {
+  avg: push_subscriptions_avg_fields
+  count(columns: [push_subscriptions_select_column!], distinct: Boolean): Int!
+  max: push_subscriptions_max_fields
+  min: push_subscriptions_min_fields
+  stddev: push_subscriptions_stddev_fields
+  stddev_pop: push_subscriptions_stddev_pop_fields
+  stddev_samp: push_subscriptions_stddev_samp_fields
+  sum: push_subscriptions_sum_fields
+  var_pop: push_subscriptions_var_pop_fields
+  var_samp: push_subscriptions_var_samp_fields
+  variance: push_subscriptions_variance_fields
+}
+
+"""aggregate avg on columns"""
+type push_subscriptions_avg_fields {
+  steam_id: Float
+}
+
+"""
+Boolean expression to filter rows from the table "push_subscriptions". All fields are combined with a logical 'AND'.
+"""
+input push_subscriptions_bool_exp {
+  _and: [push_subscriptions_bool_exp!]
+  _not: push_subscriptions_bool_exp
+  _or: [push_subscriptions_bool_exp!]
+  auth: String_comparison_exp
+  created_at: timestamptz_comparison_exp
+  endpoint: String_comparison_exp
+  id: uuid_comparison_exp
+  last_used_at: timestamptz_comparison_exp
+  p256dh: String_comparison_exp
+  steam_id: bigint_comparison_exp
+  user_agent: String_comparison_exp
+}
+
+"""
+unique or primary key constraints on table "push_subscriptions"
+"""
+enum push_subscriptions_constraint {
+  """
+  unique or primary key constraint on columns "endpoint"
+  """
+  push_subscriptions_endpoint_key
+
+  """
+  unique or primary key constraint on columns "id"
+  """
+  push_subscriptions_pkey
+}
+
+"""
+input type for incrementing numeric columns in table "push_subscriptions"
+"""
+input push_subscriptions_inc_input {
+  steam_id: bigint
+}
+
+"""
+input type for inserting data into table "push_subscriptions"
+"""
+input push_subscriptions_insert_input {
+  auth: String
+  created_at: timestamptz
+  endpoint: String
+  id: uuid
+  last_used_at: timestamptz
+  p256dh: String
+  steam_id: bigint
+  user_agent: String
+}
+
+"""aggregate max on columns"""
+type push_subscriptions_max_fields {
+  auth: String
+  created_at: timestamptz
+  endpoint: String
+  id: uuid
+  last_used_at: timestamptz
+  p256dh: String
+  steam_id: bigint
+  user_agent: String
+}
+
+"""aggregate min on columns"""
+type push_subscriptions_min_fields {
+  auth: String
+  created_at: timestamptz
+  endpoint: String
+  id: uuid
+  last_used_at: timestamptz
+  p256dh: String
+  steam_id: bigint
+  user_agent: String
+}
+
+"""
+response of any mutation on the table "push_subscriptions"
+"""
+type push_subscriptions_mutation_response {
+  """number of rows affected by the mutation"""
+  affected_rows: Int!
+
+  """data from the rows affected by the mutation"""
+  returning: [push_subscriptions!]!
+}
+
+"""
+on_conflict condition type for table "push_subscriptions"
+"""
+input push_subscriptions_on_conflict {
+  constraint: push_subscriptions_constraint!
+  update_columns: [push_subscriptions_update_column!]! = []
+  where: push_subscriptions_bool_exp
+}
+
+"""Ordering options when selecting data from "push_subscriptions"."""
+input push_subscriptions_order_by {
+  auth: order_by
+  created_at: order_by
+  endpoint: order_by
+  id: order_by
+  last_used_at: order_by
+  p256dh: order_by
+  steam_id: order_by
+  user_agent: order_by
+}
+
+"""primary key columns input for table: push_subscriptions"""
+input push_subscriptions_pk_columns_input {
+  id: uuid!
+}
+
+"""
+select columns of table "push_subscriptions"
+"""
+enum push_subscriptions_select_column {
+  """column name"""
+  auth
+
+  """column name"""
+  created_at
+
+  """column name"""
+  endpoint
+
+  """column name"""
+  id
+
+  """column name"""
+  last_used_at
+
+  """column name"""
+  p256dh
+
+  """column name"""
+  steam_id
+
+  """column name"""
+  user_agent
+}
+
+"""
+input type for updating data in table "push_subscriptions"
+"""
+input push_subscriptions_set_input {
+  auth: String
+  created_at: timestamptz
+  endpoint: String
+  id: uuid
+  last_used_at: timestamptz
+  p256dh: String
+  steam_id: bigint
+  user_agent: String
+}
+
+"""aggregate stddev on columns"""
+type push_subscriptions_stddev_fields {
+  steam_id: Float
+}
+
+"""aggregate stddev_pop on columns"""
+type push_subscriptions_stddev_pop_fields {
+  steam_id: Float
+}
+
+"""aggregate stddev_samp on columns"""
+type push_subscriptions_stddev_samp_fields {
+  steam_id: Float
+}
+
+"""
+Streaming cursor of the table "push_subscriptions"
+"""
+input push_subscriptions_stream_cursor_input {
+  """Stream column input with initial value"""
+  initial_value: push_subscriptions_stream_cursor_value_input!
+
+  """cursor ordering"""
+  ordering: cursor_ordering
+}
+
+"""Initial value of the column from where the streaming should start"""
+input push_subscriptions_stream_cursor_value_input {
+  auth: String
+  created_at: timestamptz
+  endpoint: String
+  id: uuid
+  last_used_at: timestamptz
+  p256dh: String
+  steam_id: bigint
+  user_agent: String
+}
+
+"""aggregate sum on columns"""
+type push_subscriptions_sum_fields {
+  steam_id: bigint
+}
+
+"""
+update columns of table "push_subscriptions"
+"""
+enum push_subscriptions_update_column {
+  """column name"""
+  auth
+
+  """column name"""
+  created_at
+
+  """column name"""
+  endpoint
+
+  """column name"""
+  id
+
+  """column name"""
+  last_used_at
+
+  """column name"""
+  p256dh
+
+  """column name"""
+  steam_id
+
+  """column name"""
+  user_agent
+}
+
+input push_subscriptions_updates {
+  """increments the numeric columns with given value of the filtered values"""
+  _inc: push_subscriptions_inc_input
+
+  """sets the columns of the filtered rows to the given values"""
+  _set: push_subscriptions_set_input
+
+  """filter the rows which have to be updated"""
+  where: push_subscriptions_bool_exp!
+}
+
+"""aggregate var_pop on columns"""
+type push_subscriptions_var_pop_fields {
+  steam_id: Float
+}
+
+"""aggregate var_samp on columns"""
+type push_subscriptions_var_samp_fields {
+  steam_id: Float
+}
+
+"""aggregate variance on columns"""
+type push_subscriptions_variance_fields {
+  steam_id: Float
+}
+
 type query_root {
   """
   fetch data from the table: "_map_pool"
@@ -76334,6 +77019,96 @@ type query_root {
 
   """fetch data from the table: "plugin_versions" using primary key columns"""
   plugin_versions_by_pk(runtime: e_plugin_runtimes_enum!, version: String!): plugin_versions
+
+  """
+  fetch data from the table: "push_notification_preferences"
+  """
+  push_notification_preferences(
+    """distinct select on columns"""
+    distinct_on: [push_notification_preferences_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [push_notification_preferences_order_by!]
+
+    """filter the rows returned"""
+    where: push_notification_preferences_bool_exp
+  ): [push_notification_preferences!]!
+
+  """
+  fetch aggregated fields from the table: "push_notification_preferences"
+  """
+  push_notification_preferences_aggregate(
+    """distinct select on columns"""
+    distinct_on: [push_notification_preferences_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [push_notification_preferences_order_by!]
+
+    """filter the rows returned"""
+    where: push_notification_preferences_bool_exp
+  ): push_notification_preferences_aggregate!
+
+  """
+  fetch data from the table: "push_notification_preferences" using primary key columns
+  """
+  push_notification_preferences_by_pk(category: String!, steam_id: bigint!): push_notification_preferences
+
+  """
+  fetch data from the table: "push_subscriptions"
+  """
+  push_subscriptions(
+    """distinct select on columns"""
+    distinct_on: [push_subscriptions_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [push_subscriptions_order_by!]
+
+    """filter the rows returned"""
+    where: push_subscriptions_bool_exp
+  ): [push_subscriptions!]!
+
+  """
+  fetch aggregated fields from the table: "push_subscriptions"
+  """
+  push_subscriptions_aggregate(
+    """distinct select on columns"""
+    distinct_on: [push_subscriptions_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [push_subscriptions_order_by!]
+
+    """filter the rows returned"""
+    where: push_subscriptions_bool_exp
+  ): push_subscriptions_aggregate!
+
+  """
+  fetch data from the table: "push_subscriptions" using primary key columns
+  """
+  push_subscriptions_by_pk(id: uuid!): push_subscriptions
 
   """Read file content from game server"""
   readServerFile(file_path: String!, node_id: String!, server_id: String): FileContentResponse!
@@ -89066,6 +89841,124 @@ type subscription_root {
     """filter the rows returned"""
     where: plugin_versions_bool_exp
   ): [plugin_versions!]!
+
+  """
+  fetch data from the table: "push_notification_preferences"
+  """
+  push_notification_preferences(
+    """distinct select on columns"""
+    distinct_on: [push_notification_preferences_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [push_notification_preferences_order_by!]
+
+    """filter the rows returned"""
+    where: push_notification_preferences_bool_exp
+  ): [push_notification_preferences!]!
+
+  """
+  fetch aggregated fields from the table: "push_notification_preferences"
+  """
+  push_notification_preferences_aggregate(
+    """distinct select on columns"""
+    distinct_on: [push_notification_preferences_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [push_notification_preferences_order_by!]
+
+    """filter the rows returned"""
+    where: push_notification_preferences_bool_exp
+  ): push_notification_preferences_aggregate!
+
+  """
+  fetch data from the table: "push_notification_preferences" using primary key columns
+  """
+  push_notification_preferences_by_pk(category: String!, steam_id: bigint!): push_notification_preferences
+
+  """
+  fetch data from the table in a streaming manner: "push_notification_preferences"
+  """
+  push_notification_preferences_stream(
+    """maximum number of rows returned in a single batch"""
+    batch_size: Int!
+
+    """cursor to stream the results returned by the query"""
+    cursor: [push_notification_preferences_stream_cursor_input]!
+
+    """filter the rows returned"""
+    where: push_notification_preferences_bool_exp
+  ): [push_notification_preferences!]!
+
+  """
+  fetch data from the table: "push_subscriptions"
+  """
+  push_subscriptions(
+    """distinct select on columns"""
+    distinct_on: [push_subscriptions_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [push_subscriptions_order_by!]
+
+    """filter the rows returned"""
+    where: push_subscriptions_bool_exp
+  ): [push_subscriptions!]!
+
+  """
+  fetch aggregated fields from the table: "push_subscriptions"
+  """
+  push_subscriptions_aggregate(
+    """distinct select on columns"""
+    distinct_on: [push_subscriptions_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [push_subscriptions_order_by!]
+
+    """filter the rows returned"""
+    where: push_subscriptions_bool_exp
+  ): push_subscriptions_aggregate!
+
+  """
+  fetch data from the table: "push_subscriptions" using primary key columns
+  """
+  push_subscriptions_by_pk(id: uuid!): push_subscriptions
+
+  """
+  fetch data from the table in a streaming manner: "push_subscriptions"
+  """
+  push_subscriptions_stream(
+    """maximum number of rows returned in a single batch"""
+    batch_size: Int!
+
+    """cursor to stream the results returned by the query"""
+    cursor: [push_subscriptions_stream_cursor_input]!
+
+    """filter the rows returned"""
+    where: push_subscriptions_bool_exp
+  ): [push_subscriptions!]!
 
   """
   fetch data from the table: "seasons"

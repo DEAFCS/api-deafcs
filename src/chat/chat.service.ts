@@ -416,7 +416,7 @@ export class ChatService {
     // people with an open socket to this exact channel -- i.e. already
     // seeing the message live, so they're excluded rather than targeted).
     // A failure here must never break message delivery, hence the catch.
-    void this.notifyOfflineLobbyMembers(type, id, player, _message).catch(
+    void this.notifyLobbyMembers(type, id, player, _message).catch(
       (error) =>
         this.logger.warn(
           `[chat] push notify failed for ${type}:${id}: ${(error as Error)?.message}`,
@@ -424,24 +424,26 @@ export class ChatService {
     );
   }
 
-  private async notifyOfflineLobbyMembers(
+  // Deliberately does NOT try to exclude members who are "present" --
+  // getAllUsersInLobby tracks whether a client is connected to this lobby
+  // at all (tied to the chat widget's mount lifecycle), not whether
+  // someone actually has eyes on this specific message right now. On
+  // match/tournament pages the lobby connection can outlive the chat
+  // panel being open, which silently suppressed push for anyone who'd
+  // merely visited the page earlier. Always notifying every other member
+  // costs an occasional redundant push while actively chatting, which is
+  // a far smaller problem than never notifying at all.
+  private async notifyLobbyMembers(
     type: ChatLobbyType,
     id: string,
     sender: User,
     message: string,
   ): Promise<void> {
-    const [members, present] = await Promise.all([
-      this.getLobbyMemberSteamIds(type, id),
-      this.getAllUsersInLobby(type, id),
-    ]);
-
+    const members = await this.getLobbyMemberSteamIds(type, id);
     if (!members.length) return;
 
-    const presentIds = new Set(present.map((u) => String(u.steamId)));
     const senderId = String(sender.steam_id);
-    const targets = members.filter(
-      (steamId) => steamId !== senderId && !presentIds.has(steamId),
-    );
+    const targets = members.filter((steamId) => steamId !== senderId);
 
     if (!targets.length) return;
 
