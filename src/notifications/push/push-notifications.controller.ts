@@ -42,6 +42,27 @@ export class PushNotificationsController {
     return { publicKey: this.pushNotifications.getPublicKey() };
   }
 
+  @Get("categories")
+  public getCategories() {
+    return { categories: this.pushNotifications.getCategories() };
+  }
+
+  @Get("preferences")
+  public async getPreferences(@Req() request: Request) {
+    const user = this.requireUser(request);
+    return { preferences: await this.pushNotifications.getPreferences(user.steam_id) };
+  }
+
+  @Post("preferences")
+  public async setPreference(
+    @Req() request: Request,
+    @Body() body: { category: string; enabled: boolean },
+  ) {
+    const user = this.requireUser(request);
+    await this.pushNotifications.setPreference(user.steam_id, body.category, body.enabled);
+    return { success: true };
+  }
+
   @Post("subscribe")
   public async subscribe(
     @Req() request: Request,

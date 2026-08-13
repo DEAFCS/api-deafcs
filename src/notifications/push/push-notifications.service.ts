@@ -3,6 +3,10 @@ import * as webPush from "web-push";
 import { PostgresService } from "../../postgres/postgres.service";
 import { isRoleAbove } from "../../utilities/isRoleAbove";
 import { e_player_roles_enum } from "generated";
+import {
+  NOTIFICATION_CATEGORY_KEYS,
+  categoryForType,
+} from "./notification-categories";
 
 export type PushSubscriptionPayload = {
   endpoint: string;
@@ -79,6 +83,41 @@ export class PushNotificationsService {
     );
   }
 
+  public getCategories(): string[] {
+    return NOTIFICATION_CATEGORY_KEYS;
+  }
+
+  // Absence of a row means enabled -- see push_notification_preferences'
+  // migration comment. Every known category is included in the result
+  // even if the player has never touched one, so the frontend never has
+  // to guess a default.
+  public async getPreferences(steamId: string): Promise<Record<string, boolean>> {
+    const rows = await this.postgres.query<Array<{ category: string; enabled: boolean }>>(
+      `SELECT category, enabled FROM public.push_notification_preferences WHERE steam_id = $1`,
+      [steamId],
+    );
+    const disabled = new Set(rows.filter((r) => !r.enabled).map((r) => r.category));
+    return Object.fromEntries(
+      NOTIFICATION_CATEGORY_KEYS.map((category) => [category, !disabled.has(category)]),
+    );
+  }
+
+  public async setPreference(
+    steamId: string,
+    category: string,
+    enabled: boolean,
+  ): Promise<void> {
+    if (!NOTIFICATION_CATEGORY_KEYS.includes(category)) {
+      throw new Error(`unknown notification category: ${category}`);
+    }
+    await this.postgres.query(
+      `INSERT INTO public.push_notification_preferences (steam_id, category, enabled)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (steam_id, category) DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = now()`,
+      [steamId, category, enabled],
+    );
+  }
+
   // Called by the Hasura event trigger (see PushNotificationsController)
   // on every INSERT into `notifications`. Targeted (steam_id set) rows
   // send to just that player's devices; broadcast (steam_id null) rows
@@ -116,6 +155,12 @@ export class PushNotificationsService {
 
     if (!rows.length) return;
 
+    const category = categoryForType(notification.type);
+    if (category) {
+      rows = await this.filterByPreference(rows, category);
+      if (!rows.length) return;
+    }
+
     const payload = JSON.stringify({
       title: notification.title,
       body: notification.message,
@@ -124,6 +169,21 @@ export class PushNotificationsService {
     });
 
     await Promise.all(rows.map((row) => this.sendToSubscription(row, payload)));
+  }
+
+  private async filterByPreference(
+    rows: SubscriptionRow[],
+    category: string,
+  ): Promise<SubscriptionRow[]> {
+    const steamIds = [...new Set(rows.map((r) => r.steam_id))];
+    const disabledRows = await this.postgres.query<Array<{ steam_id: string }>>(
+      `SELECT steam_id FROM public.push_notification_preferences
+       WHERE category = $1 AND enabled = false AND steam_id = ANY($2)`,
+      [category, steamIds],
+    );
+    if (!disabledRows.length) return rows;
+    const disabled = new Set(disabledRows.map((r) => r.steam_id));
+    return rows.filter((row) => !disabled.has(row.steam_id));
   }
 
   private async sendToSubscription(row: SubscriptionRow, payload: string): Promise<void> {

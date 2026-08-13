@@ -7,6 +7,7 @@ import { DiscordTournamentVoiceModule } from "../discord-bot/discord-tournament-
 import { PostgresModule } from "../postgres/postgres.module";
 import { AwardsModule } from "../awards/awards.module";
 import { loggerFactory } from "../utilities/LoggerFactory";
+import { NotificationsModule } from "../notifications/notifications.module";
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { loggerFactory } from "../utilities/LoggerFactory";
     DiscordTournamentVoiceModule,
     PostgresModule,
     AwardsModule,
+    NotificationsModule,
   ],
   controllers: [TournamentsController],
   providers: [loggerFactory()],

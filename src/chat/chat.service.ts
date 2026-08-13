@@ -6,8 +6,9 @@ import { HasuraService } from "../hasura/hasura.service";
 import { RconService } from "../rcon/rcon.service";
 import { FiveStackWebSocketClient } from "src/sockets/types/FiveStackWebSocketClient";
 import { ChatLobbyType } from "./enums/ChatLobbyTypes";
-import { e_player_roles_enum } from "generated/schema";
+import { e_player_roles_enum, e_notification_types_enum } from "generated/schema";
 import { isRoleAbove } from "src/utilities/isRoleAbove";
+import { NotificationsService } from "../notifications/notifications.service";
 @Injectable()
 export class ChatService {
   private redis: Redis;
@@ -19,6 +20,7 @@ export class ChatService {
     private readonly rcon: RconService,
     private readonly hasuraService: HasuraService,
     private readonly redisManager: RedisManagerService,
+    private readonly notifications: NotificationsService,
   ) {
     this.redis = this.redisManager.getConnection();
   }
@@ -408,6 +410,182 @@ export class ChatService {
     );
 
     void this.to(type, id, "chat", message);
+
+    // Best-effort push for anyone who's a member of this lobby but isn't
+    // currently connected to it (getAllUsersInLobby only ever holds
+    // people with an open socket to this exact channel -- i.e. already
+    // seeing the message live, so they're excluded rather than targeted).
+    // A failure here must never break message delivery, hence the catch.
+    void this.notifyOfflineLobbyMembers(type, id, player, _message).catch(
+      (error) =>
+        this.logger.warn(
+          `[chat] push notify failed for ${type}:${id}: ${(error as Error)?.message}`,
+        ),
+    );
+  }
+
+  private async notifyOfflineLobbyMembers(
+    type: ChatLobbyType,
+    id: string,
+    sender: User,
+    message: string,
+  ): Promise<void> {
+    const [members, present] = await Promise.all([
+      this.getLobbyMemberSteamIds(type, id),
+      this.getAllUsersInLobby(type, id),
+    ]);
+
+    if (!members.length) return;
+
+    const presentIds = new Set(present.map((u) => String(u.steamId)));
+    const senderId = String(sender.steam_id);
+    const targets = members.filter(
+      (steamId) => steamId !== senderId && !presentIds.has(steamId),
+    );
+
+    if (!targets.length) return;
+
+    await this.notifications.notifyPlayers(
+      "ChatMessage" as unknown as e_notification_types_enum,
+      {
+        title: sender.name || "New message",
+        message: message.length > 200 ? `${message.slice(0, 200)}…` : message,
+        role: "user" as e_player_roles_enum,
+        entity_id: `${type}:${id}`,
+        steamIds: targets,
+      },
+    );
+  }
+
+  // Resolves the fixed member roster for a lobby (distinct from
+  // getAllUsersInLobby, which only tracks who's currently connected) so
+  // push notifications can reach people who are members but not actively
+  // viewing this chat right now. Mirrors joinMatchLobby's membership
+  // checks above, but returns the whole roster instead of validating one
+  // user against it.
+  private async getLobbyMemberSteamIds(
+    type: ChatLobbyType,
+    id: string,
+  ): Promise<string[]> {
+    switch (type) {
+      case ChatLobbyType.Match: {
+        const { matches_by_pk } = await this.hasuraService.query({
+          matches_by_pk: {
+            __args: { id },
+            organizer_steam_id: true,
+            lineup_1: {
+              coach_steam_id: true,
+              lineup_players: { steam_id: true },
+            },
+            lineup_2: {
+              coach_steam_id: true,
+              lineup_players: { steam_id: true },
+            },
+          },
+        });
+        if (!matches_by_pk) return [];
+
+        const ids = new Set<string>();
+        if (matches_by_pk.organizer_steam_id) {
+          ids.add(String(matches_by_pk.organizer_steam_id));
+        }
+        for (const lineup of [matches_by_pk.lineup_1, matches_by_pk.lineup_2]) {
+          if (!lineup) continue;
+          if (lineup.coach_steam_id) ids.add(String(lineup.coach_steam_id));
+          for (const lp of lineup.lineup_players ?? []) {
+            ids.add(String(lp.steam_id));
+          }
+        }
+        return [...ids];
+      }
+      case ChatLobbyType.MatchTeam: {
+        const [, lineupId] = id.split(":");
+        if (!lineupId) return [];
+
+        const { match_lineups_by_pk } = await this.hasuraService.query({
+          match_lineups_by_pk: {
+            __args: { id: lineupId },
+            coach_steam_id: true,
+            lineup_players: { steam_id: true },
+          },
+        });
+        if (!match_lineups_by_pk) return [];
+
+        const ids = new Set<string>();
+        if (match_lineups_by_pk.coach_steam_id) {
+          ids.add(String(match_lineups_by_pk.coach_steam_id));
+        }
+        for (const lp of match_lineups_by_pk.lineup_players ?? []) {
+          ids.add(String(lp.steam_id));
+        }
+        return [...ids];
+      }
+      case ChatLobbyType.MatchMaking: {
+        const { lobby_players } = await this.hasuraService.query({
+          lobby_players: {
+            __args: {
+              where: {
+                lobby_id: { _eq: id },
+                status: { _eq: "Accepted" },
+              },
+            },
+            steam_id: true,
+          },
+        });
+        return (lobby_players ?? []).map((p) => String(p.steam_id));
+      }
+      case ChatLobbyType.Tournament: {
+        const { tournament_team_roster, tournaments_by_pk } =
+          await this.hasuraService.query({
+            tournament_team_roster: {
+              __args: { where: { tournament_id: { _eq: id } } },
+              player_steam_id: true,
+            },
+            tournaments_by_pk: {
+              __args: { id },
+              organizer_steam_id: true,
+              organizers: { steam_id: true },
+            },
+          });
+
+        const ids = new Set<string>();
+        for (const roster of tournament_team_roster ?? []) {
+          ids.add(String(roster.player_steam_id));
+        }
+        if (tournaments_by_pk?.organizer_steam_id) {
+          ids.add(String(tournaments_by_pk.organizer_steam_id));
+        }
+        for (const organizer of tournaments_by_pk?.organizers ?? []) {
+          ids.add(String(organizer.steam_id));
+        }
+        return [...ids];
+      }
+      case ChatLobbyType.Draft: {
+        const { draft_games_by_pk } = await this.hasuraService.query({
+          draft_games_by_pk: {
+            __args: { id },
+            host_steam_id: true,
+            players: { steam_id: true },
+          },
+        });
+        if (!draft_games_by_pk) return [];
+
+        const ids = new Set<string>();
+        if (draft_games_by_pk.host_steam_id) {
+          ids.add(String(draft_games_by_pk.host_steam_id));
+        }
+        for (const p of draft_games_by_pk.players ?? []) {
+          ids.add(String(p.steam_id));
+        }
+        return [...ids];
+      }
+      default:
+        // Organizer chat has dynamic, role-based membership rather than a
+        // fixed roster, and Team isn't a reachable channel at all today
+        // (joinMatchLobby's switch has no case for it) -- both
+        // intentionally get no push recipients here.
+        return [];
+    }
   }
 
   public async to(

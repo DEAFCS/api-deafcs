@@ -9,7 +9,8 @@ import { User } from "../auth/types/User";
 import { DiscordTournamentVoiceService } from "../discord-bot/discord-tournament-voice/discord-tournament-voice.service";
 import { PostgresService } from "../postgres/postgres.service";
 import { AwardsService } from "../awards/awards.service";
-import { tournaments_set_input } from "../../generated";
+import { tournaments_set_input, e_notification_types_enum } from "../../generated";
+import { NotificationsService } from "../notifications/notifications.service";
 
 // These tables are newer than the generated GraphQL types; event payloads are
 // typed locally (mirrors the leagues controller).
@@ -34,12 +35,37 @@ export class TournamentsController {
     private readonly tournamentVoice: DiscordTournamentVoiceService,
     private readonly postgres: PostgresService,
     private readonly awards: AwardsService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   @HasuraEvent()
   public async tournament_events(data: HasuraEventData<tournaments_set_input>) {
     const tournamentId = (data.new.id || data.old.id) as string;
     const status = data.new.status as string;
+
+    // "Created" from a player's point of view is really "opened up for
+    // signups" -- broadcasting on the raw table INSERT would announce
+    // tournaments an organizer is still mid-setup on (they start in
+    // Setup and get configured before ever being made public).
+    if (status === "RegistrationOpen" && data.old.status !== "RegistrationOpen") {
+      const name = NotificationsService.escapeHtml(
+        (data.new.name as string) ?? "A tournament",
+      );
+      const start = data.new.start
+        ? new Date(data.new.start as unknown as string).toUTCString()
+        : undefined;
+      await this.notifications.send(
+        "TournamentCreated" as unknown as e_notification_types_enum,
+        {
+          title: "New tournament",
+          message: start
+            ? `<b>${name}</b> is open for signups — starts ${start}.`
+            : `<b>${name}</b> is open for signups.`,
+          role: "user",
+          entity_id: tournamentId,
+        },
+      );
+    }
 
     if (status === "Live" && data.old.status !== "Live") {
       await this.tournamentVoice.createTournamentReadyRoom(tournamentId);
