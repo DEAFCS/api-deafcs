@@ -167,12 +167,31 @@ export class PushNotificationsService {
 
     const payload = JSON.stringify({
       title: notification.title,
-      body: notification.message,
+      // notification.message is authored as HTML for the in-app bell
+      // (links, bold, etc. -- rendered via v-html there). Native OS push
+      // notifications have no HTML renderer, so an unstripped body shows
+      // the raw markup as literal text (e.g. "<a href=...><b>x</b></a>
+      // was published"). Strip tags/entities down to plain text just for
+      // this delivery path; the bell keeps the original HTML message.
+      body: PushNotificationsService.stripHtml(notification.message),
       type: notification.type,
       entity_id: notification.entity_id,
     });
 
     await Promise.all(rows.map((row) => this.sendToSubscription(row, payload)));
+  }
+
+  private static stripHtml(html: string): string {
+    return html
+      .replace(/<[^>]*>/g, "")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   private async filterByPreference(
