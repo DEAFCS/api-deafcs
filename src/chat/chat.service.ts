@@ -210,12 +210,12 @@ export class ChatService {
           return;
         }
 
-        // Admins can DM anyone; everyone else can only DM an accepted
-        // friend -- opening a DM used to only check that the requester
-        // was one of the two parties in the id, which anyone can derive
-        // from any two steam ids (it's just a sorted pair), so this was
-        // the only thing actually stopping unsolicited DMs to strangers.
-        if (!isRoleAbove(user.role, "administrator")) {
+        // Everyone -- including admins -- can only DM an accepted friend.
+        // Opening a DM used to only check that the requester was one of
+        // the two parties in the id, which anyone can derive from any
+        // two steam ids (it's just a sorted pair), so this was the only
+        // thing actually stopping unsolicited DMs to strangers.
+        {
           const otherSteamId = parties.find(
             (p) => p !== String(user.steam_id),
           );
