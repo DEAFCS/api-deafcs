@@ -10,6 +10,8 @@ import { loggerFactory } from "src/utilities/LoggerFactory";
 import { getQueuesProcessors } from "src/utilities/QueueProcessors";
 import { NotificationsQueues } from "./enums/NotificationsQueues";
 import { SendSanctionNotifications } from "./jobs/SendSanctionNotifications";
+import { PushNotificationsService } from "./push/push-notifications.service";
+import { PushNotificationsController } from "./push/push-notifications.controller";
 
 @Module({
   imports: [
@@ -24,12 +26,14 @@ import { SendSanctionNotifications } from "./jobs/SendSanctionNotifications";
       adapter: BullMQAdapter,
     }),
   ],
+  controllers: [PushNotificationsController],
   providers: [
     NotificationsService,
+    PushNotificationsService,
     SendSanctionNotifications,
     ...getQueuesProcessors("Notifications"),
     loggerFactory(),
   ],
-  exports: [NotificationsService],
+  exports: [NotificationsService, PushNotificationsService],
 })
 export class NotificationsModule {}

@@ -129,6 +129,7 @@
 - "!include public_player_utility.yaml"
 - "!include public_players.yaml"
 - "!include public_plugin_versions.yaml"
+- "!include public_push_subscriptions.yaml"
 - "!include public_seasons.yaml"
 - "!include public_server_regions.yaml"
 - "!include public_servers.yaml"
