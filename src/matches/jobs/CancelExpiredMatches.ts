@@ -53,7 +53,14 @@ export class CancelExpiredMatches extends WorkerHost {
         continue;
       }
 
-      await this.banNoShows(match);
+      // Draft matches don't ban for a no-show either, same as tournament
+      // (see DisconnectBudgetSystem/SurrenderSystem on the game-server
+      // side) -- this job only ever excluded tournament matches from the
+      // query itself (is_tournament_match: false), so a draft no-show was
+      // still hitting applyLeaverBan/matchmaking_cooldown here.
+      if (match.draft_games.length === 0) {
+        await this.banNoShows(match);
+      }
       await this.announceCancellation(match);
       matchesToCancel.push(match);
     }
@@ -291,6 +298,9 @@ export class CancelExpiredMatches extends WorkerHost {
         },
         id: true,
         server_id: true,
+        draft_games: {
+          id: true,
+        },
         lineup_1: {
           lineup_players: {
             steam_id: true,
