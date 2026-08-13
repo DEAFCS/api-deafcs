@@ -13,7 +13,7 @@ import { NotificationsService } from "../notifications/notifications.service";
 export class ChatService {
   private redis: Redis;
 
-  private expiresIn = 60 * 60;
+  private expiresIn = 60 * 60 * 24;
 
   constructor(
     private readonly logger: Logger,
