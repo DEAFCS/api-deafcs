@@ -11896,6 +11896,9 @@ enum e_notification_types_enum {
   """GameUpdate"""
   GameUpdate
 
+  """New message in Global Chat"""
+  GlobalChatMessage
+
   """A league matchup is unscheduled and will default soon"""
   LeagueMatchUnscheduled
 

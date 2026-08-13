@@ -261,6 +261,29 @@ export class NotificationsService {
     this.logger.log(`notified banned player ${sanction.steamId}`);
   }
 
+  // Like send(), but never posts to Discord -- for anything high-volume
+  // enough that a Discord webhook would just be spam (e.g. Global Chat,
+  // where every message would otherwise post there).
+  async sendSilent(
+    type: e_notification_types_enum,
+    notification: {
+      message: string;
+      title: string;
+      role: e_player_roles_enum;
+      entity_id?: string;
+      deletable?: boolean;
+    },
+  ) {
+    await this.insertNotification({
+      type,
+      title: notification.title,
+      message: notification.message,
+      role: notification.role,
+      entity_id: notification.entity_id,
+      deletable: notification.deletable,
+    });
+  }
+
   async send(
     type: e_notification_types_enum,
     notification: {

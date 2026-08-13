@@ -6,6 +6,10 @@
 // push_notification_preferences).
 export const NOTIFICATION_CATEGORIES: Record<string, string[]> = {
   chat: ["ChatMessage"],
+  // Separate from `chat` on purpose -- Global Chat is high-traffic, so it
+  // defaults to OFF (see CATEGORY_DEFAULT_ENABLED below) unlike every
+  // other category, which defaults to on.
+  global_chat: ["GlobalChatMessage"],
   tournaments: ["TournamentCreated", "TournamentReminder"],
   matches: ["MatchStatusChange", "MatchImported", "MatchSupport"],
   sanctions: ["PlayerSanctioned"],
@@ -50,6 +54,14 @@ export const NOTIFICATION_CATEGORIES: Record<string, string[]> = {
 };
 
 export const NOTIFICATION_CATEGORY_KEYS = Object.keys(NOTIFICATION_CATEGORIES);
+
+// Every category defaults to enabled (absence of a preference row means
+// "on") except the ones listed here explicitly as opt-in.
+const OPT_IN_CATEGORIES = new Set(["global_chat"]);
+
+export function isCategoryEnabledByDefault(category: string): boolean {
+  return !OPT_IN_CATEGORIES.has(category);
+}
 
 const TYPE_TO_CATEGORY: Record<string, string> = Object.fromEntries(
   Object.entries(NOTIFICATION_CATEGORIES).flatMap(([category, types]) =>

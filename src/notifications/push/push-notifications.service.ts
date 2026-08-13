@@ -6,6 +6,7 @@ import { e_player_roles_enum } from "generated";
 import {
   NOTIFICATION_CATEGORY_KEYS,
   categoryForType,
+  isCategoryEnabledByDefault,
 } from "./notification-categories";
 
 export type PushSubscriptionPayload = {
@@ -87,18 +88,21 @@ export class PushNotificationsService {
     return NOTIFICATION_CATEGORY_KEYS;
   }
 
-  // Absence of a row means enabled -- see push_notification_preferences'
-  // migration comment. Every known category is included in the result
-  // even if the player has never touched one, so the frontend never has
-  // to guess a default.
+  // Absence of a row falls back to isCategoryEnabledByDefault(category) --
+  // true for everything except a short opt-in list (currently just
+  // global_chat). Every known category is included in the result even if
+  // the player has never touched one, so the frontend never has to guess.
   public async getPreferences(steamId: string): Promise<Record<string, boolean>> {
     const rows = await this.postgres.query<Array<{ category: string; enabled: boolean }>>(
       `SELECT category, enabled FROM public.push_notification_preferences WHERE steam_id = $1`,
       [steamId],
     );
-    const disabled = new Set(rows.filter((r) => !r.enabled).map((r) => r.category));
+    const explicit = new Map(rows.map((r) => [r.category, r.enabled]));
     return Object.fromEntries(
-      NOTIFICATION_CATEGORY_KEYS.map((category) => [category, !disabled.has(category)]),
+      NOTIFICATION_CATEGORY_KEYS.map((category) => [
+        category,
+        explicit.get(category) ?? isCategoryEnabledByDefault(category),
+      ]),
     );
   }
 
@@ -176,14 +180,22 @@ export class PushNotificationsService {
     category: string,
   ): Promise<SubscriptionRow[]> {
     const steamIds = [...new Set(rows.map((r) => r.steam_id))];
-    const disabledRows = await this.postgres.query<Array<{ steam_id: string }>>(
-      `SELECT steam_id FROM public.push_notification_preferences
-       WHERE category = $1 AND enabled = false AND steam_id = ANY($2)`,
+    const explicitRows = await this.postgres.query<
+      Array<{ steam_id: string; enabled: boolean }>
+    >(
+      `SELECT steam_id, enabled FROM public.push_notification_preferences
+       WHERE category = $1 AND steam_id = ANY($2)`,
       [category, steamIds],
     );
-    if (!disabledRows.length) return rows;
-    const disabled = new Set(disabledRows.map((r) => r.steam_id));
-    return rows.filter((row) => !disabled.has(row.steam_id));
+    const explicit = new Map(explicitRows.map((r) => [r.steam_id, r.enabled]));
+
+    if (isCategoryEnabledByDefault(category)) {
+      // Default on: send unless explicitly turned off.
+      return rows.filter((row) => explicit.get(row.steam_id) !== false);
+    }
+    // Opt-in category (e.g. global_chat): only send to steamIds with an
+    // explicit enabled=true row.
+    return rows.filter((row) => explicit.get(row.steam_id) === true);
   }
 
   private async sendToSubscription(row: SubscriptionRow, payload: string): Promise<void> {

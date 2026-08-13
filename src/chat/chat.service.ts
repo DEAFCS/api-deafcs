@@ -195,6 +195,12 @@ export class ChatService {
         }
 
         break;
+      case ChatLobbyType.Global:
+        if (!isRoleAbove(user.role, "verified_user")) {
+          return;
+        }
+
+        break;
       default:
         this.logger.warn(`Unknown lobby type: ${type}`);
         return;
@@ -439,6 +445,26 @@ export class ChatService {
     sender: User,
     message: string,
   ): Promise<void> {
+    // Global has no fixed roster (every verified_user+ player is a
+    // "member") -- targeting each of them individually via notifyPlayers
+    // wouldn't scale and would defeat the point of push preferences being
+    // opt-in for this specific channel. Use the same role-broadcast path
+    // tournament-created notifications use instead: one row, resolved to
+    // recipients at send time by handleNotificationInsert.
+    if (type === ChatLobbyType.Global) {
+      await this.notifications.sendSilent(
+        "GlobalChatMessage" as unknown as e_notification_types_enum,
+        {
+          title: sender.name || "New message",
+          message:
+            message.length > 200 ? `${message.slice(0, 200)}…` : message,
+          role: "verified_user" as e_player_roles_enum,
+          entity_id: `${type}:${id}`,
+        },
+      );
+      return;
+    }
+
     const members = await this.getLobbyMemberSteamIds(type, id);
     if (!members.length) return;
 

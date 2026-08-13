@@ -11,4 +11,7 @@ export enum ChatLobbyType {
   // in-game CS2 server is already hard-scoped to ChatLobbyType.Match only,
   // so this never reaches the game server.
   MatchTeam = "match_team",
+  // Single site-wide room, open to every verified_user+ player. Fixed id
+  // "global" -- there's only ever one, see joinMatchLobby's Global case.
+  Global = "global",
 }
