@@ -37,6 +37,16 @@ export default class PlayersConnected extends MatchEventProcessor<{
           on_conflict: {
             constraint: "players_steam_id_key",
             update_columns: ["name"],
+            // See PlayerConnected.ts -- only refill `name` for a player
+            // who hasn't registered/had a name change approved yet, so
+            // this doesn't clobber a deliberately chosen display name
+            // back to the raw in-game/Steam name on every connect.
+            where: {
+              _or: [
+                { name_registered: { _is_null: true } },
+                { name_registered: { _eq: false } },
+              ],
+            },
           },
         },
         affected_rows: true,

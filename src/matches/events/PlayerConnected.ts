@@ -15,6 +15,18 @@ export default class PlayerConnected extends MatchEventProcessor<{
           on_conflict: {
             constraint: "players_steam_id_key",
             update_columns: ["name"],
+            // Only refill `name` for a player who hasn't gone through
+            // the registerName/approveNameChange flow yet -- otherwise
+            // every match connect silently overwrote a deliberately
+            // chosen, admin-approved display name back to whatever the
+            // game server reports as the player's current Steam persona
+            // name, making the name-change-request system pointless.
+            where: {
+              _or: [
+                { name_registered: { _is_null: true } },
+                { name_registered: { _eq: false } },
+              ],
+            },
           },
         },
         __typename: true,
