@@ -12,6 +12,8 @@ import { NotificationsQueues } from "./enums/NotificationsQueues";
 import { SendSanctionNotifications } from "./jobs/SendSanctionNotifications";
 import { PushNotificationsService } from "./push/push-notifications.service";
 import { PushNotificationsController } from "./push/push-notifications.controller";
+import { InAppNotificationsService } from "./in-app/in-app-notifications.service";
+import { InAppNotificationsController } from "./in-app/in-app-notifications.controller";
 
 @Module({
   imports: [
@@ -26,14 +28,15 @@ import { PushNotificationsController } from "./push/push-notifications.controlle
       adapter: BullMQAdapter,
     }),
   ],
-  controllers: [PushNotificationsController],
+  controllers: [PushNotificationsController, InAppNotificationsController],
   providers: [
     NotificationsService,
     PushNotificationsService,
+    InAppNotificationsService,
     SendSanctionNotifications,
     ...getQueuesProcessors("Notifications"),
     loggerFactory(),
   ],
-  exports: [NotificationsService, PushNotificationsService],
+  exports: [NotificationsService, PushNotificationsService, InAppNotificationsService],
 })
 export class NotificationsModule {}

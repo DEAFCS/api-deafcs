@@ -7,7 +7,6 @@ import { ScrimQueues } from "../enums/ScrimQueues";
 import { PostgresService } from "../../postgres/postgres.service";
 import { NotificationsService } from "../../notifications/notifications.service";
 import { AppConfig } from "../../configs/types/AppConfig";
-import { e_notification_types_enum, e_player_roles_enum } from "generated/schema";
 
 const RENOTIFY_DAYS = 7;
 
@@ -46,18 +45,12 @@ export class SuggestTeams extends WorkerHost {
         [members, groupHash, group.together_count],
       );
 
-      const createUrl = `${this.appConfig.webDomain}/teams/create?members=${encodeURIComponent(members.join(","))}`;
-
-      await this.notifications.notifyPlayers(
-        "FormTeamSuggestion" as e_notification_types_enum,
-        {
-          title: "Form a Team?",
-          message: `You've played ${group.together_count} matches with the same group recently. <a href="${createUrl}">Create a team</a> together.`,
-          role: "user" as e_player_roles_enum,
-          entity_id: groupHash,
-          steamIds: members,
-        },
-      );
+      // FormTeamSuggestion notifications are deliberately disabled --
+      // product decision to keep this default-off with no player-facing
+      // toggle (see in-app-notification-types.ts). The suggestion is
+      // still recorded above (team_suggestions row) in case that
+      // bookkeeping is useful elsewhere later; only the notification
+      // itself was cut.
 
       this.logger.log(
         `suggested team for group ${groupHash} (${group.together_count} matches together)`,
