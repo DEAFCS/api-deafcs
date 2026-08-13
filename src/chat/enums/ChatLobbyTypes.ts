@@ -14,4 +14,10 @@ export enum ChatLobbyType {
   // Single site-wide room, open to every verified_user+ player. Fixed id
   // "global" -- there's only ever one, see joinMatchLobby's Global case.
   Global = "global",
+  // 1:1 private message. id is the two participants' steam_ids sorted
+  // ascending and joined with ":" (e.g. "76561...1:76561...2") -- a
+  // canonical, order-independent room id both sides derive the same way
+  // without a lookup, and joinMatchLobby's Direct case parses it back out
+  // to check the requesting user is actually one of the two.
+  Direct = "direct",
 }

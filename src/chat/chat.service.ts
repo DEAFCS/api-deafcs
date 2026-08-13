@@ -201,6 +201,16 @@ export class ChatService {
         }
 
         break;
+      case ChatLobbyType.Direct: {
+        const parties = id.split(":");
+        if (
+          parties.length !== 2 ||
+          !parties.includes(String(user.steam_id))
+        ) {
+          return;
+        }
+        break;
+      }
       default:
         this.logger.warn(`Unknown lobby type: ${type}`);
         return;
@@ -606,6 +616,10 @@ export class ChatService {
           ids.add(String(p.steam_id));
         }
         return [...ids];
+      }
+      case ChatLobbyType.Direct: {
+        const parties = id.split(":");
+        return parties.length === 2 ? parties : [];
       }
       default:
         // Organizer chat has dynamic, role-based membership rather than a
