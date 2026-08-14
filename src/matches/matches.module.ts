@@ -72,6 +72,8 @@ import { LeaguesModule } from "../leagues/leagues.module";
 import { DisconnectBudgetService } from "./disconnect-budget/disconnect-budget.service";
 import { CameraController } from "./camera/camera.controller";
 import { CameraService } from "./camera/camera.service";
+import { LobbyCallController } from "./camera/lobby-call.controller";
+import { LobbyCallService } from "./camera/lobby-call.service";
 
 @Module({
   imports: [
@@ -83,6 +85,7 @@ import { CameraService } from "./camera/camera.service";
     EncryptionModule,
     SocketsModule,
     PostgresModule,
+    ChatModule,
     NotificationsModule,
     K8sModule,
     GameStreamerModule,
@@ -92,7 +95,6 @@ import { CameraService } from "./camera/camera.service";
     forwardRef(() => DiscordBotModule),
     DiscordTournamentVoiceModule,
     MatchMaking,
-    ChatModule,
     LeaguesModule,
     PluginRuntimeModule,
     BullModule.registerQueue(
@@ -153,7 +155,12 @@ import { CameraService } from "./camera/camera.service";
       },
     ),
   ],
-  controllers: [MatchesController, MatchRelayController, CameraController],
+  controllers: [
+    MatchesController,
+    MatchRelayController,
+    CameraController,
+    LobbyCallController,
+  ],
   exports: [MatchAssistantService, PlayerEloRecomputeService],
   providers: [
     MatchEventsGateway,
@@ -161,6 +168,7 @@ import { CameraService } from "./camera/camera.service";
     DisconnectBudgetService,
     MatchRelayService,
     CameraService,
+    LobbyCallService,
     CheckOnDemandServerJob,
     CheckOnDemandServerJobEvents,
     CancelExpiredMatches,

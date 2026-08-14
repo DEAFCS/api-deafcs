@@ -1,0 +1,3 @@
+table:
+  name: lobby_camera_tokens
+  schema: public

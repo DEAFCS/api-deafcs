@@ -668,7 +668,16 @@ export class ChatService {
   public async to(
     type: ChatLobbyType,
     id: string,
-    event: "chat" | "list" | "messages" | "joined" | "left",
+    event:
+      | "chat"
+      | "list"
+      | "messages"
+      | "joined"
+      | "left"
+      // Optional lobby webcam call (see LobbyCallService) -- distinct
+      // from "joined"/"left" above, which are chat-presence events.
+      | "call-joined"
+      | "call-left",
     data: Record<string, any>,
   ) {
     const users = await this.getAllUsersInLobby(type, id);
