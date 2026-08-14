@@ -43,6 +43,18 @@ DECLARE
     first_stage_id uuid;
     bracket_row tournament_brackets%ROWTYPE;
 BEGIN
+    -- Capture the roster exactly once when registration closes or a
+    -- tournament starts directly. Reopening registration clears the old
+    -- capture before the existing stage rebuild/early return below.
+    IF NEW.status IS DISTINCT FROM OLD.status THEN
+        IF NEW.status IN ('Setup', 'RegistrationOpen') THEN
+            PERFORM public.clear_tournament_roster_image_snapshots(NEW.id);
+        ELSIF NEW.status IN ('RegistrationClosed', 'Live')
+              AND OLD.status IN ('Setup', 'RegistrationOpen') THEN
+            PERFORM public.capture_tournament_roster_image_snapshots(NEW.id);
+        END IF;
+    END IF;
+
     IF (
          NEW.status IS DISTINCT FROM OLD.status AND
          NEW.status IN ('RegistrationOpen')

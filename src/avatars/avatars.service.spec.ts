@@ -10,6 +10,7 @@ import { e_player_roles_enum } from "generated";
 describe("AvatarsService - roster image permissions", () => {
   let service: AvatarsService;
   let hasura: { query: jest.Mock; mutation: jest.Mock };
+  let postgres: { transaction: jest.Mock };
   let s3: { put: jest.Mock; remove: jest.Mock; has: jest.Mock };
   let logger: { log: jest.Mock; warn: jest.Mock; error: jest.Mock };
 
@@ -37,6 +38,24 @@ describe("AvatarsService - roster image permissions", () => {
 
   beforeEach(() => {
     hasura = { query: jest.fn(), mutation: jest.fn() };
+    postgres = {
+      transaction: jest.fn().mockImplementation(async (callback) =>
+        callback({
+          query: jest.fn().mockImplementation(async (sql: string) => {
+            if (sql.includes("FROM public.players")) {
+              return { rows: [{ roster_image_url: null }] };
+            }
+            if (sql.includes("FROM public.team_roster")) {
+              return { rows: [{ roster_image_url: null }] };
+            }
+            if (sql.includes("SELECT EXISTS")) {
+              return { rows: [{ referenced: false }] };
+            }
+            return { rows: [] };
+          }),
+        }),
+      ),
+    };
     s3 = {
       put: jest.fn().mockResolvedValue(undefined),
       remove: jest.fn().mockResolvedValue(undefined),
@@ -44,7 +63,12 @@ describe("AvatarsService - roster image permissions", () => {
     };
     logger = { log: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
-    service = new AvatarsService(logger as any, s3 as any, hasura as any);
+    service = new AvatarsService(
+      logger as any,
+      s3 as any,
+      hasura as any,
+      postgres as any,
+    );
   });
 
   describe("uploadPlayerRosterImage / removePlayerRosterImage (general roster image)", () => {
@@ -120,6 +144,17 @@ describe("AvatarsService - roster image permissions", () => {
       hasura.mutation.mockResolvedValueOnce({
         update_players_by_pk: { __typename: "players" },
       });
+      postgres.transaction.mockImplementationOnce(async (callback: any) =>
+        callback({
+          query: jest
+            .fn()
+            .mockResolvedValueOnce({
+              rows: [{ roster_image_url: "avatars/roster-players/x.png" }],
+            })
+            .mockResolvedValueOnce({ rows: [] })
+            .mockResolvedValueOnce({ rows: [{ referenced: false }] }),
+        }),
+      );
 
       await expect(
         service.removePlayerRosterImage(
@@ -128,6 +163,89 @@ describe("AvatarsService - roster image permissions", () => {
         ),
       ).resolves.toBeUndefined();
       expect(s3.remove).toHaveBeenCalledWith("avatars/roster-players/x.png");
+    });
+
+    it("retains a replaced general image when tournament_team_roster alone references it", async () => {
+      hasura.query.mockResolvedValueOnce({
+        players_by_pk: { roster_image_url: "avatars/roster-players/old.png" },
+      });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce({
+          rows: [{ roster_image_url: "avatars/roster-players/old.png" }],
+        })
+        .mockResolvedValueOnce({ rows: [] })
+        // Represents the tournament_team_roster EXISTS branch returning true.
+        .mockResolvedValueOnce({ rows: [{ referenced: true }] });
+      postgres.transaction.mockImplementationOnce(async (callback: any) =>
+        callback({ query }),
+      );
+
+      await service.uploadPlayerRosterImage(
+        "76561190000000002",
+        user("administrator"),
+        Buffer.from("x"),
+        "image/png",
+      );
+
+      expect(s3.remove).not.toHaveBeenCalledWith(
+        "avatars/roster-players/old.png",
+      );
+      expect(query.mock.calls[2][0]).toContain(
+        "FROM public.tournament_team_roster",
+      );
+    });
+
+    it("retains a removed general image while a historical snapshot references it", async () => {
+      hasura.query.mockResolvedValueOnce({
+        players_by_pk: { roster_image_url: "avatars/roster-players/old.png" },
+      });
+      postgres.transaction.mockImplementationOnce(async (callback: any) =>
+        callback({
+          query: jest
+            .fn()
+            .mockResolvedValueOnce({
+              rows: [{ roster_image_url: "avatars/roster-players/old.png" }],
+            })
+            .mockResolvedValueOnce({ rows: [] })
+            .mockResolvedValueOnce({ rows: [{ referenced: true }] }),
+        }),
+      );
+
+      await service.removePlayerRosterImage(
+        "76561190000000002",
+        user("administrator"),
+      );
+
+      expect(s3.remove).not.toHaveBeenCalledWith(
+        "avatars/roster-players/old.png",
+      );
+    });
+
+    it("removes the old general image when no historical snapshot references it", async () => {
+      hasura.query.mockResolvedValueOnce({
+        players_by_pk: { roster_image_url: "avatars/roster-players/old.png" },
+      });
+      postgres.transaction.mockImplementationOnce(async (callback: any) =>
+        callback({
+          query: jest
+            .fn()
+            .mockResolvedValueOnce({
+              rows: [{ roster_image_url: "avatars/roster-players/old.png" }],
+            })
+            .mockResolvedValueOnce({ rows: [] })
+            .mockResolvedValueOnce({ rows: [{ referenced: false }] }),
+        }),
+      );
+
+      await service.uploadPlayerRosterImage(
+        "76561190000000002",
+        user("administrator"),
+        Buffer.from("x"),
+        "image/png",
+      );
+
+      expect(s3.remove).toHaveBeenCalledWith("avatars/roster-players/old.png");
     });
   });
 
@@ -186,6 +304,119 @@ describe("AvatarsService - roster image permissions", () => {
         expect(path).toMatch(/^avatars\/roster-teams\//);
       },
     );
+
+    it("retains a replaced team image when match_lineup_players alone references it", async () => {
+      hasura.query
+        .mockResolvedValueOnce({ teams_by_pk: { id: "team-1" } })
+        .mockResolvedValueOnce({
+          team_roster: [{ roster_image_url: "avatars/roster-teams/old.png" }],
+        });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce({
+          rows: [{ roster_image_url: "avatars/roster-teams/old.png" }],
+        })
+        .mockResolvedValueOnce({ rows: [] })
+        // Represents the match_lineup_players EXISTS branch returning true.
+        .mockResolvedValueOnce({ rows: [{ referenced: true }] });
+      postgres.transaction.mockImplementationOnce(async (callback: any) =>
+        callback({ query }),
+      );
+
+      await service.uploadTeamRosterPlayerImage(
+        "team-1",
+        "76561190000000002",
+        user("administrator"),
+        Buffer.from("x"),
+        "image/png",
+      );
+
+      expect(s3.remove).not.toHaveBeenCalledWith(
+        "avatars/roster-teams/old.png",
+      );
+      expect(query.mock.calls[2][0]).toContain(
+        "FROM public.match_lineup_players",
+      );
+    });
+
+    it("retains a removed team image while a historical snapshot references it", async () => {
+      hasura.query
+        .mockResolvedValueOnce({ teams_by_pk: { id: "team-1" } })
+        .mockResolvedValueOnce({
+          team_roster: [{ roster_image_url: "avatars/roster-teams/old.png" }],
+        });
+      postgres.transaction.mockImplementationOnce(async (callback: any) =>
+        callback({
+          query: jest
+            .fn()
+            .mockResolvedValueOnce({
+              rows: [{ roster_image_url: "avatars/roster-teams/old.png" }],
+            })
+            .mockResolvedValueOnce({ rows: [] })
+            .mockResolvedValueOnce({ rows: [{ referenced: true }] }),
+        }),
+      );
+
+      await service.removeTeamRosterPlayerImage(
+        "team-1",
+        "76561190000000002",
+        user("administrator"),
+      );
+
+      expect(s3.remove).not.toHaveBeenCalledWith(
+        "avatars/roster-teams/old.png",
+      );
+    });
+
+    it("removes a replaced team image when no historical snapshot references it", async () => {
+      hasura.query
+        .mockResolvedValueOnce({ teams_by_pk: { id: "team-1" } })
+        .mockResolvedValueOnce({
+          team_roster: [{ roster_image_url: "avatars/roster-teams/old.png" }],
+        });
+      postgres.transaction.mockImplementationOnce(async (callback: any) =>
+        callback({
+          query: jest
+            .fn()
+            .mockResolvedValueOnce({
+              rows: [{ roster_image_url: "avatars/roster-teams/old.png" }],
+            })
+            .mockResolvedValueOnce({ rows: [] })
+            .mockResolvedValueOnce({ rows: [{ referenced: false }] }),
+        }),
+      );
+
+      await service.uploadTeamRosterPlayerImage(
+        "team-1",
+        "76561190000000002",
+        user("administrator"),
+        Buffer.from("x"),
+        "image/png",
+      );
+
+      expect(s3.remove).toHaveBeenCalledWith("avatars/roster-teams/old.png");
+    });
+
+    it("cleans up a newly uploaded team image when the pointer transaction fails", async () => {
+      hasura.query
+        .mockResolvedValueOnce({ teams_by_pk: { id: "team-1" } })
+        .mockResolvedValueOnce({ team_roster: [{ roster_image_url: null }] });
+      postgres.transaction.mockRejectedValueOnce(new Error("database down"));
+
+      await expect(
+        service.uploadTeamRosterPlayerImage(
+          "team-1",
+          "76561190000000002",
+          user("administrator"),
+          Buffer.from("x"),
+          "image/png",
+        ),
+      ).rejects.toThrow("database down");
+
+      expect(s3.remove).toHaveBeenCalledWith(
+        expect.stringMatching(/^avatars\/roster-teams\//),
+      );
+    });
 
     it.each(DENIED_ROLES)(
       "rejects role %s removing a team-specific roster image",

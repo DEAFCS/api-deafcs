@@ -66,6 +66,7 @@ select_permissions:
         - id
         - match_lineup_id
         - party_id
+        - roster_image_url_snapshot
       filter: {}
     comment: ""
 update_permissions:

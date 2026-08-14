@@ -106,6 +106,7 @@ select_permissions:
         - role
         - tournament_id
         - tournament_team_id
+        - roster_image_url_snapshot
       filter: {}
       allow_aggregations: true
     comment: ""

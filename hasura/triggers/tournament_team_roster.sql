@@ -15,7 +15,11 @@ END;
 $$;
 
 DROP TRIGGER IF EXISTS taiud_tournament_team_roster ON public.tournament_team_roster;
-CREATE TRIGGER taiud_tournament_team_roster AFTER INSERT OR UPDATE OR DELETE ON public.tournament_team_roster FOR EACH ROW EXECUTE FUNCTION public.taiud_tournament_team_roster();
+CREATE TRIGGER taiud_tournament_team_roster
+    AFTER INSERT OR DELETE
+    OR UPDATE OF tournament_team_id, player_steam_id, tournament_id, role
+    ON public.tournament_team_roster
+    FOR EACH ROW EXECUTE FUNCTION public.taiud_tournament_team_roster();
 
 
 CREATE OR REPLACE FUNCTION public.tbd_tournament_team_roster() RETURNS TRIGGER
@@ -99,3 +103,32 @@ $$;
 
 DROP TRIGGER IF EXISTS tbi_tournament_team_roster ON public.tournament_team_roster;
 CREATE TRIGGER tbi_tournament_team_roster BEFORE INSERT ON public.tournament_team_roster FOR EACH ROW EXECUTE FUNCTION public.tbi_tournament_team_roster();
+
+CREATE OR REPLACE FUNCTION public.tbi_tournament_team_roster_snapshot() RETURNS TRIGGER
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    _status text;
+BEGIN
+    SELECT t.status
+      INTO _status
+      FROM public.tournament_teams tt
+      INNER JOIN public.tournaments t ON t.id = tt.tournament_id
+     WHERE tt.id = NEW.tournament_team_id;
+
+    IF _status IN ('RegistrationClosed', 'Live', 'Paused', 'Finished') THEN
+        NEW.roster_image_url_snapshot :=
+            public.resolve_tournament_roster_image_snapshot(
+                NEW.tournament_team_id,
+                NEW.player_steam_id
+            );
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tbi_tournament_team_roster_snapshot ON public.tournament_team_roster;
+CREATE TRIGGER tbi_tournament_team_roster_snapshot
+    BEFORE INSERT ON public.tournament_team_roster
+    FOR EACH ROW EXECUTE FUNCTION public.tbi_tournament_team_roster_snapshot();

@@ -1,6 +1,69 @@
 DROP TRIGGER IF EXISTS tbi_match_lineup_players ON public.match_lineup_players;
 drop function if exists public.tbi_match_lineup_players;
 
+CREATE OR REPLACE FUNCTION public.resolve_match_lineup_roster_image_snapshot(
+    _match_lineup_id uuid,
+    _steam_id bigint
+) RETURNS text
+    LANGUAGE sql
+    STABLE
+    AS $$
+    SELECT ttr.roster_image_url_snapshot
+      FROM public.match_lineups ml
+      INNER JOIN public.matches m ON m.id = ml.match_id
+      INNER JOIN public.tournament_brackets tb ON tb.match_id = m.id
+      INNER JOIN public.tournament_team_roster ttr
+        ON ttr.tournament_team_id = CASE
+             WHEN m.lineup_1_id = ml.id THEN tb.tournament_team_id_1
+             WHEN m.lineup_2_id = ml.id THEN tb.tournament_team_id_2
+           END
+       AND ttr.player_steam_id = _steam_id
+     WHERE ml.id = _match_lineup_id
+     LIMIT 1;
+$$;
+
+CREATE OR REPLACE FUNCTION public.tbiu_match_lineup_players_roster_snapshot() RETURNS TRIGGER
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    _status text;
+BEGIN
+    IF TG_OP = 'INSERT'
+       OR NEW.steam_id IS DISTINCT FROM OLD.steam_id
+       OR NEW.match_lineup_id IS DISTINCT FROM OLD.match_lineup_id THEN
+        SELECT m.status
+          INTO _status
+          FROM public.match_lineups ml
+          INNER JOIN public.matches m ON m.id = ml.match_id
+         WHERE ml.id = NEW.match_lineup_id;
+
+        IF TG_OP = 'INSERT'
+           OR _status IN (
+               'PickingPlayers',
+               'Scheduled',
+               'WaitingForCheckIn',
+               'Veto',
+               'WaitingForServer',
+               'Canceled'
+           ) THEN
+            NEW.roster_image_url_snapshot :=
+                public.resolve_match_lineup_roster_image_snapshot(
+                    NEW.match_lineup_id,
+                    NEW.steam_id
+                );
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tbiu_match_lineup_players_roster_snapshot ON public.match_lineup_players;
+CREATE TRIGGER tbiu_match_lineup_players_roster_snapshot
+    BEFORE INSERT OR UPDATE OF steam_id, match_lineup_id
+    ON public.match_lineup_players
+    FOR EACH ROW EXECUTE FUNCTION public.tbiu_match_lineup_players_roster_snapshot();
+
 CREATE OR REPLACE FUNCTION public.tbu_match_lineup_players() RETURNS TRIGGER
     LANGUAGE plpgsql
     AS $$

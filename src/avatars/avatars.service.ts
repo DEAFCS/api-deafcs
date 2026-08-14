@@ -1,8 +1,10 @@
 import crypto from "crypto";
 import { Readable } from "stream";
+import { PoolClient } from "pg";
 import { ForbiddenException, Injectable, Logger } from "@nestjs/common";
 import { S3Service } from "../s3/s3.service";
 import { HasuraService } from "../hasura/hasura.service";
+import { PostgresService } from "../postgres/postgres.service";
 import { User } from "../auth/types/User";
 import { isRoleAbove } from "src/utilities/isRoleAbove";
 
@@ -19,12 +21,19 @@ const EXTENSION_BY_MIMETYPE: Record<string, string> = {
   "image/webp": "webp",
 };
 
+type ReplacedRosterImage = {
+  oldPath: string | null;
+  newPath: string | null;
+  referenced: boolean;
+};
+
 @Injectable()
 export class AvatarsService {
   constructor(
     private readonly logger: Logger,
     private readonly s3: S3Service,
     private readonly hasura: HasuraService,
+    private readonly postgres: PostgresService,
   ) {}
 
   async uploadTeamAvatar(
@@ -217,22 +226,14 @@ export class AvatarsService {
 
     await this.s3.put(path, buffer);
 
-    if (
-      players_by_pk.roster_image_url &&
-      players_by_pk.roster_image_url !== path
-    ) {
-      await this.s3.remove(players_by_pk.roster_image_url);
+    let replaced: ReplacedRosterImage;
+    try {
+      replaced = await this.replacePlayerRosterImagePointer(steamId, path);
+    } catch (error) {
+      await this.s3.remove(path);
+      throw error;
     }
-
-    await this.hasura.mutation({
-      update_players_by_pk: {
-        __args: {
-          pk_columns: { steam_id: steamId },
-          _set: { roster_image_url: path },
-        },
-        __typename: true,
-      },
-    });
+    await this.removeUnreferencedRosterImage(replaced);
 
     this.logger.log(`Uploaded player ${steamId} roster image to ${path}`);
     return path;
@@ -256,19 +257,8 @@ export class AvatarsService {
       throw new ForbiddenException("Player not found");
     }
 
-    if (players_by_pk.roster_image_url) {
-      await this.s3.remove(players_by_pk.roster_image_url);
-    }
-
-    await this.hasura.mutation({
-      update_players_by_pk: {
-        __args: {
-          pk_columns: { steam_id: steamId },
-          _set: { roster_image_url: null },
-        },
-        __typename: true,
-      },
-    });
+    const replaced = await this.replacePlayerRosterImagePointer(steamId, null);
+    await this.removeUnreferencedRosterImage(replaced);
 
     this.logger.log(`Removed player ${steamId} roster image`);
   }
@@ -304,19 +294,14 @@ export class AvatarsService {
 
     await this.s3.put(path, buffer);
 
-    if (existing.roster_image_url && existing.roster_image_url !== path) {
-      await this.s3.remove(existing.roster_image_url);
+    let replaced: ReplacedRosterImage;
+    try {
+      replaced = await this.replaceTeamRosterImagePointer(teamId, steamId, path);
+    } catch (error) {
+      await this.s3.remove(path);
+      throw error;
     }
-
-    await this.hasura.mutation({
-      update_team_roster_by_pk: {
-        __args: {
-          pk_columns: { team_id: teamId, player_steam_id: steamId },
-          _set: { roster_image_url: path },
-        },
-        __typename: true,
-      },
-    });
+    await this.removeUnreferencedRosterImage(replaced);
 
     this.logger.log(
       `Uploaded team ${teamId} roster image for player ${steamId} to ${path}`,
@@ -349,23 +334,118 @@ export class AvatarsService {
       throw new ForbiddenException("Player is not on this team's roster");
     }
 
-    if (existing.roster_image_url) {
-      await this.s3.remove(existing.roster_image_url);
-    }
-
-    await this.hasura.mutation({
-      update_team_roster_by_pk: {
-        __args: {
-          pk_columns: { team_id: teamId, player_steam_id: steamId },
-          _set: { roster_image_url: null },
-        },
-        __typename: true,
-      },
-    });
+    const replaced = await this.replaceTeamRosterImagePointer(
+      teamId,
+      steamId,
+      null,
+    );
+    await this.removeUnreferencedRosterImage(replaced);
 
     this.logger.log(
       `Removed team ${teamId} roster image for player ${steamId}`,
     );
+  }
+
+  private async replacePlayerRosterImagePointer(
+    steamId: string,
+    newPath: string | null,
+  ): Promise<ReplacedRosterImage> {
+    return this.postgres.transaction(async (client) => {
+      const existing = await client.query<{ roster_image_url: string | null }>(
+        `SELECT roster_image_url
+           FROM public.players
+          WHERE steam_id = $1
+          FOR UPDATE`,
+        [steamId],
+      );
+      if (existing.rows.length === 0) {
+        throw new Error("Player not found");
+      }
+
+      const oldPath = existing.rows[0].roster_image_url;
+      await client.query(
+        `UPDATE public.players
+            SET roster_image_url = $2
+          WHERE steam_id = $1`,
+        [steamId, newPath],
+      );
+
+      return {
+        oldPath,
+        newPath,
+        referenced: oldPath
+          ? await this.rosterImageIsReferenced(client, oldPath)
+          : false,
+      };
+    });
+  }
+
+  private async replaceTeamRosterImagePointer(
+    teamId: string,
+    steamId: string,
+    newPath: string | null,
+  ): Promise<ReplacedRosterImage> {
+    return this.postgres.transaction(async (client) => {
+      const existing = await client.query<{ roster_image_url: string | null }>(
+        `SELECT roster_image_url
+           FROM public.team_roster
+          WHERE team_id = $1
+            AND player_steam_id = $2
+          FOR UPDATE`,
+        [teamId, steamId],
+      );
+      if (existing.rows.length === 0) {
+        throw new Error("Player is not on this team's roster");
+      }
+
+      const oldPath = existing.rows[0].roster_image_url;
+      await client.query(
+        `UPDATE public.team_roster
+            SET roster_image_url = $3
+          WHERE team_id = $1
+            AND player_steam_id = $2`,
+        [teamId, steamId, newPath],
+      );
+
+      return {
+        oldPath,
+        newPath,
+        referenced: oldPath
+          ? await this.rosterImageIsReferenced(client, oldPath)
+          : false,
+      };
+    });
+  }
+
+  private async rosterImageIsReferenced(
+    client: PoolClient,
+    path: string,
+  ): Promise<boolean> {
+    const result = await client.query<{ referenced: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM public.tournament_team_roster
+          WHERE roster_image_url_snapshot = $1
+       ) OR EXISTS (
+         SELECT 1
+           FROM public.match_lineup_players
+          WHERE roster_image_url_snapshot = $1
+       ) AS referenced`,
+      [path],
+    );
+    return result.rows[0]?.referenced === true;
+  }
+
+  private async removeUnreferencedRosterImage(
+    replaced: ReplacedRosterImage,
+  ): Promise<void> {
+    if (
+      replaced.oldPath &&
+      replaced.oldPath !== replaced.newPath &&
+      !replaced.referenced
+    ) {
+      await this.s3.remove(replaced.oldPath);
+    }
   }
 
   async uploadTournamentLogo(
