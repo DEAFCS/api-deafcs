@@ -82,6 +82,17 @@ export class LobbyCallService {
       [lobbyId, user.steam_id],
     );
 
+    // Tell whoever's already in the call that this player is on their
+    // way in -- their camera isn't live yet (that's the separate
+    // "call-joined" broadcast, fired once WHIP actually connects), but
+    // the people already there should see a "waiting for camera…"
+    // placeholder rather than nothing until then. Skip if they were
+    // already a participant (re-fetching an existing token, not a
+    // fresh join).
+    if (!alreadyIn) {
+      void this.broadcastPresence(lobbyId, user.steam_id, "call-joining");
+    }
+
     return { token: rows[0].token, participants };
   }
 
@@ -231,7 +242,7 @@ export class LobbyCallService {
   private async broadcastPresence(
     lobbyId: string,
     steamId: string,
-    event: "call-joined" | "call-left",
+    event: "call-joined" | "call-left" | "call-joining",
   ): Promise<void> {
     try {
       const { players_by_pk } = await this.hasura.query({

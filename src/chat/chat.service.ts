@@ -676,8 +676,13 @@ export class ChatService {
       | "left"
       // Optional lobby webcam call (see LobbyCallService) -- distinct
       // from "joined"/"left" above, which are chat-presence events.
+      // "call-joining" fires as soon as someone starts the join flow
+      // (token minted, before their camera is actually live) so the
+      // people already in the call can show a "waiting for camera…"
+      // placeholder instead of nothing.
       | "call-joined"
-      | "call-left",
+      | "call-left"
+      | "call-joining",
     data: Record<string, any>,
   ) {
     const users = await this.getAllUsersInLobby(type, id);
