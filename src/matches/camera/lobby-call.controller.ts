@@ -97,6 +97,35 @@ export class LobbyCallController {
     return this.lobbyCall.getStatusForToken(token);
   }
 
+  // The QR/phone join page is a real two-way call, not a one-way
+  // publish-only feed like the required-webcam feature's token join
+  // page -- so it also needs to see & pull everyone else's video, and
+  // has no session to do that with. Token-gated equivalents of
+  // participants/:lobbyId and :lobbyId/:steamId/whep above.
+
+  @Get("player/:token/participants")
+  public async playerParticipants(@Param("token") token: string) {
+    return {
+      participants: await this.lobbyCall.getParticipantsForToken(token),
+    };
+  }
+
+  @Post("player/:token/whep/:steamId")
+  public async playerPeerWhep(
+    @Param("token") token: string,
+    @Param("steamId") steamId: string,
+    @Req() request: Request,
+    @Res() response: Response,
+  ) {
+    const sdp = await readRawBody(request);
+    try {
+      const answer = await this.lobbyCall.proxyPeerWhepForToken(token, steamId, sdp);
+      response.status(200).type("application/sdp").send(answer);
+    } catch (error) {
+      response.status(400).type("text/plain").send((error as Error).message);
+    }
+  }
+
   @Post("player/:token/hangup")
   public async playerHangup(@Param("token") token: string) {
     await this.lobbyCall.hangupForToken(token);

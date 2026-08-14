@@ -122,10 +122,18 @@ export class LobbyCallService {
     return answer;
   }
 
-  public async getStatusForToken(token: string): Promise<{ ready: boolean }> {
+  public async getStatusForToken(
+    token: string,
+  ): Promise<{ ready: boolean; steamId?: string }> {
     const lookup = await this.validateToken(token);
     if (!lookup) return { ready: false };
-    return this.getPathStatus(LobbyCallService.pathFor(lookup.lobbyId, lookup.steamId));
+    const status = await this.getPathStatus(
+      LobbyCallService.pathFor(lookup.lobbyId, lookup.steamId),
+    );
+    // The anonymous QR/phone join page has no session to know its own
+    // steamId from -- it needs this to exclude its own tile when
+    // pulling WHEP for everyone else in the call.
+    return { ...status, steamId: lookup.steamId };
   }
 
   public async hangupForToken(token: string): Promise<void> {
@@ -197,6 +205,27 @@ export class LobbyCallService {
   ): Promise<LobbyCallParticipant[]> {
     await this.assertLobbyMember(lobbyId, user.steam_id);
     return this.getParticipants(lobbyId);
+  }
+
+  // Token-gated equivalents of proxyPeerWhep/getParticipantsForUser above
+  // -- for the anonymous QR/phone join page, which has no session to
+  // resolve a User from. The token itself already proves lobby
+  // membership (validateToken re-checks it's still Accepted).
+  public async getParticipantsForToken(token: string): Promise<LobbyCallParticipant[]> {
+    const lookup = await this.validateToken(token);
+    if (!lookup) return [];
+    return this.getParticipants(lookup.lobbyId);
+  }
+
+  public async proxyPeerWhepForToken(
+    token: string,
+    steamId: string,
+    sdp: string,
+  ): Promise<string> {
+    const lookup = await this.validateToken(token);
+    if (!lookup) throw new Error("invalid or expired lobby call link");
+    const path = LobbyCallService.pathFor(lookup.lobbyId, steamId);
+    return this.proxySdp(`/${path}/whep`, sdp);
   }
 
   private async broadcastPresence(
