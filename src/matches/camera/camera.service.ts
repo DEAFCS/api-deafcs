@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { HasuraService } from "../../hasura/hasura.service";
+import { PostgresService } from "../../postgres/postgres.service";
 import { MatchAssistantService } from "../match-assistant/match-assistant.service";
 import { User } from "../../auth/types/User";
 import { isRoleAbove } from "../../utilities/isRoleAbove";
@@ -32,6 +33,7 @@ export class CameraService {
   constructor(
     private readonly logger: Logger,
     private readonly hasura: HasuraService,
+    private readonly postgres: PostgresService,
     private readonly matchAssistant: MatchAssistantService,
   ) {
     this.mediaMtxHost = process.env.MEDIAMTX_CAMERA_HOST || "mediamtx-camera";
@@ -216,6 +218,46 @@ export class CameraService {
     ]);
 
     return { lineup_1, lineup_2 };
+  }
+
+  // Admin "spot check" — the doping-control-style flow: pull up one
+  // specific player's camera on demand, independent of whether
+  // camera_required is on for the tournament as a whole. Mints (or
+  // re-stamps) that player's token row so the player's own match page
+  // can pick it up the same way it already does for the required flow
+  // (see requested_at on public_match_camera_tokens), then shows the
+  // exact same CameraRequirementOverlay component.
+  public async requestSpotCheck(
+    matchId: string,
+    steamId: string,
+    user: User,
+  ): Promise<void> {
+    await this.assertCanWatch(matchId, user);
+
+    const { matches_by_pk: match } = await this.hasura.query({
+      matches_by_pk: {
+        __args: { id: matchId },
+        lineup_1: { lineup_players: { steam_id: true } },
+        lineup_2: { lineup_players: { steam_id: true } },
+      },
+    });
+
+    const isLineupPlayer = [
+      ...(match?.lineup_1?.lineup_players ?? []),
+      ...(match?.lineup_2?.lineup_players ?? []),
+    ].some((lineupPlayer) => String(lineupPlayer.steam_id) === String(steamId));
+
+    if (!isLineupPlayer) {
+      throw new Error("player is not on either lineup for this match");
+    }
+
+    await this.postgres.query(
+      `insert into match_camera_tokens (match_id, steam_id, requested_at)
+       values ($1, $2, now())
+       on conflict (match_id, steam_id)
+       do update set requested_at = now()`,
+      [matchId, steamId],
+    );
   }
 
   // --- Talk mode: admin video-calls a specific player ---

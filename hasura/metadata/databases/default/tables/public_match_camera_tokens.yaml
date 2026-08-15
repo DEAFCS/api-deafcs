@@ -14,6 +14,7 @@ select_permissions:
         - steam_id
         - token
         - created_at
+        - requested_at
       filter:
         steam_id:
           _eq: X-Hasura-User-Id
