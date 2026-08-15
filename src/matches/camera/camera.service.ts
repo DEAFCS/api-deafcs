@@ -6,11 +6,20 @@ import { User } from "../../auth/types/User";
 import { isRoleAbove } from "../../utilities/isRoleAbove";
 
 // Camera tokens are only meaningful while the match is actually being
-// played — minted on the veto->Live transition (see
-// MatchesController.generateCameraTokensIfRequired) and dead once the
-// match leaves this set, so a leaked/old link stops working on its own
-// without needing a separate expiry column.
-const CAMERA_ACTIVE_MATCH_STATUSES = new Set(["Veto", "Live", "WaitingForServer"]);
+// played or about to be — the camera_required flow mints tokens on
+// the veto->Live transition (see
+// MatchesController.generateCameraTokensIfRequired), while an admin's
+// on-demand spot check (CameraService.requestSpotCheck) can mint one
+// as early as check-in, before the match has a lineup lock or a
+// server. Either way, dead once the match leaves this set, so a
+// leaked/old link stops working on its own without needing a separate
+// expiry column.
+const CAMERA_ACTIVE_MATCH_STATUSES = new Set([
+  "WaitingForCheckIn",
+  "Veto",
+  "Live",
+  "WaitingForServer",
+]);
 
 export type CameraTokenLookup = {
   matchId: string;
