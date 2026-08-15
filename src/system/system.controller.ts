@@ -142,6 +142,11 @@ export class SystemController {
   }
 
   @HasuraAction()
+  public async getMediaServerStats() {
+    return await this.system.getMediaServerStats();
+  }
+
+  @HasuraAction()
   public async updateServices() {
     await this.system.updateServices();
 

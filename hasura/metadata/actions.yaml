@@ -442,6 +442,14 @@ actions:
       forward_client_headers: true
     permissions:
       - role: administrator
+  - name: getMediaServerStats
+    definition:
+      kind: ""
+      handler: '{{HASURA_GRAPHQL_ACTIONS_HOOK}}'
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+    comment: Live MediaMTX camera-server stats (publishing/paths/sessions) plus pod CPU/memory usage
   - name: getStorageStats
     definition:
       kind: ""
@@ -1323,6 +1331,7 @@ custom_types:
     - name: GpuStats
     - name: GpuDeviceStat
     - name: PodStats
+    - name: MediaServerStats
     - name: TelemetryStats
     - name: TestUploadResponse
     - name: GetTestUploadResponse

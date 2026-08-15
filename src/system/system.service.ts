@@ -5,6 +5,7 @@ import {
   CoreV1Api,
   KubeConfig,
   AppsV1Api,
+  CustomObjectsApi,
   setHeaderOptions,
   PatchStrategy,
 } from "@kubernetes/client-node";
@@ -21,6 +22,7 @@ import { GameServersConfig } from "src/configs/types/GameServersConfig";
 export class SystemService {
   private apiClient: CoreV1Api;
   private appsClient: AppsV1Api;
+  private metricsClient: CustomObjectsApi;
 
   private featuresDetected = false;
 
@@ -61,6 +63,7 @@ export class SystemService {
     kc.loadFromDefault();
     this.apiClient = kc.makeApiClient(CoreV1Api);
     this.appsClient = kc.makeApiClient(AppsV1Api);
+    this.metricsClient = kc.makeApiClient(CustomObjectsApi);
   }
 
   public async getSetting<T extends string | number | boolean>(
@@ -650,5 +653,148 @@ export class SystemService {
           break;
       }
     }
+  }
+
+  // --- Media server (mediamtx-camera) live status, for the admin
+  // "Media Server" page. Two independent data sources combined into one
+  // response: MediaMTX's own API (publishing/paths/webrtc session
+  // counts -- same /v3/paths/list endpoint pollMediaMtxViewers already
+  // polls for the *other* mediamtx instance, game streams) and the
+  // cluster's metrics-server (CPU/memory the pod is actually using
+  // right now). Deliberately scoped to mediamtx-camera (player
+  // cameras + lobby-call), not the game-streaming mediamtx -- DEAFCS
+  // runs them as two separate instances, unlike upstream 5stack where
+  // they're one, so "how much is the camera server using" is a
+  // meaningful question on its own.
+  public async getMediaServerStats(): Promise<{
+    publishing: number;
+    paths: number;
+    webrtcSessions: number;
+    cpuMilliCores: number;
+    memoryBytes: number;
+  }> {
+    const [mtxStats, podUsage] = await Promise.all([
+      this.fetchMediaMtxCameraStats(),
+      this.getMediaMtxCameraPodUsage(),
+    ]);
+
+    return { ...mtxStats, ...podUsage };
+  }
+
+  private async fetchMediaMtxCameraStats(): Promise<{
+    publishing: number;
+    paths: number;
+    webrtcSessions: number;
+  }> {
+    const host = process.env.MEDIAMTX_CAMERA_HOST || "mediamtx-camera";
+    const apiPort = process.env.MEDIAMTX_CAMERA_API_PORT || "9998";
+    const base = `http://${host}:${apiPort}`;
+
+    try {
+      const [pathsRes, sessionsRes] = await Promise.all([
+        fetch(`${base}/v3/paths/list`, { signal: AbortSignal.timeout(5_000) }),
+        fetch(`${base}/v3/webrtcsessions/list`, {
+          signal: AbortSignal.timeout(5_000),
+        }),
+      ]);
+
+      if (!pathsRes.ok) {
+        throw new Error(`paths/list -> ${pathsRes.status}`);
+      }
+      const pathsPayload = (await pathsRes.json()) as {
+        items?: Array<{ ready?: boolean }>;
+      };
+      const items = pathsPayload.items ?? [];
+
+      let webrtcSessions = 0;
+      if (sessionsRes.ok) {
+        const sessionsPayload = (await sessionsRes.json()) as {
+          items?: unknown[];
+        };
+        webrtcSessions = sessionsPayload.items?.length ?? 0;
+      }
+
+      return {
+        paths: items.length,
+        publishing: items.filter((item) => item.ready === true).length,
+        webrtcSessions,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `getMediaServerStats: mediamtx-camera ${base} unreachable: ${(error as Error)?.message}`,
+      );
+      return { publishing: 0, paths: 0, webrtcSessions: 0 };
+    }
+  }
+
+  private async getMediaMtxCameraPodUsage(): Promise<{
+    cpuMilliCores: number;
+    memoryBytes: number;
+  }> {
+    const namespace = process.env.MEDIAMTX_CAMERA_NAMESPACE || "5stack";
+    const labelSelector =
+      process.env.MEDIAMTX_CAMERA_POD_LABEL || "app=mediamtx-camera";
+
+    try {
+      const pods = await this.apiClient.listNamespacedPod({
+        namespace,
+        labelSelector,
+      });
+      const podName = pods.items?.[0]?.metadata?.name;
+      if (!podName) {
+        return { cpuMilliCores: 0, memoryBytes: 0 };
+      }
+
+      const metrics = (await this.metricsClient.getNamespacedCustomObject({
+        group: "metrics.k8s.io",
+        version: "v1beta1",
+        namespace,
+        plural: "pods",
+        name: podName,
+      })) as { containers?: Array<{ usage?: { cpu?: string; memory?: string } }> };
+
+      let cpuMilliCores = 0;
+      let memoryBytes = 0;
+      for (const container of metrics.containers ?? []) {
+        cpuMilliCores += this.parseCpuToMilliCores(container.usage?.cpu ?? "0");
+        memoryBytes += this.parseMemoryToBytes(container.usage?.memory ?? "0");
+      }
+      return { cpuMilliCores, memoryBytes };
+    } catch (error) {
+      this.logger.warn(
+        `getMediaServerStats: could not read pod metrics for ${labelSelector} in ${namespace}: ${(error as Error)?.message}`,
+      );
+      return { cpuMilliCores: 0, memoryBytes: 0 };
+    }
+  }
+
+  // metrics.k8s.io reports cpu as nanocores ("n"), microcores ("u"),
+  // millicores ("m"), or bare cores -- normalized to millicores here
+  // since that's the unit CpuChart.vue/the rest of the panel already
+  // charts in.
+  private parseCpuToMilliCores(value: string): number {
+    if (value.endsWith("n")) return Number(value.slice(0, -1)) / 1_000_000;
+    if (value.endsWith("u")) return Number(value.slice(0, -1)) / 1_000;
+    if (value.endsWith("m")) return Number(value.slice(0, -1));
+    return Number(value) * 1000;
+  }
+
+  // metrics.k8s.io reports memory as a Ki/Mi/Gi (binary) or K/M/G
+  // (decimal) suffixed quantity, or a bare byte count.
+  private parseMemoryToBytes(value: string): number {
+    const units: Record<string, number> = {
+      Ki: 1024,
+      Mi: 1024 ** 2,
+      Gi: 1024 ** 3,
+      K: 1000,
+      M: 1000 ** 2,
+      G: 1000 ** 3,
+    };
+    for (const [suffix, multiplier] of Object.entries(units)) {
+      if (value.endsWith(suffix)) {
+        return Number(value.slice(0, -suffix.length)) * multiplier;
+      }
+    }
+    return Number(value);
   }
 }

@@ -306,6 +306,10 @@ type Query {
 }
 
 type Query {
+  getMediaServerStats: MediaServerStats!
+}
+
+type Query {
   getStorageStats(
     schemas: [String!]
   ): StorageStats!
@@ -1179,6 +1183,14 @@ type PodStats {
   name: String!
   cpu: CpuStat
   memory: MemoryStat
+}
+
+type MediaServerStats {
+  publishing: Int!
+  paths: Int!
+  webrtcSessions: Int!
+  cpuMilliCores: Float!
+  memoryBytes: Float!
 }
 
 type TelemetryStats {
