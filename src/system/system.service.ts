@@ -672,6 +672,8 @@ export class SystemService {
     webrtcSessions: number;
     cpuMilliCores: number;
     memoryBytes: number;
+    cpuLimitMilliCores: number;
+    memoryLimitBytes: number;
   }> {
     const [mtxStats, podUsage] = await Promise.all([
       this.fetchMediaMtxCameraStats(),
@@ -730,6 +732,8 @@ export class SystemService {
   private async getMediaMtxCameraPodUsage(): Promise<{
     cpuMilliCores: number;
     memoryBytes: number;
+    cpuLimitMilliCores: number;
+    memoryLimitBytes: number;
   }> {
     const namespace = process.env.MEDIAMTX_CAMERA_NAMESPACE || "5stack";
     const labelSelector =
@@ -740,10 +744,28 @@ export class SystemService {
         namespace,
         labelSelector,
       });
-      const podName = pods.items?.[0]?.metadata?.name;
+      const pod = pods.items?.[0];
+      const podName = pod?.metadata?.name;
       if (!podName) {
-        return { cpuMilliCores: 0, memoryBytes: 0 };
+        return {
+          cpuMilliCores: 0,
+          memoryBytes: 0,
+          cpuLimitMilliCores: 0,
+          memoryLimitBytes: 0,
+        };
       }
+
+      // The container's own resource limits (from the deployment spec,
+      // not metrics-server) give the chart a real denominator -- "% of
+      // what this pod is actually allowed to use" instead of a made-up
+      // scale.
+      const limits = pod?.spec?.containers?.[0]?.resources?.limits;
+      const cpuLimitMilliCores = limits?.cpu
+        ? this.parseCpuToMilliCores(limits.cpu)
+        : 0;
+      const memoryLimitBytes = limits?.memory
+        ? this.parseMemoryToBytes(limits.memory)
+        : 0;
 
       const metrics = (await this.metricsClient.getNamespacedCustomObject({
         group: "metrics.k8s.io",
@@ -759,12 +781,17 @@ export class SystemService {
         cpuMilliCores += this.parseCpuToMilliCores(container.usage?.cpu ?? "0");
         memoryBytes += this.parseMemoryToBytes(container.usage?.memory ?? "0");
       }
-      return { cpuMilliCores, memoryBytes };
+      return { cpuMilliCores, memoryBytes, cpuLimitMilliCores, memoryLimitBytes };
     } catch (error) {
       this.logger.warn(
         `getMediaServerStats: could not read pod metrics for ${labelSelector} in ${namespace}: ${(error as Error)?.message}`,
       );
-      return { cpuMilliCores: 0, memoryBytes: 0 };
+      return {
+        cpuMilliCores: 0,
+        memoryBytes: 0,
+        cpuLimitMilliCores: 0,
+        memoryLimitBytes: 0,
+      };
     }
   }
 

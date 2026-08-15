@@ -1191,6 +1191,8 @@ type MediaServerStats {
   webrtcSessions: Int!
   cpuMilliCores: Float!
   memoryBytes: Float!
+  cpuLimitMilliCores: Float!
+  memoryLimitBytes: Float!
 }
 
 type TelemetryStats {
