@@ -139,6 +139,17 @@ export class CameraController {
     return { ok: true };
   }
 
+  @Post("admin/:matchId/:steamId/request/cancel")
+  public async adminCancelSpotCheck(
+    @Param("matchId") matchId: string,
+    @Param("steamId") steamId: string,
+    @Req() request: Request,
+  ) {
+    const user = this.requireUser(request);
+    await this.camera.cancelSpotCheck(matchId, steamId, user);
+    return { ok: true };
+  }
+
   // Admin side of a video call to one specific player.
 
   @Post("admin/:matchId/:steamId/talk/whip")

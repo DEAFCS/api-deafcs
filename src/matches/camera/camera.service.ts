@@ -269,6 +269,27 @@ export class CameraService {
     );
   }
 
+  // Cancels a pending/active spot check — clears requested_at so the
+  // player's CameraRequirementOverlay hides itself again (its
+  // showCameraOverlay check re-evaluates live off the same subscription
+  // requestSpotCheck feeds). A no-op if nothing was requested; doesn't
+  // touch the token itself or kill any WHIP session already in
+  // progress, since a token that pre-dates the spot check (eg. one
+  // camera_required already minted) must keep working afterwards.
+  public async cancelSpotCheck(
+    matchId: string,
+    steamId: string,
+    user: User,
+  ): Promise<void> {
+    await this.assertCanWatch(matchId, user);
+    await this.postgres.query(
+      `update match_camera_tokens
+       set requested_at = null
+       where match_id = $1 and steam_id = $2`,
+      [matchId, steamId],
+    );
+  }
+
   // --- Talk mode: admin video-calls a specific player ---
   // Admin's browser WHIP-publishes mic+cam to the talk path; the
   // player's join page polls talk status and, once ready, WHEP-pulls
