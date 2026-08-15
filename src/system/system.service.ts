@@ -755,17 +755,24 @@ export class SystemService {
         };
       }
 
-      // The container's own resource limits (from the deployment spec,
-      // not metrics-server) give the chart a real denominator -- "% of
-      // what this pod is actually allowed to use" instead of a made-up
-      // scale.
-      const limits = pod?.spec?.containers?.[0]?.resources?.limits;
-      const cpuLimitMilliCores = limits?.cpu
-        ? this.parseCpuToMilliCores(limits.cpu)
-        : 0;
-      const memoryLimitBytes = limits?.memory
-        ? this.parseMemoryToBytes(limits.memory)
-        : 0;
+      // The chart's denominator is the *node's* total CPU/memory
+      // capacity, not the container's own resource limit (256Mi looked
+      // tiny and misleading next to an 8GB VPS -- the point of this
+      // page is "how much of the box is the camera server eating",
+      // same framing as the reference 5stack screenshot).
+      let cpuLimitMilliCores = 0;
+      let memoryLimitBytes = 0;
+      const nodeName = pod?.spec?.nodeName;
+      if (nodeName) {
+        const node = await this.apiClient.readNode({ name: nodeName });
+        const capacity = node?.status?.capacity;
+        if (capacity?.cpu) {
+          cpuLimitMilliCores = this.parseCpuToMilliCores(capacity.cpu);
+        }
+        if (capacity?.memory) {
+          memoryLimitBytes = this.parseMemoryToBytes(capacity.memory);
+        }
+      }
 
       const metrics = (await this.metricsClient.getNamespacedCustomObject({
         group: "metrics.k8s.io",
