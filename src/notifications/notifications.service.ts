@@ -30,6 +30,17 @@ export class NotificationsService {
     "ScrimTimeChanged",
     "ScrimAlertMatch",
     "FormTeamSuggestion",
+    // Chat message content is private -- these must never reach the
+    // Discord support webhook (see ChatService.notifyLobbyMembers,
+    // which routes every non-Global lobby type through this same
+    // notifyPlayers, including 1:1 direct messages). GlobalChatMessage
+    // is listed too even though it currently goes through sendSilent
+    // instead (never reaches this check at all) -- listed here as a
+    // defense-in-depth guard against a future refactor accidentally
+    // routing it through notifyPlayers/send.
+    "ChatMessage",
+    "MatchChatMessage",
+    "GlobalChatMessage",
   ]);
 
   constructor(
