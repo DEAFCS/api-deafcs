@@ -31,6 +31,7 @@ export type CameraPlayerStatus = {
   name: string | null;
   lineupId: string;
   ready: boolean;
+  requested: boolean;
 };
 
 @Injectable()
@@ -194,6 +195,23 @@ export class CameraService {
       throw new Error("match lineups not found");
     }
 
+    // One query for every player's spot-check state, rather than one
+    // per player -- this is what feeds the (⋮) menu's Request/Stop
+    // toggle, so it needs to stay cheap even on a full 10-player
+    // scoreboard poll.
+    const { match_camera_tokens } = await this.hasura.query({
+      match_camera_tokens: {
+        __args: { where: { match_id: { _eq: matchId } } },
+        steam_id: true,
+        requested_at: true,
+      },
+    });
+    const requestedSteamIds = new Set(
+      (match_camera_tokens ?? [])
+        .filter((row) => !!row.requested_at)
+        .map((row) => String(row.steam_id)),
+    );
+
     const withStatus = async (lineup: {
       id: string;
       name: string;
@@ -216,6 +234,7 @@ export class CameraService {
             name: lineupPlayer.player?.name ?? null,
             lineupId: lineup.id,
             ready,
+            requested: requestedSteamIds.has(String(lineupPlayer.steam_id)),
           };
         }),
       ),
