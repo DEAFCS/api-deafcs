@@ -5,7 +5,12 @@
 // preferences are stored per-category, not per-type (see
 // push_notification_preferences).
 export const NOTIFICATION_CATEGORIES: Record<string, string[]> = {
+  // Non-match lobby chats (matchmaking queue, draft, tournament, …).
+  // Match chat is deliberately its own category below -- it fires far
+  // more often once a match is actually live, and got reported as
+  // distracting during active play (buzzing the phone mid-match).
   chat: ["ChatMessage"],
+  match_chat: ["MatchChatMessage"],
   // Separate from `chat` on purpose -- Global Chat is high-traffic, so it
   // defaults to OFF (see CATEGORY_DEFAULT_ENABLED below) unlike every
   // other category, which defaults to on.
@@ -58,7 +63,7 @@ export const NOTIFICATION_CATEGORY_KEYS = Object.keys(NOTIFICATION_CATEGORIES);
 
 // Every category defaults to enabled (absence of a preference row means
 // "on") except the ones listed here explicitly as opt-in.
-const OPT_IN_CATEGORIES = new Set(["global_chat"]);
+const OPT_IN_CATEGORIES = new Set(["global_chat", "match_chat"]);
 
 export function isCategoryEnabledByDefault(category: string): boolean {
   return !OPT_IN_CATEGORIES.has(category);
