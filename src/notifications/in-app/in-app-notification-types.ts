@@ -12,9 +12,13 @@ export type InAppNotificationTypeConfig = {
   adminOnly: boolean;
 };
 
+// Chat types (ChatMessage, MatchChatMessage, GlobalChatMessage) are
+// deliberately absent -- they never reach the bell at all (see the
+// _nin filter on the frontend's bell subscription in NotificationStore.ts),
+// so a toggle for them here would control nothing. Chat has its own
+// unread-count badge on the chat icon instead; the bell is reserved for
+// non-message alerts (match imports, server/system status, etc.).
 export const IN_APP_TOGGLEABLE_TYPES: InAppNotificationTypeConfig[] = [
-  { type: "ChatMessage", defaultEnabled: true, adminOnly: false },
-  { type: "GlobalChatMessage", defaultEnabled: true, adminOnly: false },
   { type: "MatchImported", defaultEnabled: false, adminOnly: false },
   { type: "NewsPublished", defaultEnabled: true, adminOnly: false },
   { type: "DedicatedServerRconStatus", defaultEnabled: true, adminOnly: true },
