@@ -367,6 +367,195 @@ export class TournamentsController {
     };
   }
 
+  // Individual sign-up (match_options.individual_registration_enabled):
+  // ELO-balances everyone in tournament_individual_signups into fresh,
+  // ad-hoc tournament_teams (team_id left NULL, same as a brand-new
+  // tournament-only team created via the normal join form). Snake-draft
+  // order across the generated teams -- sort by ELO (shuffled first, so
+  // players tied/close in ELO land in random relative order, matching the
+  // "random but balanced" request), then deal round 1 team1..teamN, round 2
+  // teamN..team1, etc. Same spirit as DraftService.autoSplit's "always give
+  // the next player to whichever side needs one" greedy fill, generalized
+  // from 2 sides to N.
+  //
+  // Leftover players (registered count not evenly divisible by team size)
+  // are marked Waitlisted rather than forced onto an undersized team.
+  @HasuraAction()
+  public async generateTournamentTeams(data: {
+    user: User;
+    tournament_id: string;
+  }) {
+    const { tournament_id } = data;
+
+    const { tournaments_by_pk: tournament } = await this.hasura.query(
+      {
+        tournaments_by_pk: {
+          __args: { id: tournament_id },
+          id: true,
+          status: true,
+          is_organizer: true,
+          min_players_per_lineup: true,
+          max_players_per_lineup: true,
+          options: {
+            individual_registration_enabled: true,
+          },
+        },
+      },
+      data.user.steam_id,
+    );
+
+    if (!tournament) {
+      throw Error("tournament not found");
+    }
+    if (!tournament.is_organizer) {
+      throw Error("not the tournament organizer");
+    }
+    if (!tournament.options?.individual_registration_enabled) {
+      throw Error("individual registration is not enabled for this tournament");
+    }
+    if (tournament.status !== "RegistrationClosed") {
+      throw Error("registration must be closed before generating teams");
+    }
+
+    const teamSize =
+      tournament.min_players_per_lineup || tournament.max_players_per_lineup;
+    if (!teamSize || teamSize < 1) {
+      throw Error("tournament has no configured lineup size");
+    }
+
+    const { tournament_individual_signups: signups } = await this.hasura.query({
+      tournament_individual_signups: {
+        __args: {
+          where: {
+            tournament_id: { _eq: tournament_id },
+            status: { _eq: "Registered" },
+          },
+        },
+        id: true,
+        player_steam_id: true,
+        player: {
+          name: true,
+          elo: true,
+        },
+      },
+    });
+
+    if (!signups?.length) {
+      throw Error("no individually-registered players to generate teams from");
+    }
+
+    // wingman = 2v2, everything else (competitive 5v5, etc.) uses the
+    // competitive ladder -- there's no third team-size bracket today.
+    const eloKey = teamSize === 2 ? "wingman" : "competitive";
+
+    const shuffled = TournamentsController.shuffle(signups);
+    const ranked = shuffled
+      .map((signup) => ({
+        signupId: signup.id as string,
+        steamId: String(signup.player_steam_id),
+        name: (signup.player?.name as string) ?? null,
+        elo: Number((signup.player?.elo as Record<string, number>)?.[eloKey] ?? 5000),
+      }))
+      .sort((a, b) => b.elo - a.elo);
+
+    const teamCount = Math.floor(ranked.length / teamSize);
+    if (teamCount < 1) {
+      throw Error(
+        `not enough registered players (${ranked.length}) for a single ${teamSize}-player team`,
+      );
+    }
+
+    const assignedCount = teamCount * teamSize;
+    const waitlisted = ranked.slice(assignedCount);
+    const toAssign = ranked.slice(0, assignedCount);
+
+    // Snake draft across teamCount teams.
+    const teams: Array<typeof toAssign> = Array.from(
+      { length: teamCount },
+      (): typeof toAssign => [],
+    );
+    let round = 0;
+    let index = 0;
+    while (index < toAssign.length) {
+      const order =
+        round % 2 === 0
+          ? Array.from({ length: teamCount }, (_, i) => i)
+          : Array.from({ length: teamCount }, (_, i) => teamCount - 1 - i);
+      for (const teamIndex of order) {
+        if (index >= toAssign.length) break;
+        teams[teamIndex].push(toAssign[index]);
+        index++;
+      }
+      round++;
+    }
+
+    await this.postgres.transaction(async (client) => {
+      for (const [teamIndex, roster] of teams.entries()) {
+        // Highest-ELO player on the generated roster stands in as
+        // owner/captain -- there's no "team owner" concept for a pool of
+        // strangers auto-assigned together, this just satisfies
+        // tournament_teams.owner_steam_id NOT NULL with a defensible pick.
+        const captain = roster[0];
+        const teamRow = await client.query<{ id: string }>(
+          `INSERT INTO public.tournament_teams
+             (tournament_id, name, owner_steam_id, captain_steam_id, team_id)
+           VALUES ($1, $2, $3, $3, NULL)
+           RETURNING id`,
+          [
+            tournament_id,
+            `Team ${teamIndex + 1}`,
+            captain.steamId,
+          ],
+        );
+        const tournamentTeamId = teamRow.rows[0].id;
+
+        for (const player of roster) {
+          await client.query(
+            `INSERT INTO public.tournament_team_roster
+               (tournament_team_id, player_steam_id, tournament_id)
+             VALUES ($1, $2, $3)`,
+            [tournamentTeamId, player.steamId, tournament_id],
+          );
+          await client.query(
+            `UPDATE public.tournament_individual_signups
+             SET status = 'Assigned', tournament_team_id = $1
+             WHERE id = $2`,
+            [tournamentTeamId, player.signupId],
+          );
+        }
+      }
+
+      if (waitlisted.length) {
+        await client.query(
+          `UPDATE public.tournament_individual_signups
+           SET status = 'Waitlisted'
+           WHERE id = ANY($1::uuid[])`,
+          [waitlisted.map((player) => player.signupId)],
+        );
+      }
+    });
+
+    this.logger.log(
+      `[${tournament_id}] generated ${teamCount} team(s) (${assignedCount} players) from individual sign-ups, ${waitlisted.length} waitlisted`,
+    );
+
+    return {
+      teamsCreated: teamCount,
+      waitlisted: waitlisted.length,
+    };
+  }
+
+  private static shuffle<T>(items: Array<T>): Array<T> {
+    const result = [...items];
+    for (let index = result.length - 1; index > 0; index--) {
+      const swap = Math.floor(Math.random() * (index + 1));
+      const temp = result[index];
+      result[index] = result[swap];
+      result[swap] = temp;
+    }
+    return result;
+  }
+
   // Deletes this tournament's match rows through the supplied transaction
   // client, using only parameterized SQL, and returns the match ids that
   // were actually deleted (for the post-commit S3 purge).

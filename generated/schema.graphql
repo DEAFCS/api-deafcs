@@ -284,6 +284,11 @@ input Float_comparison_exp {
   _nin: [Float!]
 }
 
+type GenerateTournamentTeamsOutput {
+  teamsCreated: Int!
+  waitlisted: Int!
+}
+
 type GetTestUploadResponse {
   error: String
   link: String
@@ -403,6 +408,16 @@ type MeResponse {
   profile_url: String
   role: String!
   steam_id: String!
+}
+
+type MediaServerStats {
+  cpuLimitMilliCores: Float!
+  cpuMilliCores: Float!
+  memoryBytes: Float!
+  memoryLimitBytes: Float!
+  paths: Int!
+  publishing: Int!
+  webrtcSessions: Int!
 }
 
 type MemoryStat {
@@ -11917,6 +11932,9 @@ enum e_notification_types_enum {
   """Your league team no longer meets the minimum roster size"""
   LeagueRosterUndersized
 
+  """New message in a match chat"""
+  MatchChatMessage
+
   """A Valve match you played was imported to 5stack"""
   MatchImported
 
@@ -11934,6 +11952,9 @@ enum e_notification_types_enum {
 
   """NameChangeRequest"""
   NameChangeRequest
+
+  """A news article was published"""
+  NewsPublished
 
   """Player search reindex finished"""
   PlayerReindex
@@ -14756,6 +14777,186 @@ input e_tournament_categories_updates {
 
   """filter the rows which have to be updated"""
   where: e_tournament_categories_bool_exp!
+}
+
+"""
+columns and relationships of "e_tournament_individual_signup_status"
+"""
+type e_tournament_individual_signup_status {
+  description: String!
+  value: String!
+}
+
+"""
+aggregated selection of "e_tournament_individual_signup_status"
+"""
+type e_tournament_individual_signup_status_aggregate {
+  aggregate: e_tournament_individual_signup_status_aggregate_fields
+  nodes: [e_tournament_individual_signup_status!]!
+}
+
+"""
+aggregate fields of "e_tournament_individual_signup_status"
+"""
+type e_tournament_individual_signup_status_aggregate_fields {
+  count(columns: [e_tournament_individual_signup_status_select_column!], distinct: Boolean): Int!
+  max: e_tournament_individual_signup_status_max_fields
+  min: e_tournament_individual_signup_status_min_fields
+}
+
+"""
+Boolean expression to filter rows from the table "e_tournament_individual_signup_status". All fields are combined with a logical 'AND'.
+"""
+input e_tournament_individual_signup_status_bool_exp {
+  _and: [e_tournament_individual_signup_status_bool_exp!]
+  _not: e_tournament_individual_signup_status_bool_exp
+  _or: [e_tournament_individual_signup_status_bool_exp!]
+  description: String_comparison_exp
+  value: String_comparison_exp
+}
+
+"""
+unique or primary key constraints on table "e_tournament_individual_signup_status"
+"""
+enum e_tournament_individual_signup_status_constraint {
+  """
+  unique or primary key constraint on columns "value"
+  """
+  e_tournament_individual_signup_status_pkey
+}
+
+enum e_tournament_individual_signup_status_enum {
+  """Placed onto a generated tournament_teams row"""
+  Assigned
+
+  """Waiting for the organizer to generate teams"""
+  Registered
+
+  """
+  Left over once teams were generated -- not evenly divisible by team size
+  """
+  Waitlisted
+}
+
+"""
+Boolean expression to compare columns of type "e_tournament_individual_signup_status_enum". All fields are combined with logical 'AND'.
+"""
+input e_tournament_individual_signup_status_enum_comparison_exp {
+  _eq: e_tournament_individual_signup_status_enum
+  _in: [e_tournament_individual_signup_status_enum!]
+  _is_null: Boolean
+  _neq: e_tournament_individual_signup_status_enum
+  _nin: [e_tournament_individual_signup_status_enum!]
+}
+
+"""
+input type for inserting data into table "e_tournament_individual_signup_status"
+"""
+input e_tournament_individual_signup_status_insert_input {
+  description: String
+  value: String
+}
+
+"""aggregate max on columns"""
+type e_tournament_individual_signup_status_max_fields {
+  description: String
+  value: String
+}
+
+"""aggregate min on columns"""
+type e_tournament_individual_signup_status_min_fields {
+  description: String
+  value: String
+}
+
+"""
+response of any mutation on the table "e_tournament_individual_signup_status"
+"""
+type e_tournament_individual_signup_status_mutation_response {
+  """number of rows affected by the mutation"""
+  affected_rows: Int!
+
+  """data from the rows affected by the mutation"""
+  returning: [e_tournament_individual_signup_status!]!
+}
+
+"""
+on_conflict condition type for table "e_tournament_individual_signup_status"
+"""
+input e_tournament_individual_signup_status_on_conflict {
+  constraint: e_tournament_individual_signup_status_constraint!
+  update_columns: [e_tournament_individual_signup_status_update_column!]! = []
+  where: e_tournament_individual_signup_status_bool_exp
+}
+
+"""
+Ordering options when selecting data from "e_tournament_individual_signup_status".
+"""
+input e_tournament_individual_signup_status_order_by {
+  description: order_by
+  value: order_by
+}
+
+"""
+primary key columns input for table: e_tournament_individual_signup_status
+"""
+input e_tournament_individual_signup_status_pk_columns_input {
+  value: String!
+}
+
+"""
+select columns of table "e_tournament_individual_signup_status"
+"""
+enum e_tournament_individual_signup_status_select_column {
+  """column name"""
+  description
+
+  """column name"""
+  value
+}
+
+"""
+input type for updating data in table "e_tournament_individual_signup_status"
+"""
+input e_tournament_individual_signup_status_set_input {
+  description: String
+  value: String
+}
+
+"""
+Streaming cursor of the table "e_tournament_individual_signup_status"
+"""
+input e_tournament_individual_signup_status_stream_cursor_input {
+  """Stream column input with initial value"""
+  initial_value: e_tournament_individual_signup_status_stream_cursor_value_input!
+
+  """cursor ordering"""
+  ordering: cursor_ordering
+}
+
+"""Initial value of the column from where the streaming should start"""
+input e_tournament_individual_signup_status_stream_cursor_value_input {
+  description: String
+  value: String
+}
+
+"""
+update columns of table "e_tournament_individual_signup_status"
+"""
+enum e_tournament_individual_signup_status_update_column {
+  """column name"""
+  description
+
+  """column name"""
+  value
+}
+
+input e_tournament_individual_signup_status_updates {
+  """sets the columns of the filtered rows to the given values"""
+  _set: e_tournament_individual_signup_status_set_input
+
+  """filter the rows which have to be updated"""
+  where: e_tournament_individual_signup_status_bool_exp!
 }
 
 """
@@ -26449,6 +26650,249 @@ input lobbies_updates {
 }
 
 """
+columns and relationships of "lobby_camera_tokens"
+"""
+type lobby_camera_tokens {
+  created_at: timestamptz!
+  lobby_id: uuid!
+  steam_id: bigint!
+  token: uuid!
+}
+
+"""
+aggregated selection of "lobby_camera_tokens"
+"""
+type lobby_camera_tokens_aggregate {
+  aggregate: lobby_camera_tokens_aggregate_fields
+  nodes: [lobby_camera_tokens!]!
+}
+
+"""
+aggregate fields of "lobby_camera_tokens"
+"""
+type lobby_camera_tokens_aggregate_fields {
+  avg: lobby_camera_tokens_avg_fields
+  count(columns: [lobby_camera_tokens_select_column!], distinct: Boolean): Int!
+  max: lobby_camera_tokens_max_fields
+  min: lobby_camera_tokens_min_fields
+  stddev: lobby_camera_tokens_stddev_fields
+  stddev_pop: lobby_camera_tokens_stddev_pop_fields
+  stddev_samp: lobby_camera_tokens_stddev_samp_fields
+  sum: lobby_camera_tokens_sum_fields
+  var_pop: lobby_camera_tokens_var_pop_fields
+  var_samp: lobby_camera_tokens_var_samp_fields
+  variance: lobby_camera_tokens_variance_fields
+}
+
+"""aggregate avg on columns"""
+type lobby_camera_tokens_avg_fields {
+  steam_id: Float
+}
+
+"""
+Boolean expression to filter rows from the table "lobby_camera_tokens". All fields are combined with a logical 'AND'.
+"""
+input lobby_camera_tokens_bool_exp {
+  _and: [lobby_camera_tokens_bool_exp!]
+  _not: lobby_camera_tokens_bool_exp
+  _or: [lobby_camera_tokens_bool_exp!]
+  created_at: timestamptz_comparison_exp
+  lobby_id: uuid_comparison_exp
+  steam_id: bigint_comparison_exp
+  token: uuid_comparison_exp
+}
+
+"""
+unique or primary key constraints on table "lobby_camera_tokens"
+"""
+enum lobby_camera_tokens_constraint {
+  """
+  unique or primary key constraint on columns "lobby_id", "steam_id"
+  """
+  lobby_camera_tokens_lobby_id_steam_id_key
+
+  """
+  unique or primary key constraint on columns "token"
+  """
+  lobby_camera_tokens_pkey
+}
+
+"""
+input type for incrementing numeric columns in table "lobby_camera_tokens"
+"""
+input lobby_camera_tokens_inc_input {
+  steam_id: bigint
+}
+
+"""
+input type for inserting data into table "lobby_camera_tokens"
+"""
+input lobby_camera_tokens_insert_input {
+  created_at: timestamptz
+  lobby_id: uuid
+  steam_id: bigint
+  token: uuid
+}
+
+"""aggregate max on columns"""
+type lobby_camera_tokens_max_fields {
+  created_at: timestamptz
+  lobby_id: uuid
+  steam_id: bigint
+  token: uuid
+}
+
+"""aggregate min on columns"""
+type lobby_camera_tokens_min_fields {
+  created_at: timestamptz
+  lobby_id: uuid
+  steam_id: bigint
+  token: uuid
+}
+
+"""
+response of any mutation on the table "lobby_camera_tokens"
+"""
+type lobby_camera_tokens_mutation_response {
+  """number of rows affected by the mutation"""
+  affected_rows: Int!
+
+  """data from the rows affected by the mutation"""
+  returning: [lobby_camera_tokens!]!
+}
+
+"""
+on_conflict condition type for table "lobby_camera_tokens"
+"""
+input lobby_camera_tokens_on_conflict {
+  constraint: lobby_camera_tokens_constraint!
+  update_columns: [lobby_camera_tokens_update_column!]! = []
+  where: lobby_camera_tokens_bool_exp
+}
+
+"""Ordering options when selecting data from "lobby_camera_tokens"."""
+input lobby_camera_tokens_order_by {
+  created_at: order_by
+  lobby_id: order_by
+  steam_id: order_by
+  token: order_by
+}
+
+"""primary key columns input for table: lobby_camera_tokens"""
+input lobby_camera_tokens_pk_columns_input {
+  token: uuid!
+}
+
+"""
+select columns of table "lobby_camera_tokens"
+"""
+enum lobby_camera_tokens_select_column {
+  """column name"""
+  created_at
+
+  """column name"""
+  lobby_id
+
+  """column name"""
+  steam_id
+
+  """column name"""
+  token
+}
+
+"""
+input type for updating data in table "lobby_camera_tokens"
+"""
+input lobby_camera_tokens_set_input {
+  created_at: timestamptz
+  lobby_id: uuid
+  steam_id: bigint
+  token: uuid
+}
+
+"""aggregate stddev on columns"""
+type lobby_camera_tokens_stddev_fields {
+  steam_id: Float
+}
+
+"""aggregate stddev_pop on columns"""
+type lobby_camera_tokens_stddev_pop_fields {
+  steam_id: Float
+}
+
+"""aggregate stddev_samp on columns"""
+type lobby_camera_tokens_stddev_samp_fields {
+  steam_id: Float
+}
+
+"""
+Streaming cursor of the table "lobby_camera_tokens"
+"""
+input lobby_camera_tokens_stream_cursor_input {
+  """Stream column input with initial value"""
+  initial_value: lobby_camera_tokens_stream_cursor_value_input!
+
+  """cursor ordering"""
+  ordering: cursor_ordering
+}
+
+"""Initial value of the column from where the streaming should start"""
+input lobby_camera_tokens_stream_cursor_value_input {
+  created_at: timestamptz
+  lobby_id: uuid
+  steam_id: bigint
+  token: uuid
+}
+
+"""aggregate sum on columns"""
+type lobby_camera_tokens_sum_fields {
+  steam_id: bigint
+}
+
+"""
+update columns of table "lobby_camera_tokens"
+"""
+enum lobby_camera_tokens_update_column {
+  """column name"""
+  created_at
+
+  """column name"""
+  lobby_id
+
+  """column name"""
+  steam_id
+
+  """column name"""
+  token
+}
+
+input lobby_camera_tokens_updates {
+  """increments the numeric columns with given value of the filtered values"""
+  _inc: lobby_camera_tokens_inc_input
+
+  """sets the columns of the filtered rows to the given values"""
+  _set: lobby_camera_tokens_set_input
+
+  """filter the rows which have to be updated"""
+  where: lobby_camera_tokens_bool_exp!
+}
+
+"""aggregate var_pop on columns"""
+type lobby_camera_tokens_var_pop_fields {
+  steam_id: Float
+}
+
+"""aggregate var_samp on columns"""
+type lobby_camera_tokens_var_samp_fields {
+  steam_id: Float
+}
+
+"""aggregate variance on columns"""
+type lobby_camera_tokens_variance_fields {
+  steam_id: Float
+}
+
+"""
 columns and relationships of "lobby_players"
 """
 type lobby_players {
@@ -27546,6 +27990,7 @@ type match_camera_tokens {
   """An object relationship"""
   match: matches!
   match_id: uuid!
+  requested_at: timestamptz
   steam_id: bigint!
   token: uuid!
 }
@@ -27556,6 +28001,17 @@ aggregated selection of "match_camera_tokens"
 type match_camera_tokens_aggregate {
   aggregate: match_camera_tokens_aggregate_fields
   nodes: [match_camera_tokens!]!
+}
+
+input match_camera_tokens_aggregate_bool_exp {
+  count: match_camera_tokens_aggregate_bool_exp_count
+}
+
+input match_camera_tokens_aggregate_bool_exp_count {
+  arguments: [match_camera_tokens_select_column!]
+  distinct: Boolean
+  filter: match_camera_tokens_bool_exp
+  predicate: Int_comparison_exp!
 }
 
 """
@@ -27575,9 +28031,43 @@ type match_camera_tokens_aggregate_fields {
   variance: match_camera_tokens_variance_fields
 }
 
+"""
+order by aggregate values of table "match_camera_tokens"
+"""
+input match_camera_tokens_aggregate_order_by {
+  avg: match_camera_tokens_avg_order_by
+  count: order_by
+  max: match_camera_tokens_max_order_by
+  min: match_camera_tokens_min_order_by
+  stddev: match_camera_tokens_stddev_order_by
+  stddev_pop: match_camera_tokens_stddev_pop_order_by
+  stddev_samp: match_camera_tokens_stddev_samp_order_by
+  sum: match_camera_tokens_sum_order_by
+  var_pop: match_camera_tokens_var_pop_order_by
+  var_samp: match_camera_tokens_var_samp_order_by
+  variance: match_camera_tokens_variance_order_by
+}
+
+"""
+input type for inserting array relation for remote table "match_camera_tokens"
+"""
+input match_camera_tokens_arr_rel_insert_input {
+  data: [match_camera_tokens_insert_input!]!
+
+  """upsert condition"""
+  on_conflict: match_camera_tokens_on_conflict
+}
+
 """aggregate avg on columns"""
 type match_camera_tokens_avg_fields {
   steam_id: Float
+}
+
+"""
+order by avg() on columns of table "match_camera_tokens"
+"""
+input match_camera_tokens_avg_order_by {
+  steam_id: order_by
 }
 
 """
@@ -27591,6 +28081,7 @@ input match_camera_tokens_bool_exp {
   id: uuid_comparison_exp
   match: matches_bool_exp
   match_id: uuid_comparison_exp
+  requested_at: timestamptz_comparison_exp
   steam_id: bigint_comparison_exp
   token: uuid_comparison_exp
 }
@@ -27630,6 +28121,7 @@ input match_camera_tokens_insert_input {
   id: uuid
   match: matches_obj_rel_insert_input
   match_id: uuid
+  requested_at: timestamptz
   steam_id: bigint
   token: uuid
 }
@@ -27639,8 +28131,21 @@ type match_camera_tokens_max_fields {
   created_at: timestamptz
   id: uuid
   match_id: uuid
+  requested_at: timestamptz
   steam_id: bigint
   token: uuid
+}
+
+"""
+order by max() on columns of table "match_camera_tokens"
+"""
+input match_camera_tokens_max_order_by {
+  created_at: order_by
+  id: order_by
+  match_id: order_by
+  requested_at: order_by
+  steam_id: order_by
+  token: order_by
 }
 
 """aggregate min on columns"""
@@ -27648,8 +28153,21 @@ type match_camera_tokens_min_fields {
   created_at: timestamptz
   id: uuid
   match_id: uuid
+  requested_at: timestamptz
   steam_id: bigint
   token: uuid
+}
+
+"""
+order by min() on columns of table "match_camera_tokens"
+"""
+input match_camera_tokens_min_order_by {
+  created_at: order_by
+  id: order_by
+  match_id: order_by
+  requested_at: order_by
+  steam_id: order_by
+  token: order_by
 }
 
 """
@@ -27678,6 +28196,7 @@ input match_camera_tokens_order_by {
   id: order_by
   match: matches_order_by
   match_id: order_by
+  requested_at: order_by
   steam_id: order_by
   token: order_by
 }
@@ -27701,6 +28220,9 @@ enum match_camera_tokens_select_column {
   match_id
 
   """column name"""
+  requested_at
+
+  """column name"""
   steam_id
 
   """column name"""
@@ -27714,6 +28236,7 @@ input match_camera_tokens_set_input {
   created_at: timestamptz
   id: uuid
   match_id: uuid
+  requested_at: timestamptz
   steam_id: bigint
   token: uuid
 }
@@ -27723,14 +28246,35 @@ type match_camera_tokens_stddev_fields {
   steam_id: Float
 }
 
+"""
+order by stddev() on columns of table "match_camera_tokens"
+"""
+input match_camera_tokens_stddev_order_by {
+  steam_id: order_by
+}
+
 """aggregate stddev_pop on columns"""
 type match_camera_tokens_stddev_pop_fields {
   steam_id: Float
 }
 
+"""
+order by stddev_pop() on columns of table "match_camera_tokens"
+"""
+input match_camera_tokens_stddev_pop_order_by {
+  steam_id: order_by
+}
+
 """aggregate stddev_samp on columns"""
 type match_camera_tokens_stddev_samp_fields {
   steam_id: Float
+}
+
+"""
+order by stddev_samp() on columns of table "match_camera_tokens"
+"""
+input match_camera_tokens_stddev_samp_order_by {
+  steam_id: order_by
 }
 
 """
@@ -27749,6 +28293,7 @@ input match_camera_tokens_stream_cursor_value_input {
   created_at: timestamptz
   id: uuid
   match_id: uuid
+  requested_at: timestamptz
   steam_id: bigint
   token: uuid
 }
@@ -27756,6 +28301,13 @@ input match_camera_tokens_stream_cursor_value_input {
 """aggregate sum on columns"""
 type match_camera_tokens_sum_fields {
   steam_id: bigint
+}
+
+"""
+order by sum() on columns of table "match_camera_tokens"
+"""
+input match_camera_tokens_sum_order_by {
+  steam_id: order_by
 }
 
 """
@@ -27770,6 +28322,9 @@ enum match_camera_tokens_update_column {
 
   """column name"""
   match_id
+
+  """column name"""
+  requested_at
 
   """column name"""
   steam_id
@@ -27794,14 +28349,35 @@ type match_camera_tokens_var_pop_fields {
   steam_id: Float
 }
 
+"""
+order by var_pop() on columns of table "match_camera_tokens"
+"""
+input match_camera_tokens_var_pop_order_by {
+  steam_id: order_by
+}
+
 """aggregate var_samp on columns"""
 type match_camera_tokens_var_samp_fields {
   steam_id: Float
 }
 
+"""
+order by var_samp() on columns of table "match_camera_tokens"
+"""
+input match_camera_tokens_var_samp_order_by {
+  steam_id: order_by
+}
+
 """aggregate variance on columns"""
 type match_camera_tokens_variance_fields {
   steam_id: Float
+}
+
+"""
+order by variance() on columns of table "match_camera_tokens"
+"""
+input match_camera_tokens_variance_order_by {
+  steam_id: order_by
 }
 
 """
@@ -29154,6 +29730,7 @@ type match_lineup_players {
 
   """An object relationship"""
   player: players
+  roster_image_url_snapshot: String
   steam_id: bigint
 }
 
@@ -29267,6 +29844,7 @@ input match_lineup_players_bool_exp {
   party_source: e_match_party_sources_enum_comparison_exp
   placeholder_name: String_comparison_exp
   player: players_bool_exp
+  roster_image_url_snapshot: String_comparison_exp
   steam_id: bigint_comparison_exp
 }
 
@@ -29313,6 +29891,7 @@ input match_lineup_players_insert_input {
   party_source: e_match_party_sources_enum
   placeholder_name: String
   player: players_obj_rel_insert_input
+  roster_image_url_snapshot: String
   steam_id: bigint
 }
 
@@ -29324,6 +29903,7 @@ type match_lineup_players_max_fields {
   match_lineup_id: uuid
   party_id: uuid
   placeholder_name: String
+  roster_image_url_snapshot: String
   steam_id: bigint
 }
 
@@ -29337,6 +29917,7 @@ input match_lineup_players_max_order_by {
   match_lineup_id: order_by
   party_id: order_by
   placeholder_name: order_by
+  roster_image_url_snapshot: order_by
   steam_id: order_by
 }
 
@@ -29348,6 +29929,7 @@ type match_lineup_players_min_fields {
   match_lineup_id: uuid
   party_id: uuid
   placeholder_name: String
+  roster_image_url_snapshot: String
   steam_id: bigint
 }
 
@@ -29361,6 +29943,7 @@ input match_lineup_players_min_order_by {
   match_lineup_id: order_by
   party_id: order_by
   placeholder_name: order_by
+  roster_image_url_snapshot: order_by
   steam_id: order_by
 }
 
@@ -29398,6 +29981,7 @@ input match_lineup_players_order_by {
   party_source: order_by
   placeholder_name: order_by
   player: players_order_by
+  roster_image_url_snapshot: order_by
   steam_id: order_by
 }
 
@@ -29439,6 +30023,9 @@ enum match_lineup_players_select_column {
 
   """column name"""
   placeholder_name
+
+  """column name"""
+  roster_image_url_snapshot
 
   """column name"""
   steam_id
@@ -29486,6 +30073,7 @@ input match_lineup_players_set_input {
   party_id: uuid
   party_source: e_match_party_sources_enum
   placeholder_name: String
+  roster_image_url_snapshot: String
   steam_id: bigint
 }
 
@@ -29548,6 +30136,7 @@ input match_lineup_players_stream_cursor_value_input {
   party_id: uuid
   party_source: e_match_party_sources_enum
   placeholder_name: String
+  roster_image_url_snapshot: String
   steam_id: bigint
 }
 
@@ -29596,6 +30185,9 @@ enum match_lineup_players_update_column {
 
   """column name"""
   placeholder_name
+
+  """column name"""
+  roster_image_url_snapshot
 
   """column name"""
   steam_id
@@ -33502,6 +34094,7 @@ type match_options {
   """
   has_active_matches: Boolean
   id: uuid!
+  individual_registration_enabled: Boolean!
   invite_code: String
   knife_round: Boolean!
   live_match_timeout: Int
@@ -33623,6 +34216,7 @@ input match_options_bool_exp {
   halftime_pausematch: Boolean_comparison_exp
   has_active_matches: Boolean_comparison_exp
   id: uuid_comparison_exp
+  individual_registration_enabled: Boolean_comparison_exp
   invite_code: String_comparison_exp
   knife_round: Boolean_comparison_exp
   live_match_timeout: Int_comparison_exp
@@ -33685,6 +34279,7 @@ input match_options_insert_input {
   default_models: Boolean
   halftime_pausematch: Boolean
   id: uuid
+  individual_registration_enabled: Boolean
   invite_code: String
   knife_round: Boolean
   live_match_timeout: Int
@@ -33782,6 +34377,7 @@ input match_options_order_by {
   halftime_pausematch: order_by
   has_active_matches: order_by
   id: order_by
+  individual_registration_enabled: order_by
   invite_code: order_by
   knife_round: order_by
   live_match_timeout: order_by
@@ -33842,6 +34438,9 @@ enum match_options_select_column {
 
   """column name"""
   id
+
+  """column name"""
+  individual_registration_enabled
 
   """column name"""
   invite_code
@@ -33911,6 +34510,7 @@ input match_options_set_input {
   default_models: Boolean
   halftime_pausematch: Boolean
   id: uuid
+  individual_registration_enabled: Boolean
   invite_code: String
   knife_round: Boolean
   live_match_timeout: Int
@@ -33986,6 +34586,7 @@ input match_options_stream_cursor_value_input {
   default_models: Boolean
   halftime_pausematch: Boolean
   id: uuid
+  individual_registration_enabled: Boolean
   invite_code: String
   knife_round: Boolean
   live_match_timeout: Int
@@ -34047,6 +34648,9 @@ enum match_options_update_column {
 
   """column name"""
   id
+
+  """column name"""
+  individual_registration_enabled
 
   """column name"""
   invite_code
@@ -35215,6 +35819,42 @@ input match_type_cfgs_updates {
 columns and relationships of "matches"
 """
 type matches {
+  """An array relationship"""
+  camera_tokens(
+    """distinct select on columns"""
+    distinct_on: [match_camera_tokens_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [match_camera_tokens_order_by!]
+
+    """filter the rows returned"""
+    where: match_camera_tokens_bool_exp
+  ): [match_camera_tokens!]!
+
+  """An aggregate relationship"""
+  camera_tokens_aggregate(
+    """distinct select on columns"""
+    distinct_on: [match_camera_tokens_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [match_camera_tokens_order_by!]
+
+    """filter the rows returned"""
+    where: match_camera_tokens_bool_exp
+  ): match_camera_tokens_aggregate!
+
   """
   A computed field, executes function "can_assign_server_to_match"
   """
@@ -36142,6 +36782,8 @@ input matches_bool_exp {
   _and: [matches_bool_exp!]
   _not: matches_bool_exp
   _or: [matches_bool_exp!]
+  camera_tokens: match_camera_tokens_bool_exp
+  camera_tokens_aggregate: match_camera_tokens_aggregate_bool_exp
   can_assign_server: Boolean_comparison_exp
   can_cancel: Boolean_comparison_exp
   can_check_in: Boolean_comparison_exp
@@ -36280,6 +36922,7 @@ input matches_inc_input {
 input type for inserting data into table "matches"
 """
 input matches_insert_input {
+  camera_tokens: match_camera_tokens_arr_rel_insert_input
   cancels_at: timestamptz
   clutches: v_match_clutches_arr_rel_insert_input
   created_at: timestamptz
@@ -36589,6 +37232,7 @@ input matches_on_conflict {
 
 """Ordering options when selecting data from "matches"."""
 input matches_order_by {
+  camera_tokens_aggregate: match_camera_tokens_aggregate_order_by
   can_assign_server: order_by
   can_cancel: order_by
   can_check_in: order_by
@@ -38042,6 +38686,19 @@ type mutation_root {
   delete_e_tournament_categories_by_pk(value: String!): e_tournament_categories
 
   """
+  delete data from the table: "e_tournament_individual_signup_status"
+  """
+  delete_e_tournament_individual_signup_status(
+    """filter the rows which have to be deleted"""
+    where: e_tournament_individual_signup_status_bool_exp!
+  ): e_tournament_individual_signup_status_mutation_response
+
+  """
+  delete single row from the table: "e_tournament_individual_signup_status"
+  """
+  delete_e_tournament_individual_signup_status_by_pk(value: String!): e_tournament_individual_signup_status
+
+  """
   delete data from the table: "e_tournament_stage_types"
   """
   delete_e_tournament_stage_types(
@@ -38412,6 +39069,19 @@ type mutation_root {
   delete single row from the table: "lobbies"
   """
   delete_lobbies_by_pk(id: uuid!): lobbies
+
+  """
+  delete data from the table: "lobby_camera_tokens"
+  """
+  delete_lobby_camera_tokens(
+    """filter the rows which have to be deleted"""
+    where: lobby_camera_tokens_bool_exp!
+  ): lobby_camera_tokens_mutation_response
+
+  """
+  delete single row from the table: "lobby_camera_tokens"
+  """
+  delete_lobby_camera_tokens_by_pk(token: uuid!): lobby_camera_tokens
 
   """
   delete data from the table: "lobby_players"
@@ -39262,6 +39932,19 @@ type mutation_root {
   delete_tournament_categories_by_pk(category: e_tournament_categories_enum!, tournament_id: uuid!): tournament_categories
 
   """
+  delete data from the table: "tournament_individual_signups"
+  """
+  delete_tournament_individual_signups(
+    """filter the rows which have to be deleted"""
+    where: tournament_individual_signups_bool_exp!
+  ): tournament_individual_signups_mutation_response
+
+  """
+  delete single row from the table: "tournament_individual_signups"
+  """
+  delete_tournament_individual_signups_by_pk(id: uuid!): tournament_individual_signups
+
+  """
   delete data from the table: "tournament_organizer_teams"
   """
   delete_tournament_organizer_teams(
@@ -39445,6 +40128,9 @@ type mutation_root {
   """
   denyNameChange(name: String!, steam_id: bigint!): SuccessOutput
   forfeitMatch(match_id: uuid!, winning_lineup_id: uuid!): SuccessOutput
+
+  """ELO-balance individually-registered players into tournament teams"""
+  generateTournamentTeams(tournament_id: uuid!): GenerateTournamentTeamsOutput
 
   """
   Live pod GSI snapshot — slots, sides, alive/dead. Drives the stream-deck.
@@ -40600,6 +41286,28 @@ type mutation_root {
   ): e_tournament_categories
 
   """
+  insert data into the table: "e_tournament_individual_signup_status"
+  """
+  insert_e_tournament_individual_signup_status(
+    """the rows to be inserted"""
+    objects: [e_tournament_individual_signup_status_insert_input!]!
+
+    """upsert condition"""
+    on_conflict: e_tournament_individual_signup_status_on_conflict
+  ): e_tournament_individual_signup_status_mutation_response
+
+  """
+  insert a single row into the table: "e_tournament_individual_signup_status"
+  """
+  insert_e_tournament_individual_signup_status_one(
+    """the row to be inserted"""
+    object: e_tournament_individual_signup_status_insert_input!
+
+    """upsert condition"""
+    on_conflict: e_tournament_individual_signup_status_on_conflict
+  ): e_tournament_individual_signup_status
+
+  """
   insert data into the table: "e_tournament_stage_types"
   """
   insert_e_tournament_stage_types(
@@ -41230,6 +41938,28 @@ type mutation_root {
     """upsert condition"""
     on_conflict: lobbies_on_conflict
   ): lobbies
+
+  """
+  insert data into the table: "lobby_camera_tokens"
+  """
+  insert_lobby_camera_tokens(
+    """the rows to be inserted"""
+    objects: [lobby_camera_tokens_insert_input!]!
+
+    """upsert condition"""
+    on_conflict: lobby_camera_tokens_on_conflict
+  ): lobby_camera_tokens_mutation_response
+
+  """
+  insert a single row into the table: "lobby_camera_tokens"
+  """
+  insert_lobby_camera_tokens_one(
+    """the row to be inserted"""
+    object: lobby_camera_tokens_insert_input!
+
+    """upsert condition"""
+    on_conflict: lobby_camera_tokens_on_conflict
+  ): lobby_camera_tokens
 
   """
   insert data into the table: "lobby_players"
@@ -42670,6 +43400,28 @@ type mutation_root {
     """upsert condition"""
     on_conflict: tournament_categories_on_conflict
   ): tournament_categories
+
+  """
+  insert data into the table: "tournament_individual_signups"
+  """
+  insert_tournament_individual_signups(
+    """the rows to be inserted"""
+    objects: [tournament_individual_signups_insert_input!]!
+
+    """upsert condition"""
+    on_conflict: tournament_individual_signups_on_conflict
+  ): tournament_individual_signups_mutation_response
+
+  """
+  insert a single row into the table: "tournament_individual_signups"
+  """
+  insert_tournament_individual_signups_one(
+    """the row to be inserted"""
+    object: tournament_individual_signups_insert_input!
+
+    """upsert condition"""
+    on_conflict: tournament_individual_signups_on_conflict
+  ): tournament_individual_signups
 
   """
   insert data into the table: "tournament_organizer_teams"
@@ -44935,6 +45687,34 @@ type mutation_root {
   ): [e_tournament_categories_mutation_response]
 
   """
+  update data of the table: "e_tournament_individual_signup_status"
+  """
+  update_e_tournament_individual_signup_status(
+    """sets the columns of the filtered rows to the given values"""
+    _set: e_tournament_individual_signup_status_set_input
+
+    """filter the rows which have to be updated"""
+    where: e_tournament_individual_signup_status_bool_exp!
+  ): e_tournament_individual_signup_status_mutation_response
+
+  """
+  update single row of the table: "e_tournament_individual_signup_status"
+  """
+  update_e_tournament_individual_signup_status_by_pk(
+    """sets the columns of the filtered rows to the given values"""
+    _set: e_tournament_individual_signup_status_set_input
+    pk_columns: e_tournament_individual_signup_status_pk_columns_input!
+  ): e_tournament_individual_signup_status
+
+  """
+  update multiples rows of table: "e_tournament_individual_signup_status"
+  """
+  update_e_tournament_individual_signup_status_many(
+    """updates to execute, in order"""
+    updates: [e_tournament_individual_signup_status_updates!]!
+  ): [e_tournament_individual_signup_status_mutation_response]
+
+  """
   update data of the table: "e_tournament_stage_types"
   """
   update_e_tournament_stage_types(
@@ -46009,6 +46789,40 @@ type mutation_root {
     """updates to execute, in order"""
     updates: [lobbies_updates!]!
   ): [lobbies_mutation_response]
+
+  """
+  update data of the table: "lobby_camera_tokens"
+  """
+  update_lobby_camera_tokens(
+    """increments the numeric columns with given value of the filtered values"""
+    _inc: lobby_camera_tokens_inc_input
+
+    """sets the columns of the filtered rows to the given values"""
+    _set: lobby_camera_tokens_set_input
+
+    """filter the rows which have to be updated"""
+    where: lobby_camera_tokens_bool_exp!
+  ): lobby_camera_tokens_mutation_response
+
+  """
+  update single row of the table: "lobby_camera_tokens"
+  """
+  update_lobby_camera_tokens_by_pk(
+    """increments the numeric columns with given value of the filtered values"""
+    _inc: lobby_camera_tokens_inc_input
+
+    """sets the columns of the filtered rows to the given values"""
+    _set: lobby_camera_tokens_set_input
+    pk_columns: lobby_camera_tokens_pk_columns_input!
+  ): lobby_camera_tokens
+
+  """
+  update multiples rows of table: "lobby_camera_tokens"
+  """
+  update_lobby_camera_tokens_many(
+    """updates to execute, in order"""
+    updates: [lobby_camera_tokens_updates!]!
+  ): [lobby_camera_tokens_mutation_response]
 
   """
   update data of the table: "lobby_players"
@@ -48394,6 +49208,40 @@ type mutation_root {
     """updates to execute, in order"""
     updates: [tournament_categories_updates!]!
   ): [tournament_categories_mutation_response]
+
+  """
+  update data of the table: "tournament_individual_signups"
+  """
+  update_tournament_individual_signups(
+    """increments the numeric columns with given value of the filtered values"""
+    _inc: tournament_individual_signups_inc_input
+
+    """sets the columns of the filtered rows to the given values"""
+    _set: tournament_individual_signups_set_input
+
+    """filter the rows which have to be updated"""
+    where: tournament_individual_signups_bool_exp!
+  ): tournament_individual_signups_mutation_response
+
+  """
+  update single row of the table: "tournament_individual_signups"
+  """
+  update_tournament_individual_signups_by_pk(
+    """increments the numeric columns with given value of the filtered values"""
+    _inc: tournament_individual_signups_inc_input
+
+    """sets the columns of the filtered rows to the given values"""
+    _set: tournament_individual_signups_set_input
+    pk_columns: tournament_individual_signups_pk_columns_input!
+  ): tournament_individual_signups
+
+  """
+  update multiples rows of table: "tournament_individual_signups"
+  """
+  update_tournament_individual_signups_many(
+    """updates to execute, in order"""
+    updates: [tournament_individual_signups_updates!]!
+  ): [tournament_individual_signups_mutation_response]
 
   """
   update data of the table: "tournament_organizer_teams"
@@ -73372,6 +74220,51 @@ type query_root {
   e_tournament_categories_by_pk(value: String!): e_tournament_categories
 
   """
+  fetch data from the table: "e_tournament_individual_signup_status"
+  """
+  e_tournament_individual_signup_status(
+    """distinct select on columns"""
+    distinct_on: [e_tournament_individual_signup_status_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [e_tournament_individual_signup_status_order_by!]
+
+    """filter the rows returned"""
+    where: e_tournament_individual_signup_status_bool_exp
+  ): [e_tournament_individual_signup_status!]!
+
+  """
+  fetch aggregated fields from the table: "e_tournament_individual_signup_status"
+  """
+  e_tournament_individual_signup_status_aggregate(
+    """distinct select on columns"""
+    distinct_on: [e_tournament_individual_signup_status_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [e_tournament_individual_signup_status_order_by!]
+
+    """filter the rows returned"""
+    where: e_tournament_individual_signup_status_bool_exp
+  ): e_tournament_individual_signup_status_aggregate!
+
+  """
+  fetch data from the table: "e_tournament_individual_signup_status" using primary key columns
+  """
+  e_tournament_individual_signup_status_by_pk(value: String!): e_tournament_individual_signup_status
+
+  """
   fetch data from the table: "e_tournament_stage_types"
   """
   e_tournament_stage_types(
@@ -74143,6 +75036,11 @@ type query_root {
 
   """Get index usage statistics"""
   getIndexStats(schemas: [String!]): [IndexStat]!
+
+  """
+  Live MediaMTX camera-server stats (publishing/paths/sessions) plus pod CPU/memory usage
+  """
+  getMediaServerStats: MediaServerStats!
   getNodeStats(node: String!): NodeStats!
 
   """Get detailed query analysis with EXPLAIN plan"""
@@ -74898,6 +75796,51 @@ type query_root {
 
   """fetch data from the table: "lobbies" using primary key columns"""
   lobbies_by_pk(id: uuid!): lobbies
+
+  """
+  fetch data from the table: "lobby_camera_tokens"
+  """
+  lobby_camera_tokens(
+    """distinct select on columns"""
+    distinct_on: [lobby_camera_tokens_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [lobby_camera_tokens_order_by!]
+
+    """filter the rows returned"""
+    where: lobby_camera_tokens_bool_exp
+  ): [lobby_camera_tokens!]!
+
+  """
+  fetch aggregated fields from the table: "lobby_camera_tokens"
+  """
+  lobby_camera_tokens_aggregate(
+    """distinct select on columns"""
+    distinct_on: [lobby_camera_tokens_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [lobby_camera_tokens_order_by!]
+
+    """filter the rows returned"""
+    where: lobby_camera_tokens_bool_exp
+  ): lobby_camera_tokens_aggregate!
+
+  """
+  fetch data from the table: "lobby_camera_tokens" using primary key columns
+  """
+  lobby_camera_tokens_by_pk(token: uuid!): lobby_camera_tokens
 
   """An array relationship"""
   lobby_players(
@@ -77943,6 +78886,51 @@ type query_root {
   fetch data from the table: "tournament_categories" using primary key columns
   """
   tournament_categories_by_pk(category: e_tournament_categories_enum!, tournament_id: uuid!): tournament_categories
+
+  """
+  fetch data from the table: "tournament_individual_signups"
+  """
+  tournament_individual_signups(
+    """distinct select on columns"""
+    distinct_on: [tournament_individual_signups_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [tournament_individual_signups_order_by!]
+
+    """filter the rows returned"""
+    where: tournament_individual_signups_bool_exp
+  ): [tournament_individual_signups!]!
+
+  """
+  fetch aggregated fields from the table: "tournament_individual_signups"
+  """
+  tournament_individual_signups_aggregate(
+    """distinct select on columns"""
+    distinct_on: [tournament_individual_signups_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [tournament_individual_signups_order_by!]
+
+    """filter the rows returned"""
+    where: tournament_individual_signups_bool_exp
+  ): tournament_individual_signups_aggregate!
+
+  """
+  fetch data from the table: "tournament_individual_signups" using primary key columns
+  """
+  tournament_individual_signups_by_pk(id: uuid!): tournament_individual_signups
 
   """
   fetch data from the table: "tournament_organizer_teams"
@@ -85153,6 +86141,65 @@ type subscription_root {
   ): [e_tournament_categories!]!
 
   """
+  fetch data from the table: "e_tournament_individual_signup_status"
+  """
+  e_tournament_individual_signup_status(
+    """distinct select on columns"""
+    distinct_on: [e_tournament_individual_signup_status_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [e_tournament_individual_signup_status_order_by!]
+
+    """filter the rows returned"""
+    where: e_tournament_individual_signup_status_bool_exp
+  ): [e_tournament_individual_signup_status!]!
+
+  """
+  fetch aggregated fields from the table: "e_tournament_individual_signup_status"
+  """
+  e_tournament_individual_signup_status_aggregate(
+    """distinct select on columns"""
+    distinct_on: [e_tournament_individual_signup_status_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [e_tournament_individual_signup_status_order_by!]
+
+    """filter the rows returned"""
+    where: e_tournament_individual_signup_status_bool_exp
+  ): e_tournament_individual_signup_status_aggregate!
+
+  """
+  fetch data from the table: "e_tournament_individual_signup_status" using primary key columns
+  """
+  e_tournament_individual_signup_status_by_pk(value: String!): e_tournament_individual_signup_status
+
+  """
+  fetch data from the table in a streaming manner: "e_tournament_individual_signup_status"
+  """
+  e_tournament_individual_signup_status_stream(
+    """maximum number of rows returned in a single batch"""
+    batch_size: Int!
+
+    """cursor to stream the results returned by the query"""
+    cursor: [e_tournament_individual_signup_status_stream_cursor_input]!
+
+    """filter the rows returned"""
+    where: e_tournament_individual_signup_status_bool_exp
+  ): [e_tournament_individual_signup_status!]!
+
+  """
   fetch data from the table: "e_tournament_stage_types"
   """
   e_tournament_stage_types(
@@ -87033,6 +88080,65 @@ type subscription_root {
     """filter the rows returned"""
     where: lobbies_bool_exp
   ): [lobbies!]!
+
+  """
+  fetch data from the table: "lobby_camera_tokens"
+  """
+  lobby_camera_tokens(
+    """distinct select on columns"""
+    distinct_on: [lobby_camera_tokens_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [lobby_camera_tokens_order_by!]
+
+    """filter the rows returned"""
+    where: lobby_camera_tokens_bool_exp
+  ): [lobby_camera_tokens!]!
+
+  """
+  fetch aggregated fields from the table: "lobby_camera_tokens"
+  """
+  lobby_camera_tokens_aggregate(
+    """distinct select on columns"""
+    distinct_on: [lobby_camera_tokens_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [lobby_camera_tokens_order_by!]
+
+    """filter the rows returned"""
+    where: lobby_camera_tokens_bool_exp
+  ): lobby_camera_tokens_aggregate!
+
+  """
+  fetch data from the table: "lobby_camera_tokens" using primary key columns
+  """
+  lobby_camera_tokens_by_pk(token: uuid!): lobby_camera_tokens
+
+  """
+  fetch data from the table in a streaming manner: "lobby_camera_tokens"
+  """
+  lobby_camera_tokens_stream(
+    """maximum number of rows returned in a single batch"""
+    batch_size: Int!
+
+    """cursor to stream the results returned by the query"""
+    cursor: [lobby_camera_tokens_stream_cursor_input]!
+
+    """filter the rows returned"""
+    where: lobby_camera_tokens_bool_exp
+  ): [lobby_camera_tokens!]!
 
   """An array relationship"""
   lobby_players(
@@ -91049,6 +92155,65 @@ type subscription_root {
     """filter the rows returned"""
     where: tournament_categories_bool_exp
   ): [tournament_categories!]!
+
+  """
+  fetch data from the table: "tournament_individual_signups"
+  """
+  tournament_individual_signups(
+    """distinct select on columns"""
+    distinct_on: [tournament_individual_signups_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [tournament_individual_signups_order_by!]
+
+    """filter the rows returned"""
+    where: tournament_individual_signups_bool_exp
+  ): [tournament_individual_signups!]!
+
+  """
+  fetch aggregated fields from the table: "tournament_individual_signups"
+  """
+  tournament_individual_signups_aggregate(
+    """distinct select on columns"""
+    distinct_on: [tournament_individual_signups_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [tournament_individual_signups_order_by!]
+
+    """filter the rows returned"""
+    where: tournament_individual_signups_bool_exp
+  ): tournament_individual_signups_aggregate!
+
+  """
+  fetch data from the table: "tournament_individual_signups" using primary key columns
+  """
+  tournament_individual_signups_by_pk(id: uuid!): tournament_individual_signups
+
+  """
+  fetch data from the table in a streaming manner: "tournament_individual_signups"
+  """
+  tournament_individual_signups_stream(
+    """maximum number of rows returned in a single batch"""
+    batch_size: Int!
+
+    """cursor to stream the results returned by the query"""
+    cursor: [tournament_individual_signups_stream_cursor_input]!
+
+    """filter the rows returned"""
+    where: tournament_individual_signups_bool_exp
+  ): [tournament_individual_signups!]!
 
   """
   fetch data from the table: "tournament_organizer_teams"
@@ -99180,6 +100345,411 @@ input tournament_categories_updates {
 }
 
 """
+columns and relationships of "tournament_individual_signups"
+"""
+type tournament_individual_signups {
+  created_at: timestamptz!
+  id: uuid!
+
+  """An object relationship"""
+  player: players!
+  player_steam_id: bigint!
+  status: e_tournament_individual_signup_status_enum!
+
+  """An object relationship"""
+  tournament: tournaments!
+  tournament_id: uuid!
+
+  """An object relationship"""
+  tournament_team: tournament_teams
+  tournament_team_id: uuid
+}
+
+"""
+aggregated selection of "tournament_individual_signups"
+"""
+type tournament_individual_signups_aggregate {
+  aggregate: tournament_individual_signups_aggregate_fields
+  nodes: [tournament_individual_signups!]!
+}
+
+input tournament_individual_signups_aggregate_bool_exp {
+  count: tournament_individual_signups_aggregate_bool_exp_count
+}
+
+input tournament_individual_signups_aggregate_bool_exp_count {
+  arguments: [tournament_individual_signups_select_column!]
+  distinct: Boolean
+  filter: tournament_individual_signups_bool_exp
+  predicate: Int_comparison_exp!
+}
+
+"""
+aggregate fields of "tournament_individual_signups"
+"""
+type tournament_individual_signups_aggregate_fields {
+  avg: tournament_individual_signups_avg_fields
+  count(columns: [tournament_individual_signups_select_column!], distinct: Boolean): Int!
+  max: tournament_individual_signups_max_fields
+  min: tournament_individual_signups_min_fields
+  stddev: tournament_individual_signups_stddev_fields
+  stddev_pop: tournament_individual_signups_stddev_pop_fields
+  stddev_samp: tournament_individual_signups_stddev_samp_fields
+  sum: tournament_individual_signups_sum_fields
+  var_pop: tournament_individual_signups_var_pop_fields
+  var_samp: tournament_individual_signups_var_samp_fields
+  variance: tournament_individual_signups_variance_fields
+}
+
+"""
+order by aggregate values of table "tournament_individual_signups"
+"""
+input tournament_individual_signups_aggregate_order_by {
+  avg: tournament_individual_signups_avg_order_by
+  count: order_by
+  max: tournament_individual_signups_max_order_by
+  min: tournament_individual_signups_min_order_by
+  stddev: tournament_individual_signups_stddev_order_by
+  stddev_pop: tournament_individual_signups_stddev_pop_order_by
+  stddev_samp: tournament_individual_signups_stddev_samp_order_by
+  sum: tournament_individual_signups_sum_order_by
+  var_pop: tournament_individual_signups_var_pop_order_by
+  var_samp: tournament_individual_signups_var_samp_order_by
+  variance: tournament_individual_signups_variance_order_by
+}
+
+"""
+input type for inserting array relation for remote table "tournament_individual_signups"
+"""
+input tournament_individual_signups_arr_rel_insert_input {
+  data: [tournament_individual_signups_insert_input!]!
+
+  """upsert condition"""
+  on_conflict: tournament_individual_signups_on_conflict
+}
+
+"""aggregate avg on columns"""
+type tournament_individual_signups_avg_fields {
+  player_steam_id: Float
+}
+
+"""
+order by avg() on columns of table "tournament_individual_signups"
+"""
+input tournament_individual_signups_avg_order_by {
+  player_steam_id: order_by
+}
+
+"""
+Boolean expression to filter rows from the table "tournament_individual_signups". All fields are combined with a logical 'AND'.
+"""
+input tournament_individual_signups_bool_exp {
+  _and: [tournament_individual_signups_bool_exp!]
+  _not: tournament_individual_signups_bool_exp
+  _or: [tournament_individual_signups_bool_exp!]
+  created_at: timestamptz_comparison_exp
+  id: uuid_comparison_exp
+  player: players_bool_exp
+  player_steam_id: bigint_comparison_exp
+  status: e_tournament_individual_signup_status_enum_comparison_exp
+  tournament: tournaments_bool_exp
+  tournament_id: uuid_comparison_exp
+  tournament_team: tournament_teams_bool_exp
+  tournament_team_id: uuid_comparison_exp
+}
+
+"""
+unique or primary key constraints on table "tournament_individual_signups"
+"""
+enum tournament_individual_signups_constraint {
+  """
+  unique or primary key constraint on columns "id"
+  """
+  tournament_individual_signups_pkey
+
+  """
+  unique or primary key constraint on columns "player_steam_id", "tournament_id"
+  """
+  tournament_individual_signups_tournament_id_player_steam_id_key
+}
+
+"""
+input type for incrementing numeric columns in table "tournament_individual_signups"
+"""
+input tournament_individual_signups_inc_input {
+  player_steam_id: bigint
+}
+
+"""
+input type for inserting data into table "tournament_individual_signups"
+"""
+input tournament_individual_signups_insert_input {
+  created_at: timestamptz
+  id: uuid
+  player: players_obj_rel_insert_input
+  player_steam_id: bigint
+  status: e_tournament_individual_signup_status_enum
+  tournament: tournaments_obj_rel_insert_input
+  tournament_id: uuid
+  tournament_team: tournament_teams_obj_rel_insert_input
+  tournament_team_id: uuid
+}
+
+"""aggregate max on columns"""
+type tournament_individual_signups_max_fields {
+  created_at: timestamptz
+  id: uuid
+  player_steam_id: bigint
+  tournament_id: uuid
+  tournament_team_id: uuid
+}
+
+"""
+order by max() on columns of table "tournament_individual_signups"
+"""
+input tournament_individual_signups_max_order_by {
+  created_at: order_by
+  id: order_by
+  player_steam_id: order_by
+  tournament_id: order_by
+  tournament_team_id: order_by
+}
+
+"""aggregate min on columns"""
+type tournament_individual_signups_min_fields {
+  created_at: timestamptz
+  id: uuid
+  player_steam_id: bigint
+  tournament_id: uuid
+  tournament_team_id: uuid
+}
+
+"""
+order by min() on columns of table "tournament_individual_signups"
+"""
+input tournament_individual_signups_min_order_by {
+  created_at: order_by
+  id: order_by
+  player_steam_id: order_by
+  tournament_id: order_by
+  tournament_team_id: order_by
+}
+
+"""
+response of any mutation on the table "tournament_individual_signups"
+"""
+type tournament_individual_signups_mutation_response {
+  """number of rows affected by the mutation"""
+  affected_rows: Int!
+
+  """data from the rows affected by the mutation"""
+  returning: [tournament_individual_signups!]!
+}
+
+"""
+on_conflict condition type for table "tournament_individual_signups"
+"""
+input tournament_individual_signups_on_conflict {
+  constraint: tournament_individual_signups_constraint!
+  update_columns: [tournament_individual_signups_update_column!]! = []
+  where: tournament_individual_signups_bool_exp
+}
+
+"""
+Ordering options when selecting data from "tournament_individual_signups".
+"""
+input tournament_individual_signups_order_by {
+  created_at: order_by
+  id: order_by
+  player: players_order_by
+  player_steam_id: order_by
+  status: order_by
+  tournament: tournaments_order_by
+  tournament_id: order_by
+  tournament_team: tournament_teams_order_by
+  tournament_team_id: order_by
+}
+
+"""primary key columns input for table: tournament_individual_signups"""
+input tournament_individual_signups_pk_columns_input {
+  id: uuid!
+}
+
+"""
+select columns of table "tournament_individual_signups"
+"""
+enum tournament_individual_signups_select_column {
+  """column name"""
+  created_at
+
+  """column name"""
+  id
+
+  """column name"""
+  player_steam_id
+
+  """column name"""
+  status
+
+  """column name"""
+  tournament_id
+
+  """column name"""
+  tournament_team_id
+}
+
+"""
+input type for updating data in table "tournament_individual_signups"
+"""
+input tournament_individual_signups_set_input {
+  created_at: timestamptz
+  id: uuid
+  player_steam_id: bigint
+  status: e_tournament_individual_signup_status_enum
+  tournament_id: uuid
+  tournament_team_id: uuid
+}
+
+"""aggregate stddev on columns"""
+type tournament_individual_signups_stddev_fields {
+  player_steam_id: Float
+}
+
+"""
+order by stddev() on columns of table "tournament_individual_signups"
+"""
+input tournament_individual_signups_stddev_order_by {
+  player_steam_id: order_by
+}
+
+"""aggregate stddev_pop on columns"""
+type tournament_individual_signups_stddev_pop_fields {
+  player_steam_id: Float
+}
+
+"""
+order by stddev_pop() on columns of table "tournament_individual_signups"
+"""
+input tournament_individual_signups_stddev_pop_order_by {
+  player_steam_id: order_by
+}
+
+"""aggregate stddev_samp on columns"""
+type tournament_individual_signups_stddev_samp_fields {
+  player_steam_id: Float
+}
+
+"""
+order by stddev_samp() on columns of table "tournament_individual_signups"
+"""
+input tournament_individual_signups_stddev_samp_order_by {
+  player_steam_id: order_by
+}
+
+"""
+Streaming cursor of the table "tournament_individual_signups"
+"""
+input tournament_individual_signups_stream_cursor_input {
+  """Stream column input with initial value"""
+  initial_value: tournament_individual_signups_stream_cursor_value_input!
+
+  """cursor ordering"""
+  ordering: cursor_ordering
+}
+
+"""Initial value of the column from where the streaming should start"""
+input tournament_individual_signups_stream_cursor_value_input {
+  created_at: timestamptz
+  id: uuid
+  player_steam_id: bigint
+  status: e_tournament_individual_signup_status_enum
+  tournament_id: uuid
+  tournament_team_id: uuid
+}
+
+"""aggregate sum on columns"""
+type tournament_individual_signups_sum_fields {
+  player_steam_id: bigint
+}
+
+"""
+order by sum() on columns of table "tournament_individual_signups"
+"""
+input tournament_individual_signups_sum_order_by {
+  player_steam_id: order_by
+}
+
+"""
+update columns of table "tournament_individual_signups"
+"""
+enum tournament_individual_signups_update_column {
+  """column name"""
+  created_at
+
+  """column name"""
+  id
+
+  """column name"""
+  player_steam_id
+
+  """column name"""
+  status
+
+  """column name"""
+  tournament_id
+
+  """column name"""
+  tournament_team_id
+}
+
+input tournament_individual_signups_updates {
+  """increments the numeric columns with given value of the filtered values"""
+  _inc: tournament_individual_signups_inc_input
+
+  """sets the columns of the filtered rows to the given values"""
+  _set: tournament_individual_signups_set_input
+
+  """filter the rows which have to be updated"""
+  where: tournament_individual_signups_bool_exp!
+}
+
+"""aggregate var_pop on columns"""
+type tournament_individual_signups_var_pop_fields {
+  player_steam_id: Float
+}
+
+"""
+order by var_pop() on columns of table "tournament_individual_signups"
+"""
+input tournament_individual_signups_var_pop_order_by {
+  player_steam_id: order_by
+}
+
+"""aggregate var_samp on columns"""
+type tournament_individual_signups_var_samp_fields {
+  player_steam_id: Float
+}
+
+"""
+order by var_samp() on columns of table "tournament_individual_signups"
+"""
+input tournament_individual_signups_var_samp_order_by {
+  player_steam_id: order_by
+}
+
+"""aggregate variance on columns"""
+type tournament_individual_signups_variance_fields {
+  player_steam_id: Float
+}
+
+"""
+order by variance() on columns of table "tournament_individual_signups"
+"""
+input tournament_individual_signups_variance_order_by {
+  player_steam_id: order_by
+}
+
+"""
 columns and relationships of "tournament_organizer_teams"
 """
 type tournament_organizer_teams {
@@ -101853,6 +103423,7 @@ type tournament_team_roster {
   player: players!
   player_steam_id: bigint!
   role: e_team_roles_enum!
+  roster_image_url_snapshot: String
 
   """An object relationship"""
   tournament: tournaments!
@@ -101949,6 +103520,7 @@ input tournament_team_roster_bool_exp {
   player: players_bool_exp
   player_steam_id: bigint_comparison_exp
   role: e_team_roles_enum_comparison_exp
+  roster_image_url_snapshot: String_comparison_exp
   tournament: tournaments_bool_exp
   tournament_id: uuid_comparison_exp
   tournament_team: tournament_teams_bool_exp
@@ -101985,6 +103557,7 @@ input tournament_team_roster_insert_input {
   player: players_obj_rel_insert_input
   player_steam_id: bigint
   role: e_team_roles_enum
+  roster_image_url_snapshot: String
   tournament: tournaments_obj_rel_insert_input
   tournament_id: uuid
   tournament_team: tournament_teams_obj_rel_insert_input
@@ -101994,6 +103567,7 @@ input tournament_team_roster_insert_input {
 """aggregate max on columns"""
 type tournament_team_roster_max_fields {
   player_steam_id: bigint
+  roster_image_url_snapshot: String
   tournament_id: uuid
   tournament_team_id: uuid
 }
@@ -102003,6 +103577,7 @@ order by max() on columns of table "tournament_team_roster"
 """
 input tournament_team_roster_max_order_by {
   player_steam_id: order_by
+  roster_image_url_snapshot: order_by
   tournament_id: order_by
   tournament_team_id: order_by
 }
@@ -102010,6 +103585,7 @@ input tournament_team_roster_max_order_by {
 """aggregate min on columns"""
 type tournament_team_roster_min_fields {
   player_steam_id: bigint
+  roster_image_url_snapshot: String
   tournament_id: uuid
   tournament_team_id: uuid
 }
@@ -102019,6 +103595,7 @@ order by min() on columns of table "tournament_team_roster"
 """
 input tournament_team_roster_min_order_by {
   player_steam_id: order_by
+  roster_image_url_snapshot: order_by
   tournament_id: order_by
   tournament_team_id: order_by
 }
@@ -102049,6 +103626,7 @@ input tournament_team_roster_order_by {
   player: players_order_by
   player_steam_id: order_by
   role: order_by
+  roster_image_url_snapshot: order_by
   tournament: tournaments_order_by
   tournament_id: order_by
   tournament_team: tournament_teams_order_by
@@ -102072,6 +103650,9 @@ enum tournament_team_roster_select_column {
   role
 
   """column name"""
+  roster_image_url_snapshot
+
+  """column name"""
   tournament_id
 
   """column name"""
@@ -102084,6 +103665,7 @@ input type for updating data in table "tournament_team_roster"
 input tournament_team_roster_set_input {
   player_steam_id: bigint
   role: e_team_roles_enum
+  roster_image_url_snapshot: String
   tournament_id: uuid
   tournament_team_id: uuid
 }
@@ -102139,6 +103721,7 @@ input tournament_team_roster_stream_cursor_input {
 input tournament_team_roster_stream_cursor_value_input {
   player_steam_id: bigint
   role: e_team_roles_enum
+  roster_image_url_snapshot: String
   tournament_id: uuid
   tournament_team_id: uuid
 }
@@ -102164,6 +103747,9 @@ enum tournament_team_roster_update_column {
 
   """column name"""
   role
+
+  """column name"""
+  roster_image_url_snapshot
 
   """column name"""
   tournament_id
@@ -103830,6 +105416,42 @@ type tournaments {
   homepage: String
   id: uuid!
 
+  """An array relationship"""
+  individual_signups(
+    """distinct select on columns"""
+    distinct_on: [tournament_individual_signups_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [tournament_individual_signups_order_by!]
+
+    """filter the rows returned"""
+    where: tournament_individual_signups_bool_exp
+  ): [tournament_individual_signups!]!
+
+  """An aggregate relationship"""
+  individual_signups_aggregate(
+    """distinct select on columns"""
+    distinct_on: [tournament_individual_signups_select_column!]
+
+    """limit the number of rows returned"""
+    limit: Int
+
+    """skip the first n rows. Use only with order_by"""
+    offset: Int
+
+    """sort the rows by one or more columns"""
+    order_by: [tournament_individual_signups_order_by!]
+
+    """filter the rows returned"""
+    where: tournament_individual_signups_bool_exp
+  ): tournament_individual_signups_aggregate!
+
   """
   A computed field, executes function "is_tournament_organizer"
   """
@@ -104451,6 +106073,8 @@ input tournaments_bool_exp {
   has_min_teams: Boolean_comparison_exp
   homepage: String_comparison_exp
   id: uuid_comparison_exp
+  individual_signups: tournament_individual_signups_bool_exp
+  individual_signups_aggregate: tournament_individual_signups_aggregate_bool_exp
   is_organizer: Boolean_comparison_exp
   joined_tournament: Boolean_comparison_exp
   latitude: float8_comparison_exp
@@ -104545,6 +106169,7 @@ input tournaments_insert_input {
   e_tournament_status: e_tournament_status_obj_rel_insert_input
   homepage: String
   id: uuid
+  individual_signups: tournament_individual_signups_arr_rel_insert_input
   latitude: float8
   league_season_division: league_season_divisions_obj_rel_insert_input
   location: String
@@ -104746,6 +106371,7 @@ input tournaments_order_by {
   has_min_teams: order_by
   homepage: order_by
   id: order_by
+  individual_signups_aggregate: tournament_individual_signups_aggregate_order_by
   is_organizer: order_by
   joined_tournament: order_by
   latitude: order_by

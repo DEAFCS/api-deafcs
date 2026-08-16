@@ -28,6 +28,13 @@ array_relationships:
         table:
           name: tournament_categories
           schema: public
+  - name: individual_signups
+    using:
+      foreign_key_constraint_on:
+        column: tournament_id
+        table:
+          name: tournament_individual_signups
+          schema: public
   - name: organizer_teams
     using:
       foreign_key_constraint_on:

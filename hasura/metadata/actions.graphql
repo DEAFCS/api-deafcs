@@ -219,6 +219,17 @@ type Mutation {
   ): SuccessOutput
 }
 
+type GenerateTournamentTeamsOutput {
+  teamsCreated: Int!
+  waitlisted: Int!
+}
+
+type Mutation {
+  generateTournamentTeams(
+    tournament_id: uuid!
+  ): GenerateTournamentTeamsOutput
+}
+
 type Mutation {
   denyInvite(
     invite_id: uuid!
