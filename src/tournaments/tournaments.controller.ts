@@ -545,6 +545,108 @@ export class TournamentsController {
     };
   }
 
+  // Opens (or re-opens) a check-in window for everyone currently
+  // Registered -- resets checked_in_at so a re-opened window (eg. the
+  // automatic re-open ProcessTournamentCheckInExpiry does after promoting
+  // waitlisted players) starts every affected player fresh, not carrying
+  // over a check-in from a previous round they were never part of.
+  @HasuraAction()
+  public async startTournamentIndividualCheckIn(data: {
+    user: User;
+    tournament_id: string;
+    duration_minutes: number;
+  }) {
+    const { tournament_id, duration_minutes } = data;
+    if (!Number.isFinite(duration_minutes) || duration_minutes < 1) {
+      throw Error("duration_minutes must be at least 1");
+    }
+
+    const { tournaments_by_pk: tournament } = await this.hasura.query(
+      {
+        tournaments_by_pk: {
+          __args: { id: tournament_id },
+          id: true,
+          is_organizer: true,
+          status: true,
+          options: { individual_registration_enabled: true },
+        },
+      },
+      data.user.steam_id,
+    );
+
+    if (!tournament) {
+      throw Error("tournament not found");
+    }
+    if (!tournament.is_organizer) {
+      throw Error("not the tournament organizer");
+    }
+    if (!tournament.options?.individual_registration_enabled) {
+      throw Error("individual registration is not enabled for this tournament");
+    }
+    if (tournament.status !== "RegistrationClosed") {
+      throw Error("registration must be closed before starting check-in");
+    }
+
+    const endsAt = new Date(Date.now() + duration_minutes * 60_000);
+
+    await this.postgres.query(
+      `UPDATE public.tournaments
+       SET individual_check_in_ends_at = $1, individual_check_in_duration_minutes = $2
+       WHERE id = $3`,
+      [endsAt, duration_minutes, tournament_id],
+    );
+    await this.postgres.query(
+      `UPDATE public.tournament_individual_signups
+       SET checked_in_at = NULL
+       WHERE tournament_id = $1 AND status = 'Registered'`,
+      [tournament_id],
+    );
+
+    this.logger.log(
+      `[${tournament_id}] individual check-in window opened, ${duration_minutes}m`,
+    );
+
+    return { success: true };
+  }
+
+  @HasuraAction()
+  public async checkIntoTournament(data: { user: User; tournament_id: string }) {
+    const { tournament_id } = data;
+
+    const { tournaments_by_pk: tournament } = await this.hasura.query({
+      tournaments_by_pk: {
+        __args: { id: tournament_id },
+        id: true,
+        individual_check_in_ends_at: true,
+      },
+    });
+
+    if (!tournament) {
+      throw Error("tournament not found");
+    }
+    if (
+      !tournament.individual_check_in_ends_at ||
+      new Date(tournament.individual_check_in_ends_at as unknown as string) <=
+        new Date()
+    ) {
+      throw Error("check-in is not currently open for this tournament");
+    }
+
+    const updated = await this.postgres.query<Array<{ id: string }>>(
+      `UPDATE public.tournament_individual_signups
+       SET checked_in_at = now()
+       WHERE tournament_id = $1 AND player_steam_id = $2 AND status = 'Registered'
+       RETURNING id`,
+      [tournament_id, data.user.steam_id],
+    );
+
+    if (!updated.length) {
+      throw Error("you are not registered (or not currently eligible to check in)");
+    }
+
+    return { success: true };
+  }
+
   private static shuffle<T>(items: Array<T>): Array<T> {
     const result = [...items];
     for (let index = result.length - 1; index > 0; index--) {

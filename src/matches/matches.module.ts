@@ -34,6 +34,7 @@ import { CancelExpiredMatches } from "./jobs/CancelExpiredMatches";
 import { AutoPickExpiredMapVeto } from "./jobs/AutoPickExpiredMapVeto";
 import { RemoveCancelledMatches } from "./jobs/RemoveCancelledMatches";
 import { CheckForTournamentStart } from "./jobs/CheckForTournamentStart";
+import { ProcessTournamentCheckInExpiry } from "./jobs/ProcessTournamentCheckInExpiry";
 import { CheckForScheduledTournamentBrackets } from "./jobs/CheckForScheduledTournamentBrackets";
 import { CheckLeagueSeasonTransitions } from "./jobs/CheckLeagueSeasonTransitions";
 import { ApplyLeagueDefaultSchedules } from "./jobs/ApplyLeagueDefaultSchedules";
@@ -174,6 +175,7 @@ import { LobbyCallService } from "./camera/lobby-call.service";
     CancelExpiredMatches,
     AutoPickExpiredMapVeto,
     CheckForTournamentStart,
+    ProcessTournamentCheckInExpiry,
     CheckForScheduledTournamentBrackets,
     CheckLeagueSeasonTransitions,
     ApplyLeagueDefaultSchedules,
@@ -292,6 +294,16 @@ export class MatchesModule implements NestModule {
       {
         repeat: {
           pattern: "* * * * *",
+        },
+      },
+    );
+
+    void scheduleMatchQueue.add(
+      ProcessTournamentCheckInExpiry.name,
+      {},
+      {
+        repeat: {
+          every: 15_000,
         },
       },
     );

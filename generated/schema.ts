@@ -12672,6 +12672,8 @@ export interface mutation_root {
     cancelScrimRequest: (SuccessOutput | null)
     /** checkIntoMatch */
     checkIntoMatch: (SuccessOutput | null)
+    /** Player self-check-in during a tournament's individual sign-up check-in window */
+    checkIntoTournament: (SuccessOutput | null)
     /** Delete terminal-state clip_render_jobs rows for a single match_map batch. */
     clearClipRenderBatch: (SuccessOutput | null)
     /** Delete all terminal-state clip_render_jobs rows platform-wide. */
@@ -14143,6 +14145,8 @@ export interface mutation_root {
     startLive: (SuccessOutput | null)
     /** startMatch */
     startMatch: (SuccessOutput | null)
+    /** Open a check-in window for individually-registered tournament players */
+    startTournamentIndividualCheckIn: (SuccessOutput | null)
     stopGpuSession: (SuccessOutput | null)
     stopLive: (SuccessOutput | null)
     stopWatchDemo: (SuccessOutput | null)
@@ -29109,6 +29113,7 @@ export type tournament_categories_update_column = 'category' | 'tournament_id'
 
 /** columns and relationships of "tournament_individual_signups" */
 export interface tournament_individual_signups {
+    checked_in_at: (Scalars['timestamptz'] | null)
     created_at: Scalars['timestamptz']
     id: Scalars['uuid']
     /** An object relationship */
@@ -29163,6 +29168,7 @@ export type tournament_individual_signups_constraint = 'tournament_individual_si
 
 /** aggregate max on columns */
 export interface tournament_individual_signups_max_fields {
+    checked_in_at: (Scalars['timestamptz'] | null)
     created_at: (Scalars['timestamptz'] | null)
     id: (Scalars['uuid'] | null)
     player_steam_id: (Scalars['bigint'] | null)
@@ -29174,6 +29180,7 @@ export interface tournament_individual_signups_max_fields {
 
 /** aggregate min on columns */
 export interface tournament_individual_signups_min_fields {
+    checked_in_at: (Scalars['timestamptz'] | null)
     created_at: (Scalars['timestamptz'] | null)
     id: (Scalars['uuid'] | null)
     player_steam_id: (Scalars['bigint'] | null)
@@ -29194,7 +29201,7 @@ export interface tournament_individual_signups_mutation_response {
 
 
 /** select columns of table "tournament_individual_signups" */
-export type tournament_individual_signups_select_column = 'created_at' | 'id' | 'player_steam_id' | 'status' | 'tournament_id' | 'tournament_team_id'
+export type tournament_individual_signups_select_column = 'checked_in_at' | 'created_at' | 'id' | 'player_steam_id' | 'status' | 'tournament_id' | 'tournament_team_id'
 
 
 /** aggregate stddev on columns */
@@ -29226,7 +29233,7 @@ export interface tournament_individual_signups_sum_fields {
 
 
 /** update columns of table "tournament_individual_signups" */
-export type tournament_individual_signups_update_column = 'created_at' | 'id' | 'player_steam_id' | 'status' | 'tournament_id' | 'tournament_team_id'
+export type tournament_individual_signups_update_column = 'checked_in_at' | 'created_at' | 'id' | 'player_steam_id' | 'status' | 'tournament_id' | 'tournament_team_id'
 
 
 /** aggregate var_pop on columns */
@@ -30843,6 +30850,8 @@ export interface tournaments {
     has_min_teams: (Scalars['Boolean'] | null)
     homepage: (Scalars['String'] | null)
     id: Scalars['uuid']
+    individual_check_in_duration_minutes: (Scalars['Int'] | null)
+    individual_check_in_ends_at: (Scalars['timestamptz'] | null)
     /** An array relationship */
     individual_signups: tournament_individual_signups[]
     /** An aggregate relationship */
@@ -30941,6 +30950,7 @@ export interface tournaments_aggregate_fields {
 
 /** aggregate avg on columns */
 export interface tournaments_avg_fields {
+    individual_check_in_duration_minutes: (Scalars['Float'] | null)
     latitude: (Scalars['Float'] | null)
     longitude: (Scalars['Float'] | null)
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -30966,6 +30976,8 @@ export interface tournaments_max_fields {
     discord_webhook: (Scalars['String'] | null)
     homepage: (Scalars['String'] | null)
     id: (Scalars['uuid'] | null)
+    individual_check_in_duration_minutes: (Scalars['Int'] | null)
+    individual_check_in_ends_at: (Scalars['timestamptz'] | null)
     latitude: (Scalars['float8'] | null)
     location: (Scalars['String'] | null)
     logo: (Scalars['String'] | null)
@@ -30993,6 +31005,8 @@ export interface tournaments_min_fields {
     discord_webhook: (Scalars['String'] | null)
     homepage: (Scalars['String'] | null)
     id: (Scalars['uuid'] | null)
+    individual_check_in_duration_minutes: (Scalars['Int'] | null)
+    individual_check_in_ends_at: (Scalars['timestamptz'] | null)
     latitude: (Scalars['float8'] | null)
     location: (Scalars['String'] | null)
     logo: (Scalars['String'] | null)
@@ -31021,7 +31035,7 @@ export interface tournaments_mutation_response {
 
 
 /** select columns of table "tournaments" */
-export type tournaments_select_column = 'auto_start' | 'awards_enabled' | 'banner' | 'created_at' | 'description' | 'discord_guild_id' | 'discord_notifications_enabled' | 'discord_notify_Canceled' | 'discord_notify_Finished' | 'discord_notify_Forfeit' | 'discord_notify_Live' | 'discord_notify_MapPaused' | 'discord_notify_PickingPlayers' | 'discord_notify_Scheduled' | 'discord_notify_Surrendered' | 'discord_notify_Tie' | 'discord_notify_Veto' | 'discord_notify_WaitingForCheckIn' | 'discord_notify_WaitingForServer' | 'discord_role_id' | 'discord_voice_enabled' | 'discord_webhook' | 'homepage' | 'id' | 'latitude' | 'location' | 'logo' | 'longitude' | 'match_options_id' | 'name' | 'organizer_steam_id' | 'scheduling_mode' | 'start' | 'status' | 'trophies_enabled'
+export type tournaments_select_column = 'auto_start' | 'awards_enabled' | 'banner' | 'created_at' | 'description' | 'discord_guild_id' | 'discord_notifications_enabled' | 'discord_notify_Canceled' | 'discord_notify_Finished' | 'discord_notify_Forfeit' | 'discord_notify_Live' | 'discord_notify_MapPaused' | 'discord_notify_PickingPlayers' | 'discord_notify_Scheduled' | 'discord_notify_Surrendered' | 'discord_notify_Tie' | 'discord_notify_Veto' | 'discord_notify_WaitingForCheckIn' | 'discord_notify_WaitingForServer' | 'discord_role_id' | 'discord_voice_enabled' | 'discord_webhook' | 'homepage' | 'id' | 'individual_check_in_duration_minutes' | 'individual_check_in_ends_at' | 'latitude' | 'location' | 'logo' | 'longitude' | 'match_options_id' | 'name' | 'organizer_steam_id' | 'scheduling_mode' | 'start' | 'status' | 'trophies_enabled'
 
 
 /** select "tournaments_aggregate_bool_exp_avg_arguments_columns" columns of table "tournaments" */
@@ -31066,6 +31080,7 @@ export type tournaments_select_column_tournaments_aggregate_bool_exp_var_samp_ar
 
 /** aggregate stddev on columns */
 export interface tournaments_stddev_fields {
+    individual_check_in_duration_minutes: (Scalars['Float'] | null)
     latitude: (Scalars['Float'] | null)
     longitude: (Scalars['Float'] | null)
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -31079,6 +31094,7 @@ export interface tournaments_stddev_fields {
 
 /** aggregate stddev_pop on columns */
 export interface tournaments_stddev_pop_fields {
+    individual_check_in_duration_minutes: (Scalars['Float'] | null)
     latitude: (Scalars['Float'] | null)
     longitude: (Scalars['Float'] | null)
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -31092,6 +31108,7 @@ export interface tournaments_stddev_pop_fields {
 
 /** aggregate stddev_samp on columns */
 export interface tournaments_stddev_samp_fields {
+    individual_check_in_duration_minutes: (Scalars['Float'] | null)
     latitude: (Scalars['Float'] | null)
     longitude: (Scalars['Float'] | null)
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -31105,6 +31122,7 @@ export interface tournaments_stddev_samp_fields {
 
 /** aggregate sum on columns */
 export interface tournaments_sum_fields {
+    individual_check_in_duration_minutes: (Scalars['Int'] | null)
     latitude: (Scalars['float8'] | null)
     longitude: (Scalars['float8'] | null)
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -31117,11 +31135,12 @@ export interface tournaments_sum_fields {
 
 
 /** update columns of table "tournaments" */
-export type tournaments_update_column = 'auto_start' | 'awards_enabled' | 'banner' | 'created_at' | 'description' | 'discord_guild_id' | 'discord_notifications_enabled' | 'discord_notify_Canceled' | 'discord_notify_Finished' | 'discord_notify_Forfeit' | 'discord_notify_Live' | 'discord_notify_MapPaused' | 'discord_notify_PickingPlayers' | 'discord_notify_Scheduled' | 'discord_notify_Surrendered' | 'discord_notify_Tie' | 'discord_notify_Veto' | 'discord_notify_WaitingForCheckIn' | 'discord_notify_WaitingForServer' | 'discord_role_id' | 'discord_voice_enabled' | 'discord_webhook' | 'homepage' | 'id' | 'latitude' | 'location' | 'logo' | 'longitude' | 'match_options_id' | 'name' | 'organizer_steam_id' | 'scheduling_mode' | 'start' | 'status' | 'trophies_enabled'
+export type tournaments_update_column = 'auto_start' | 'awards_enabled' | 'banner' | 'created_at' | 'description' | 'discord_guild_id' | 'discord_notifications_enabled' | 'discord_notify_Canceled' | 'discord_notify_Finished' | 'discord_notify_Forfeit' | 'discord_notify_Live' | 'discord_notify_MapPaused' | 'discord_notify_PickingPlayers' | 'discord_notify_Scheduled' | 'discord_notify_Surrendered' | 'discord_notify_Tie' | 'discord_notify_Veto' | 'discord_notify_WaitingForCheckIn' | 'discord_notify_WaitingForServer' | 'discord_role_id' | 'discord_voice_enabled' | 'discord_webhook' | 'homepage' | 'id' | 'individual_check_in_duration_minutes' | 'individual_check_in_ends_at' | 'latitude' | 'location' | 'logo' | 'longitude' | 'match_options_id' | 'name' | 'organizer_steam_id' | 'scheduling_mode' | 'start' | 'status' | 'trophies_enabled'
 
 
 /** aggregate var_pop on columns */
 export interface tournaments_var_pop_fields {
+    individual_check_in_duration_minutes: (Scalars['Float'] | null)
     latitude: (Scalars['Float'] | null)
     longitude: (Scalars['Float'] | null)
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -31135,6 +31154,7 @@ export interface tournaments_var_pop_fields {
 
 /** aggregate var_samp on columns */
 export interface tournaments_var_samp_fields {
+    individual_check_in_duration_minutes: (Scalars['Float'] | null)
     latitude: (Scalars['Float'] | null)
     longitude: (Scalars['Float'] | null)
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -31148,6 +31168,7 @@ export interface tournaments_var_samp_fields {
 
 /** aggregate variance on columns */
 export interface tournaments_variance_fields {
+    individual_check_in_duration_minutes: (Scalars['Float'] | null)
     latitude: (Scalars['Float'] | null)
     longitude: (Scalars['Float'] | null)
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -58234,6 +58255,8 @@ export interface mutation_rootGenqlSelection{
     cancelScrimRequest?: (SuccessOutputGenqlSelection & { __args: {request_id: Scalars['uuid']} })
     /** checkIntoMatch */
     checkIntoMatch?: (SuccessOutputGenqlSelection & { __args: {match_id: Scalars['uuid']} })
+    /** Player self-check-in during a tournament's individual sign-up check-in window */
+    checkIntoTournament?: (SuccessOutputGenqlSelection & { __args: {tournament_id: Scalars['uuid']} })
     /** Delete terminal-state clip_render_jobs rows for a single match_map batch. */
     clearClipRenderBatch?: (SuccessOutputGenqlSelection & { __args: {match_map_id: Scalars['uuid']} })
     /** Delete all terminal-state clip_render_jobs rows platform-wide. */
@@ -61413,6 +61436,8 @@ export interface mutation_rootGenqlSelection{
     startLive?: (SuccessOutputGenqlSelection & { __args: {match_id: Scalars['uuid'], mode: Scalars['String']} })
     /** startMatch */
     startMatch?: (SuccessOutputGenqlSelection & { __args: {match_id: Scalars['uuid'], server_id?: (Scalars['uuid'] | null)} })
+    /** Open a check-in window for individually-registered tournament players */
+    startTournamentIndividualCheckIn?: (SuccessOutputGenqlSelection & { __args: {duration_minutes: Scalars['Int'], tournament_id: Scalars['uuid']} })
     stopGpuSession?: (SuccessOutputGenqlSelection & { __args: {game_server_node_id: Scalars['uuid']} })
     stopLive?: (SuccessOutputGenqlSelection & { __args: {match_id: Scalars['uuid']} })
     stopWatchDemo?: (SuccessOutputGenqlSelection & { __args: {match_map_id: Scalars['uuid']} })
@@ -92829,6 +92854,7 @@ where: tournament_categories_bool_exp}
 
 /** columns and relationships of "tournament_individual_signups" */
 export interface tournament_individual_signupsGenqlSelection{
+    checked_in_at?: boolean | number
     created_at?: boolean | number
     id?: boolean | number
     /** An object relationship */
@@ -92900,7 +92926,7 @@ export interface tournament_individual_signups_avg_order_by {player_steam_id?: (
 
 
 /** Boolean expression to filter rows from the table "tournament_individual_signups". All fields are combined with a logical 'AND'. */
-export interface tournament_individual_signups_bool_exp {_and?: (tournament_individual_signups_bool_exp[] | null),_not?: (tournament_individual_signups_bool_exp | null),_or?: (tournament_individual_signups_bool_exp[] | null),created_at?: (timestamptz_comparison_exp | null),id?: (uuid_comparison_exp | null),player?: (players_bool_exp | null),player_steam_id?: (bigint_comparison_exp | null),status?: (e_tournament_individual_signup_status_enum_comparison_exp | null),tournament?: (tournaments_bool_exp | null),tournament_id?: (uuid_comparison_exp | null),tournament_team?: (tournament_teams_bool_exp | null),tournament_team_id?: (uuid_comparison_exp | null)}
+export interface tournament_individual_signups_bool_exp {_and?: (tournament_individual_signups_bool_exp[] | null),_not?: (tournament_individual_signups_bool_exp | null),_or?: (tournament_individual_signups_bool_exp[] | null),checked_in_at?: (timestamptz_comparison_exp | null),created_at?: (timestamptz_comparison_exp | null),id?: (uuid_comparison_exp | null),player?: (players_bool_exp | null),player_steam_id?: (bigint_comparison_exp | null),status?: (e_tournament_individual_signup_status_enum_comparison_exp | null),tournament?: (tournaments_bool_exp | null),tournament_id?: (uuid_comparison_exp | null),tournament_team?: (tournament_teams_bool_exp | null),tournament_team_id?: (uuid_comparison_exp | null)}
 
 
 /** input type for incrementing numeric columns in table "tournament_individual_signups" */
@@ -92908,11 +92934,12 @@ export interface tournament_individual_signups_inc_input {player_steam_id?: (Sca
 
 
 /** input type for inserting data into table "tournament_individual_signups" */
-export interface tournament_individual_signups_insert_input {created_at?: (Scalars['timestamptz'] | null),id?: (Scalars['uuid'] | null),player?: (players_obj_rel_insert_input | null),player_steam_id?: (Scalars['bigint'] | null),status?: (e_tournament_individual_signup_status_enum | null),tournament?: (tournaments_obj_rel_insert_input | null),tournament_id?: (Scalars['uuid'] | null),tournament_team?: (tournament_teams_obj_rel_insert_input | null),tournament_team_id?: (Scalars['uuid'] | null)}
+export interface tournament_individual_signups_insert_input {checked_in_at?: (Scalars['timestamptz'] | null),created_at?: (Scalars['timestamptz'] | null),id?: (Scalars['uuid'] | null),player?: (players_obj_rel_insert_input | null),player_steam_id?: (Scalars['bigint'] | null),status?: (e_tournament_individual_signup_status_enum | null),tournament?: (tournaments_obj_rel_insert_input | null),tournament_id?: (Scalars['uuid'] | null),tournament_team?: (tournament_teams_obj_rel_insert_input | null),tournament_team_id?: (Scalars['uuid'] | null)}
 
 
 /** aggregate max on columns */
 export interface tournament_individual_signups_max_fieldsGenqlSelection{
+    checked_in_at?: boolean | number
     created_at?: boolean | number
     id?: boolean | number
     player_steam_id?: boolean | number
@@ -92924,11 +92951,12 @@ export interface tournament_individual_signups_max_fieldsGenqlSelection{
 
 
 /** order by max() on columns of table "tournament_individual_signups" */
-export interface tournament_individual_signups_max_order_by {created_at?: (order_by | null),id?: (order_by | null),player_steam_id?: (order_by | null),tournament_id?: (order_by | null),tournament_team_id?: (order_by | null)}
+export interface tournament_individual_signups_max_order_by {checked_in_at?: (order_by | null),created_at?: (order_by | null),id?: (order_by | null),player_steam_id?: (order_by | null),tournament_id?: (order_by | null),tournament_team_id?: (order_by | null)}
 
 
 /** aggregate min on columns */
 export interface tournament_individual_signups_min_fieldsGenqlSelection{
+    checked_in_at?: boolean | number
     created_at?: boolean | number
     id?: boolean | number
     player_steam_id?: boolean | number
@@ -92940,7 +92968,7 @@ export interface tournament_individual_signups_min_fieldsGenqlSelection{
 
 
 /** order by min() on columns of table "tournament_individual_signups" */
-export interface tournament_individual_signups_min_order_by {created_at?: (order_by | null),id?: (order_by | null),player_steam_id?: (order_by | null),tournament_id?: (order_by | null),tournament_team_id?: (order_by | null)}
+export interface tournament_individual_signups_min_order_by {checked_in_at?: (order_by | null),created_at?: (order_by | null),id?: (order_by | null),player_steam_id?: (order_by | null),tournament_id?: (order_by | null),tournament_team_id?: (order_by | null)}
 
 
 /** response of any mutation on the table "tournament_individual_signups" */
@@ -92959,7 +92987,7 @@ export interface tournament_individual_signups_on_conflict {constraint: tourname
 
 
 /** Ordering options when selecting data from "tournament_individual_signups". */
-export interface tournament_individual_signups_order_by {created_at?: (order_by | null),id?: (order_by | null),player?: (players_order_by | null),player_steam_id?: (order_by | null),status?: (order_by | null),tournament?: (tournaments_order_by | null),tournament_id?: (order_by | null),tournament_team?: (tournament_teams_order_by | null),tournament_team_id?: (order_by | null)}
+export interface tournament_individual_signups_order_by {checked_in_at?: (order_by | null),created_at?: (order_by | null),id?: (order_by | null),player?: (players_order_by | null),player_steam_id?: (order_by | null),status?: (order_by | null),tournament?: (tournaments_order_by | null),tournament_id?: (order_by | null),tournament_team?: (tournament_teams_order_by | null),tournament_team_id?: (order_by | null)}
 
 
 /** primary key columns input for table: tournament_individual_signups */
@@ -92967,7 +92995,7 @@ export interface tournament_individual_signups_pk_columns_input {id: Scalars['uu
 
 
 /** input type for updating data in table "tournament_individual_signups" */
-export interface tournament_individual_signups_set_input {created_at?: (Scalars['timestamptz'] | null),id?: (Scalars['uuid'] | null),player_steam_id?: (Scalars['bigint'] | null),status?: (e_tournament_individual_signup_status_enum | null),tournament_id?: (Scalars['uuid'] | null),tournament_team_id?: (Scalars['uuid'] | null)}
+export interface tournament_individual_signups_set_input {checked_in_at?: (Scalars['timestamptz'] | null),created_at?: (Scalars['timestamptz'] | null),id?: (Scalars['uuid'] | null),player_steam_id?: (Scalars['bigint'] | null),status?: (e_tournament_individual_signup_status_enum | null),tournament_id?: (Scalars['uuid'] | null),tournament_team_id?: (Scalars['uuid'] | null)}
 
 
 /** aggregate stddev on columns */
@@ -93015,7 +93043,7 @@ ordering?: (cursor_ordering | null)}
 
 
 /** Initial value of the column from where the streaming should start */
-export interface tournament_individual_signups_stream_cursor_value_input {created_at?: (Scalars['timestamptz'] | null),id?: (Scalars['uuid'] | null),player_steam_id?: (Scalars['bigint'] | null),status?: (e_tournament_individual_signup_status_enum | null),tournament_id?: (Scalars['uuid'] | null),tournament_team_id?: (Scalars['uuid'] | null)}
+export interface tournament_individual_signups_stream_cursor_value_input {checked_in_at?: (Scalars['timestamptz'] | null),created_at?: (Scalars['timestamptz'] | null),id?: (Scalars['uuid'] | null),player_steam_id?: (Scalars['bigint'] | null),status?: (e_tournament_individual_signup_status_enum | null),tournament_id?: (Scalars['uuid'] | null),tournament_team_id?: (Scalars['uuid'] | null)}
 
 
 /** aggregate sum on columns */
@@ -95801,6 +95829,8 @@ export interface tournamentsGenqlSelection{
     has_min_teams?: boolean | number
     homepage?: boolean | number
     id?: boolean | number
+    individual_check_in_duration_minutes?: boolean | number
+    individual_check_in_ends_at?: boolean | number
     /** An array relationship */
     individual_signups?: (tournament_individual_signupsGenqlSelection & { __args?: {
     /** distinct select on columns */
@@ -96160,6 +96190,7 @@ on_conflict?: (tournaments_on_conflict | null)}
 
 /** aggregate avg on columns */
 export interface tournaments_avg_fieldsGenqlSelection{
+    individual_check_in_duration_minutes?: boolean | number
     latitude?: boolean | number
     longitude?: boolean | number
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -96173,19 +96204,19 @@ export interface tournaments_avg_fieldsGenqlSelection{
 
 
 /** order by avg() on columns of table "tournaments" */
-export interface tournaments_avg_order_by {latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
+export interface tournaments_avg_order_by {individual_check_in_duration_minutes?: (order_by | null),latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
 
 
 /** Boolean expression to filter rows from the table "tournaments". All fields are combined with a logical 'AND'. */
-export interface tournaments_bool_exp {_and?: (tournaments_bool_exp[] | null),_not?: (tournaments_bool_exp | null),_or?: (tournaments_bool_exp[] | null),admin?: (players_bool_exp | null),auto_start?: (Boolean_comparison_exp | null),awards_enabled?: (Boolean_comparison_exp | null),banner?: (String_comparison_exp | null),can_cancel?: (Boolean_comparison_exp | null),can_close_registration?: (Boolean_comparison_exp | null),can_join?: (Boolean_comparison_exp | null),can_open_registration?: (Boolean_comparison_exp | null),can_pause?: (Boolean_comparison_exp | null),can_resume?: (Boolean_comparison_exp | null),can_setup?: (Boolean_comparison_exp | null),can_start?: (Boolean_comparison_exp | null),categories?: (tournament_categories_bool_exp | null),categories_aggregate?: (tournament_categories_aggregate_bool_exp | null),created_at?: (timestamptz_comparison_exp | null),description?: (String_comparison_exp | null),discord_guild_id?: (String_comparison_exp | null),discord_notifications_enabled?: (Boolean_comparison_exp | null),discord_notify_Canceled?: (Boolean_comparison_exp | null),discord_notify_Finished?: (Boolean_comparison_exp | null),discord_notify_Forfeit?: (Boolean_comparison_exp | null),discord_notify_Live?: (Boolean_comparison_exp | null),discord_notify_MapPaused?: (Boolean_comparison_exp | null),discord_notify_PickingPlayers?: (Boolean_comparison_exp | null),discord_notify_Scheduled?: (Boolean_comparison_exp | null),discord_notify_Surrendered?: (Boolean_comparison_exp | null),discord_notify_Tie?: (Boolean_comparison_exp | null),discord_notify_Veto?: (Boolean_comparison_exp | null),discord_notify_WaitingForCheckIn?: (Boolean_comparison_exp | null),discord_notify_WaitingForServer?: (Boolean_comparison_exp | null),discord_role_id?: (String_comparison_exp | null),discord_voice_enabled?: (Boolean_comparison_exp | null),discord_webhook?: (String_comparison_exp | null),e_tournament_status?: (e_tournament_status_bool_exp | null),has_min_teams?: (Boolean_comparison_exp | null),homepage?: (String_comparison_exp | null),id?: (uuid_comparison_exp | null),individual_signups?: (tournament_individual_signups_bool_exp | null),individual_signups_aggregate?: (tournament_individual_signups_aggregate_bool_exp | null),is_organizer?: (Boolean_comparison_exp | null),joined_tournament?: (Boolean_comparison_exp | null),latitude?: (float8_comparison_exp | null),league_season_division?: (league_season_divisions_bool_exp | null),location?: (String_comparison_exp | null),logo?: (String_comparison_exp | null),longitude?: (float8_comparison_exp | null),match_options_id?: (uuid_comparison_exp | null),max_players_per_lineup?: (Int_comparison_exp | null),min_players_per_lineup?: (Int_comparison_exp | null),name?: (String_comparison_exp | null),options?: (match_options_bool_exp | null),organizer_steam_id?: (bigint_comparison_exp | null),organizer_teams?: (tournament_organizer_teams_bool_exp | null),organizer_teams_aggregate?: (tournament_organizer_teams_aggregate_bool_exp | null),organizers?: (tournament_organizers_bool_exp | null),organizers_aggregate?: (tournament_organizers_aggregate_bool_exp | null),player_stats?: (v_tournament_player_stats_bool_exp | null),player_stats_aggregate?: (v_tournament_player_stats_aggregate_bool_exp | null),prizes?: (tournament_prizes_bool_exp | null),prizes_aggregate?: (tournament_prizes_aggregate_bool_exp | null),results?: (v_team_tournament_results_bool_exp | null),results_aggregate?: (v_team_tournament_results_aggregate_bool_exp | null),rosters?: (tournament_team_roster_bool_exp | null),rosters_aggregate?: (tournament_team_roster_aggregate_bool_exp | null),scheduling_mode?: (String_comparison_exp | null),stages?: (tournament_stages_bool_exp | null),stages_aggregate?: (tournament_stages_aggregate_bool_exp | null),start?: (timestamptz_comparison_exp | null),status?: (e_tournament_status_enum_comparison_exp | null),teams?: (tournament_teams_bool_exp | null),teams_aggregate?: (tournament_teams_aggregate_bool_exp | null),trophies?: (tournament_trophies_bool_exp | null),trophies_aggregate?: (tournament_trophies_aggregate_bool_exp | null),trophies_enabled?: (Boolean_comparison_exp | null),trophy_configs?: (tournament_trophy_configs_bool_exp | null),trophy_configs_aggregate?: (tournament_trophy_configs_aggregate_bool_exp | null)}
+export interface tournaments_bool_exp {_and?: (tournaments_bool_exp[] | null),_not?: (tournaments_bool_exp | null),_or?: (tournaments_bool_exp[] | null),admin?: (players_bool_exp | null),auto_start?: (Boolean_comparison_exp | null),awards_enabled?: (Boolean_comparison_exp | null),banner?: (String_comparison_exp | null),can_cancel?: (Boolean_comparison_exp | null),can_close_registration?: (Boolean_comparison_exp | null),can_join?: (Boolean_comparison_exp | null),can_open_registration?: (Boolean_comparison_exp | null),can_pause?: (Boolean_comparison_exp | null),can_resume?: (Boolean_comparison_exp | null),can_setup?: (Boolean_comparison_exp | null),can_start?: (Boolean_comparison_exp | null),categories?: (tournament_categories_bool_exp | null),categories_aggregate?: (tournament_categories_aggregate_bool_exp | null),created_at?: (timestamptz_comparison_exp | null),description?: (String_comparison_exp | null),discord_guild_id?: (String_comparison_exp | null),discord_notifications_enabled?: (Boolean_comparison_exp | null),discord_notify_Canceled?: (Boolean_comparison_exp | null),discord_notify_Finished?: (Boolean_comparison_exp | null),discord_notify_Forfeit?: (Boolean_comparison_exp | null),discord_notify_Live?: (Boolean_comparison_exp | null),discord_notify_MapPaused?: (Boolean_comparison_exp | null),discord_notify_PickingPlayers?: (Boolean_comparison_exp | null),discord_notify_Scheduled?: (Boolean_comparison_exp | null),discord_notify_Surrendered?: (Boolean_comparison_exp | null),discord_notify_Tie?: (Boolean_comparison_exp | null),discord_notify_Veto?: (Boolean_comparison_exp | null),discord_notify_WaitingForCheckIn?: (Boolean_comparison_exp | null),discord_notify_WaitingForServer?: (Boolean_comparison_exp | null),discord_role_id?: (String_comparison_exp | null),discord_voice_enabled?: (Boolean_comparison_exp | null),discord_webhook?: (String_comparison_exp | null),e_tournament_status?: (e_tournament_status_bool_exp | null),has_min_teams?: (Boolean_comparison_exp | null),homepage?: (String_comparison_exp | null),id?: (uuid_comparison_exp | null),individual_check_in_duration_minutes?: (Int_comparison_exp | null),individual_check_in_ends_at?: (timestamptz_comparison_exp | null),individual_signups?: (tournament_individual_signups_bool_exp | null),individual_signups_aggregate?: (tournament_individual_signups_aggregate_bool_exp | null),is_organizer?: (Boolean_comparison_exp | null),joined_tournament?: (Boolean_comparison_exp | null),latitude?: (float8_comparison_exp | null),league_season_division?: (league_season_divisions_bool_exp | null),location?: (String_comparison_exp | null),logo?: (String_comparison_exp | null),longitude?: (float8_comparison_exp | null),match_options_id?: (uuid_comparison_exp | null),max_players_per_lineup?: (Int_comparison_exp | null),min_players_per_lineup?: (Int_comparison_exp | null),name?: (String_comparison_exp | null),options?: (match_options_bool_exp | null),organizer_steam_id?: (bigint_comparison_exp | null),organizer_teams?: (tournament_organizer_teams_bool_exp | null),organizer_teams_aggregate?: (tournament_organizer_teams_aggregate_bool_exp | null),organizers?: (tournament_organizers_bool_exp | null),organizers_aggregate?: (tournament_organizers_aggregate_bool_exp | null),player_stats?: (v_tournament_player_stats_bool_exp | null),player_stats_aggregate?: (v_tournament_player_stats_aggregate_bool_exp | null),prizes?: (tournament_prizes_bool_exp | null),prizes_aggregate?: (tournament_prizes_aggregate_bool_exp | null),results?: (v_team_tournament_results_bool_exp | null),results_aggregate?: (v_team_tournament_results_aggregate_bool_exp | null),rosters?: (tournament_team_roster_bool_exp | null),rosters_aggregate?: (tournament_team_roster_aggregate_bool_exp | null),scheduling_mode?: (String_comparison_exp | null),stages?: (tournament_stages_bool_exp | null),stages_aggregate?: (tournament_stages_aggregate_bool_exp | null),start?: (timestamptz_comparison_exp | null),status?: (e_tournament_status_enum_comparison_exp | null),teams?: (tournament_teams_bool_exp | null),teams_aggregate?: (tournament_teams_aggregate_bool_exp | null),trophies?: (tournament_trophies_bool_exp | null),trophies_aggregate?: (tournament_trophies_aggregate_bool_exp | null),trophies_enabled?: (Boolean_comparison_exp | null),trophy_configs?: (tournament_trophy_configs_bool_exp | null),trophy_configs_aggregate?: (tournament_trophy_configs_aggregate_bool_exp | null)}
 
 
 /** input type for incrementing numeric columns in table "tournaments" */
-export interface tournaments_inc_input {latitude?: (Scalars['float8'] | null),longitude?: (Scalars['float8'] | null),organizer_steam_id?: (Scalars['bigint'] | null)}
+export interface tournaments_inc_input {individual_check_in_duration_minutes?: (Scalars['Int'] | null),latitude?: (Scalars['float8'] | null),longitude?: (Scalars['float8'] | null),organizer_steam_id?: (Scalars['bigint'] | null)}
 
 
 /** input type for inserting data into table "tournaments" */
-export interface tournaments_insert_input {admin?: (players_obj_rel_insert_input | null),auto_start?: (Scalars['Boolean'] | null),awards_enabled?: (Scalars['Boolean'] | null),banner?: (Scalars['String'] | null),categories?: (tournament_categories_arr_rel_insert_input | null),created_at?: (Scalars['timestamptz'] | null),description?: (Scalars['String'] | null),discord_guild_id?: (Scalars['String'] | null),discord_notifications_enabled?: (Scalars['Boolean'] | null),discord_notify_Canceled?: (Scalars['Boolean'] | null),discord_notify_Finished?: (Scalars['Boolean'] | null),discord_notify_Forfeit?: (Scalars['Boolean'] | null),discord_notify_Live?: (Scalars['Boolean'] | null),discord_notify_MapPaused?: (Scalars['Boolean'] | null),discord_notify_PickingPlayers?: (Scalars['Boolean'] | null),discord_notify_Scheduled?: (Scalars['Boolean'] | null),discord_notify_Surrendered?: (Scalars['Boolean'] | null),discord_notify_Tie?: (Scalars['Boolean'] | null),discord_notify_Veto?: (Scalars['Boolean'] | null),discord_notify_WaitingForCheckIn?: (Scalars['Boolean'] | null),discord_notify_WaitingForServer?: (Scalars['Boolean'] | null),discord_role_id?: (Scalars['String'] | null),discord_voice_enabled?: (Scalars['Boolean'] | null),discord_webhook?: (Scalars['String'] | null),e_tournament_status?: (e_tournament_status_obj_rel_insert_input | null),homepage?: (Scalars['String'] | null),id?: (Scalars['uuid'] | null),individual_signups?: (tournament_individual_signups_arr_rel_insert_input | null),latitude?: (Scalars['float8'] | null),league_season_division?: (league_season_divisions_obj_rel_insert_input | null),location?: (Scalars['String'] | null),logo?: (Scalars['String'] | null),longitude?: (Scalars['float8'] | null),match_options_id?: (Scalars['uuid'] | null),name?: (Scalars['String'] | null),options?: (match_options_obj_rel_insert_input | null),organizer_steam_id?: (Scalars['bigint'] | null),organizer_teams?: (tournament_organizer_teams_arr_rel_insert_input | null),organizers?: (tournament_organizers_arr_rel_insert_input | null),player_stats?: (v_tournament_player_stats_arr_rel_insert_input | null),prizes?: (tournament_prizes_arr_rel_insert_input | null),results?: (v_team_tournament_results_arr_rel_insert_input | null),rosters?: (tournament_team_roster_arr_rel_insert_input | null),scheduling_mode?: (Scalars['String'] | null),stages?: (tournament_stages_arr_rel_insert_input | null),start?: (Scalars['timestamptz'] | null),status?: (e_tournament_status_enum | null),teams?: (tournament_teams_arr_rel_insert_input | null),trophies?: (tournament_trophies_arr_rel_insert_input | null),trophies_enabled?: (Scalars['Boolean'] | null),trophy_configs?: (tournament_trophy_configs_arr_rel_insert_input | null)}
+export interface tournaments_insert_input {admin?: (players_obj_rel_insert_input | null),auto_start?: (Scalars['Boolean'] | null),awards_enabled?: (Scalars['Boolean'] | null),banner?: (Scalars['String'] | null),categories?: (tournament_categories_arr_rel_insert_input | null),created_at?: (Scalars['timestamptz'] | null),description?: (Scalars['String'] | null),discord_guild_id?: (Scalars['String'] | null),discord_notifications_enabled?: (Scalars['Boolean'] | null),discord_notify_Canceled?: (Scalars['Boolean'] | null),discord_notify_Finished?: (Scalars['Boolean'] | null),discord_notify_Forfeit?: (Scalars['Boolean'] | null),discord_notify_Live?: (Scalars['Boolean'] | null),discord_notify_MapPaused?: (Scalars['Boolean'] | null),discord_notify_PickingPlayers?: (Scalars['Boolean'] | null),discord_notify_Scheduled?: (Scalars['Boolean'] | null),discord_notify_Surrendered?: (Scalars['Boolean'] | null),discord_notify_Tie?: (Scalars['Boolean'] | null),discord_notify_Veto?: (Scalars['Boolean'] | null),discord_notify_WaitingForCheckIn?: (Scalars['Boolean'] | null),discord_notify_WaitingForServer?: (Scalars['Boolean'] | null),discord_role_id?: (Scalars['String'] | null),discord_voice_enabled?: (Scalars['Boolean'] | null),discord_webhook?: (Scalars['String'] | null),e_tournament_status?: (e_tournament_status_obj_rel_insert_input | null),homepage?: (Scalars['String'] | null),id?: (Scalars['uuid'] | null),individual_check_in_duration_minutes?: (Scalars['Int'] | null),individual_check_in_ends_at?: (Scalars['timestamptz'] | null),individual_signups?: (tournament_individual_signups_arr_rel_insert_input | null),latitude?: (Scalars['float8'] | null),league_season_division?: (league_season_divisions_obj_rel_insert_input | null),location?: (Scalars['String'] | null),logo?: (Scalars['String'] | null),longitude?: (Scalars['float8'] | null),match_options_id?: (Scalars['uuid'] | null),name?: (Scalars['String'] | null),options?: (match_options_obj_rel_insert_input | null),organizer_steam_id?: (Scalars['bigint'] | null),organizer_teams?: (tournament_organizer_teams_arr_rel_insert_input | null),organizers?: (tournament_organizers_arr_rel_insert_input | null),player_stats?: (v_tournament_player_stats_arr_rel_insert_input | null),prizes?: (tournament_prizes_arr_rel_insert_input | null),results?: (v_team_tournament_results_arr_rel_insert_input | null),rosters?: (tournament_team_roster_arr_rel_insert_input | null),scheduling_mode?: (Scalars['String'] | null),stages?: (tournament_stages_arr_rel_insert_input | null),start?: (Scalars['timestamptz'] | null),status?: (e_tournament_status_enum | null),teams?: (tournament_teams_arr_rel_insert_input | null),trophies?: (tournament_trophies_arr_rel_insert_input | null),trophies_enabled?: (Scalars['Boolean'] | null),trophy_configs?: (tournament_trophy_configs_arr_rel_insert_input | null)}
 
 
 /** aggregate max on columns */
@@ -96198,6 +96229,8 @@ export interface tournaments_max_fieldsGenqlSelection{
     discord_webhook?: boolean | number
     homepage?: boolean | number
     id?: boolean | number
+    individual_check_in_duration_minutes?: boolean | number
+    individual_check_in_ends_at?: boolean | number
     latitude?: boolean | number
     location?: boolean | number
     logo?: boolean | number
@@ -96217,7 +96250,7 @@ export interface tournaments_max_fieldsGenqlSelection{
 
 
 /** order by max() on columns of table "tournaments" */
-export interface tournaments_max_order_by {banner?: (order_by | null),created_at?: (order_by | null),description?: (order_by | null),discord_guild_id?: (order_by | null),discord_role_id?: (order_by | null),discord_webhook?: (order_by | null),homepage?: (order_by | null),id?: (order_by | null),latitude?: (order_by | null),location?: (order_by | null),logo?: (order_by | null),longitude?: (order_by | null),match_options_id?: (order_by | null),name?: (order_by | null),organizer_steam_id?: (order_by | null),scheduling_mode?: (order_by | null),start?: (order_by | null)}
+export interface tournaments_max_order_by {banner?: (order_by | null),created_at?: (order_by | null),description?: (order_by | null),discord_guild_id?: (order_by | null),discord_role_id?: (order_by | null),discord_webhook?: (order_by | null),homepage?: (order_by | null),id?: (order_by | null),individual_check_in_duration_minutes?: (order_by | null),individual_check_in_ends_at?: (order_by | null),latitude?: (order_by | null),location?: (order_by | null),logo?: (order_by | null),longitude?: (order_by | null),match_options_id?: (order_by | null),name?: (order_by | null),organizer_steam_id?: (order_by | null),scheduling_mode?: (order_by | null),start?: (order_by | null)}
 
 
 /** aggregate min on columns */
@@ -96230,6 +96263,8 @@ export interface tournaments_min_fieldsGenqlSelection{
     discord_webhook?: boolean | number
     homepage?: boolean | number
     id?: boolean | number
+    individual_check_in_duration_minutes?: boolean | number
+    individual_check_in_ends_at?: boolean | number
     latitude?: boolean | number
     location?: boolean | number
     logo?: boolean | number
@@ -96249,7 +96284,7 @@ export interface tournaments_min_fieldsGenqlSelection{
 
 
 /** order by min() on columns of table "tournaments" */
-export interface tournaments_min_order_by {banner?: (order_by | null),created_at?: (order_by | null),description?: (order_by | null),discord_guild_id?: (order_by | null),discord_role_id?: (order_by | null),discord_webhook?: (order_by | null),homepage?: (order_by | null),id?: (order_by | null),latitude?: (order_by | null),location?: (order_by | null),logo?: (order_by | null),longitude?: (order_by | null),match_options_id?: (order_by | null),name?: (order_by | null),organizer_steam_id?: (order_by | null),scheduling_mode?: (order_by | null),start?: (order_by | null)}
+export interface tournaments_min_order_by {banner?: (order_by | null),created_at?: (order_by | null),description?: (order_by | null),discord_guild_id?: (order_by | null),discord_role_id?: (order_by | null),discord_webhook?: (order_by | null),homepage?: (order_by | null),id?: (order_by | null),individual_check_in_duration_minutes?: (order_by | null),individual_check_in_ends_at?: (order_by | null),latitude?: (order_by | null),location?: (order_by | null),logo?: (order_by | null),longitude?: (order_by | null),match_options_id?: (order_by | null),name?: (order_by | null),organizer_steam_id?: (order_by | null),scheduling_mode?: (order_by | null),start?: (order_by | null)}
 
 
 /** response of any mutation on the table "tournaments" */
@@ -96274,7 +96309,7 @@ export interface tournaments_on_conflict {constraint: tournaments_constraint,upd
 
 
 /** Ordering options when selecting data from "tournaments". */
-export interface tournaments_order_by {admin?: (players_order_by | null),auto_start?: (order_by | null),awards_enabled?: (order_by | null),banner?: (order_by | null),can_cancel?: (order_by | null),can_close_registration?: (order_by | null),can_join?: (order_by | null),can_open_registration?: (order_by | null),can_pause?: (order_by | null),can_resume?: (order_by | null),can_setup?: (order_by | null),can_start?: (order_by | null),categories_aggregate?: (tournament_categories_aggregate_order_by | null),created_at?: (order_by | null),description?: (order_by | null),discord_guild_id?: (order_by | null),discord_notifications_enabled?: (order_by | null),discord_notify_Canceled?: (order_by | null),discord_notify_Finished?: (order_by | null),discord_notify_Forfeit?: (order_by | null),discord_notify_Live?: (order_by | null),discord_notify_MapPaused?: (order_by | null),discord_notify_PickingPlayers?: (order_by | null),discord_notify_Scheduled?: (order_by | null),discord_notify_Surrendered?: (order_by | null),discord_notify_Tie?: (order_by | null),discord_notify_Veto?: (order_by | null),discord_notify_WaitingForCheckIn?: (order_by | null),discord_notify_WaitingForServer?: (order_by | null),discord_role_id?: (order_by | null),discord_voice_enabled?: (order_by | null),discord_webhook?: (order_by | null),e_tournament_status?: (e_tournament_status_order_by | null),has_min_teams?: (order_by | null),homepage?: (order_by | null),id?: (order_by | null),individual_signups_aggregate?: (tournament_individual_signups_aggregate_order_by | null),is_organizer?: (order_by | null),joined_tournament?: (order_by | null),latitude?: (order_by | null),league_season_division?: (league_season_divisions_order_by | null),location?: (order_by | null),logo?: (order_by | null),longitude?: (order_by | null),match_options_id?: (order_by | null),max_players_per_lineup?: (order_by | null),min_players_per_lineup?: (order_by | null),name?: (order_by | null),options?: (match_options_order_by | null),organizer_steam_id?: (order_by | null),organizer_teams_aggregate?: (tournament_organizer_teams_aggregate_order_by | null),organizers_aggregate?: (tournament_organizers_aggregate_order_by | null),player_stats_aggregate?: (v_tournament_player_stats_aggregate_order_by | null),prizes_aggregate?: (tournament_prizes_aggregate_order_by | null),results_aggregate?: (v_team_tournament_results_aggregate_order_by | null),rosters_aggregate?: (tournament_team_roster_aggregate_order_by | null),scheduling_mode?: (order_by | null),stages_aggregate?: (tournament_stages_aggregate_order_by | null),start?: (order_by | null),status?: (order_by | null),teams_aggregate?: (tournament_teams_aggregate_order_by | null),trophies_aggregate?: (tournament_trophies_aggregate_order_by | null),trophies_enabled?: (order_by | null),trophy_configs_aggregate?: (tournament_trophy_configs_aggregate_order_by | null)}
+export interface tournaments_order_by {admin?: (players_order_by | null),auto_start?: (order_by | null),awards_enabled?: (order_by | null),banner?: (order_by | null),can_cancel?: (order_by | null),can_close_registration?: (order_by | null),can_join?: (order_by | null),can_open_registration?: (order_by | null),can_pause?: (order_by | null),can_resume?: (order_by | null),can_setup?: (order_by | null),can_start?: (order_by | null),categories_aggregate?: (tournament_categories_aggregate_order_by | null),created_at?: (order_by | null),description?: (order_by | null),discord_guild_id?: (order_by | null),discord_notifications_enabled?: (order_by | null),discord_notify_Canceled?: (order_by | null),discord_notify_Finished?: (order_by | null),discord_notify_Forfeit?: (order_by | null),discord_notify_Live?: (order_by | null),discord_notify_MapPaused?: (order_by | null),discord_notify_PickingPlayers?: (order_by | null),discord_notify_Scheduled?: (order_by | null),discord_notify_Surrendered?: (order_by | null),discord_notify_Tie?: (order_by | null),discord_notify_Veto?: (order_by | null),discord_notify_WaitingForCheckIn?: (order_by | null),discord_notify_WaitingForServer?: (order_by | null),discord_role_id?: (order_by | null),discord_voice_enabled?: (order_by | null),discord_webhook?: (order_by | null),e_tournament_status?: (e_tournament_status_order_by | null),has_min_teams?: (order_by | null),homepage?: (order_by | null),id?: (order_by | null),individual_check_in_duration_minutes?: (order_by | null),individual_check_in_ends_at?: (order_by | null),individual_signups_aggregate?: (tournament_individual_signups_aggregate_order_by | null),is_organizer?: (order_by | null),joined_tournament?: (order_by | null),latitude?: (order_by | null),league_season_division?: (league_season_divisions_order_by | null),location?: (order_by | null),logo?: (order_by | null),longitude?: (order_by | null),match_options_id?: (order_by | null),max_players_per_lineup?: (order_by | null),min_players_per_lineup?: (order_by | null),name?: (order_by | null),options?: (match_options_order_by | null),organizer_steam_id?: (order_by | null),organizer_teams_aggregate?: (tournament_organizer_teams_aggregate_order_by | null),organizers_aggregate?: (tournament_organizers_aggregate_order_by | null),player_stats_aggregate?: (v_tournament_player_stats_aggregate_order_by | null),prizes_aggregate?: (tournament_prizes_aggregate_order_by | null),results_aggregate?: (v_team_tournament_results_aggregate_order_by | null),rosters_aggregate?: (tournament_team_roster_aggregate_order_by | null),scheduling_mode?: (order_by | null),stages_aggregate?: (tournament_stages_aggregate_order_by | null),start?: (order_by | null),status?: (order_by | null),teams_aggregate?: (tournament_teams_aggregate_order_by | null),trophies_aggregate?: (tournament_trophies_aggregate_order_by | null),trophies_enabled?: (order_by | null),trophy_configs_aggregate?: (tournament_trophy_configs_aggregate_order_by | null)}
 
 
 /** primary key columns input for table: tournaments */
@@ -96282,11 +96317,12 @@ export interface tournaments_pk_columns_input {id: Scalars['uuid']}
 
 
 /** input type for updating data in table "tournaments" */
-export interface tournaments_set_input {auto_start?: (Scalars['Boolean'] | null),awards_enabled?: (Scalars['Boolean'] | null),banner?: (Scalars['String'] | null),created_at?: (Scalars['timestamptz'] | null),description?: (Scalars['String'] | null),discord_guild_id?: (Scalars['String'] | null),discord_notifications_enabled?: (Scalars['Boolean'] | null),discord_notify_Canceled?: (Scalars['Boolean'] | null),discord_notify_Finished?: (Scalars['Boolean'] | null),discord_notify_Forfeit?: (Scalars['Boolean'] | null),discord_notify_Live?: (Scalars['Boolean'] | null),discord_notify_MapPaused?: (Scalars['Boolean'] | null),discord_notify_PickingPlayers?: (Scalars['Boolean'] | null),discord_notify_Scheduled?: (Scalars['Boolean'] | null),discord_notify_Surrendered?: (Scalars['Boolean'] | null),discord_notify_Tie?: (Scalars['Boolean'] | null),discord_notify_Veto?: (Scalars['Boolean'] | null),discord_notify_WaitingForCheckIn?: (Scalars['Boolean'] | null),discord_notify_WaitingForServer?: (Scalars['Boolean'] | null),discord_role_id?: (Scalars['String'] | null),discord_voice_enabled?: (Scalars['Boolean'] | null),discord_webhook?: (Scalars['String'] | null),homepage?: (Scalars['String'] | null),id?: (Scalars['uuid'] | null),latitude?: (Scalars['float8'] | null),location?: (Scalars['String'] | null),logo?: (Scalars['String'] | null),longitude?: (Scalars['float8'] | null),match_options_id?: (Scalars['uuid'] | null),name?: (Scalars['String'] | null),organizer_steam_id?: (Scalars['bigint'] | null),scheduling_mode?: (Scalars['String'] | null),start?: (Scalars['timestamptz'] | null),status?: (e_tournament_status_enum | null),trophies_enabled?: (Scalars['Boolean'] | null)}
+export interface tournaments_set_input {auto_start?: (Scalars['Boolean'] | null),awards_enabled?: (Scalars['Boolean'] | null),banner?: (Scalars['String'] | null),created_at?: (Scalars['timestamptz'] | null),description?: (Scalars['String'] | null),discord_guild_id?: (Scalars['String'] | null),discord_notifications_enabled?: (Scalars['Boolean'] | null),discord_notify_Canceled?: (Scalars['Boolean'] | null),discord_notify_Finished?: (Scalars['Boolean'] | null),discord_notify_Forfeit?: (Scalars['Boolean'] | null),discord_notify_Live?: (Scalars['Boolean'] | null),discord_notify_MapPaused?: (Scalars['Boolean'] | null),discord_notify_PickingPlayers?: (Scalars['Boolean'] | null),discord_notify_Scheduled?: (Scalars['Boolean'] | null),discord_notify_Surrendered?: (Scalars['Boolean'] | null),discord_notify_Tie?: (Scalars['Boolean'] | null),discord_notify_Veto?: (Scalars['Boolean'] | null),discord_notify_WaitingForCheckIn?: (Scalars['Boolean'] | null),discord_notify_WaitingForServer?: (Scalars['Boolean'] | null),discord_role_id?: (Scalars['String'] | null),discord_voice_enabled?: (Scalars['Boolean'] | null),discord_webhook?: (Scalars['String'] | null),homepage?: (Scalars['String'] | null),id?: (Scalars['uuid'] | null),individual_check_in_duration_minutes?: (Scalars['Int'] | null),individual_check_in_ends_at?: (Scalars['timestamptz'] | null),latitude?: (Scalars['float8'] | null),location?: (Scalars['String'] | null),logo?: (Scalars['String'] | null),longitude?: (Scalars['float8'] | null),match_options_id?: (Scalars['uuid'] | null),name?: (Scalars['String'] | null),organizer_steam_id?: (Scalars['bigint'] | null),scheduling_mode?: (Scalars['String'] | null),start?: (Scalars['timestamptz'] | null),status?: (e_tournament_status_enum | null),trophies_enabled?: (Scalars['Boolean'] | null)}
 
 
 /** aggregate stddev on columns */
 export interface tournaments_stddev_fieldsGenqlSelection{
+    individual_check_in_duration_minutes?: boolean | number
     latitude?: boolean | number
     longitude?: boolean | number
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -96300,11 +96336,12 @@ export interface tournaments_stddev_fieldsGenqlSelection{
 
 
 /** order by stddev() on columns of table "tournaments" */
-export interface tournaments_stddev_order_by {latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
+export interface tournaments_stddev_order_by {individual_check_in_duration_minutes?: (order_by | null),latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
 
 
 /** aggregate stddev_pop on columns */
 export interface tournaments_stddev_pop_fieldsGenqlSelection{
+    individual_check_in_duration_minutes?: boolean | number
     latitude?: boolean | number
     longitude?: boolean | number
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -96318,11 +96355,12 @@ export interface tournaments_stddev_pop_fieldsGenqlSelection{
 
 
 /** order by stddev_pop() on columns of table "tournaments" */
-export interface tournaments_stddev_pop_order_by {latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
+export interface tournaments_stddev_pop_order_by {individual_check_in_duration_minutes?: (order_by | null),latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
 
 
 /** aggregate stddev_samp on columns */
 export interface tournaments_stddev_samp_fieldsGenqlSelection{
+    individual_check_in_duration_minutes?: boolean | number
     latitude?: boolean | number
     longitude?: boolean | number
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -96336,7 +96374,7 @@ export interface tournaments_stddev_samp_fieldsGenqlSelection{
 
 
 /** order by stddev_samp() on columns of table "tournaments" */
-export interface tournaments_stddev_samp_order_by {latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
+export interface tournaments_stddev_samp_order_by {individual_check_in_duration_minutes?: (order_by | null),latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
 
 
 /** Streaming cursor of the table "tournaments" */
@@ -96348,11 +96386,12 @@ ordering?: (cursor_ordering | null)}
 
 
 /** Initial value of the column from where the streaming should start */
-export interface tournaments_stream_cursor_value_input {auto_start?: (Scalars['Boolean'] | null),awards_enabled?: (Scalars['Boolean'] | null),banner?: (Scalars['String'] | null),created_at?: (Scalars['timestamptz'] | null),description?: (Scalars['String'] | null),discord_guild_id?: (Scalars['String'] | null),discord_notifications_enabled?: (Scalars['Boolean'] | null),discord_notify_Canceled?: (Scalars['Boolean'] | null),discord_notify_Finished?: (Scalars['Boolean'] | null),discord_notify_Forfeit?: (Scalars['Boolean'] | null),discord_notify_Live?: (Scalars['Boolean'] | null),discord_notify_MapPaused?: (Scalars['Boolean'] | null),discord_notify_PickingPlayers?: (Scalars['Boolean'] | null),discord_notify_Scheduled?: (Scalars['Boolean'] | null),discord_notify_Surrendered?: (Scalars['Boolean'] | null),discord_notify_Tie?: (Scalars['Boolean'] | null),discord_notify_Veto?: (Scalars['Boolean'] | null),discord_notify_WaitingForCheckIn?: (Scalars['Boolean'] | null),discord_notify_WaitingForServer?: (Scalars['Boolean'] | null),discord_role_id?: (Scalars['String'] | null),discord_voice_enabled?: (Scalars['Boolean'] | null),discord_webhook?: (Scalars['String'] | null),homepage?: (Scalars['String'] | null),id?: (Scalars['uuid'] | null),latitude?: (Scalars['float8'] | null),location?: (Scalars['String'] | null),logo?: (Scalars['String'] | null),longitude?: (Scalars['float8'] | null),match_options_id?: (Scalars['uuid'] | null),name?: (Scalars['String'] | null),organizer_steam_id?: (Scalars['bigint'] | null),scheduling_mode?: (Scalars['String'] | null),start?: (Scalars['timestamptz'] | null),status?: (e_tournament_status_enum | null),trophies_enabled?: (Scalars['Boolean'] | null)}
+export interface tournaments_stream_cursor_value_input {auto_start?: (Scalars['Boolean'] | null),awards_enabled?: (Scalars['Boolean'] | null),banner?: (Scalars['String'] | null),created_at?: (Scalars['timestamptz'] | null),description?: (Scalars['String'] | null),discord_guild_id?: (Scalars['String'] | null),discord_notifications_enabled?: (Scalars['Boolean'] | null),discord_notify_Canceled?: (Scalars['Boolean'] | null),discord_notify_Finished?: (Scalars['Boolean'] | null),discord_notify_Forfeit?: (Scalars['Boolean'] | null),discord_notify_Live?: (Scalars['Boolean'] | null),discord_notify_MapPaused?: (Scalars['Boolean'] | null),discord_notify_PickingPlayers?: (Scalars['Boolean'] | null),discord_notify_Scheduled?: (Scalars['Boolean'] | null),discord_notify_Surrendered?: (Scalars['Boolean'] | null),discord_notify_Tie?: (Scalars['Boolean'] | null),discord_notify_Veto?: (Scalars['Boolean'] | null),discord_notify_WaitingForCheckIn?: (Scalars['Boolean'] | null),discord_notify_WaitingForServer?: (Scalars['Boolean'] | null),discord_role_id?: (Scalars['String'] | null),discord_voice_enabled?: (Scalars['Boolean'] | null),discord_webhook?: (Scalars['String'] | null),homepage?: (Scalars['String'] | null),id?: (Scalars['uuid'] | null),individual_check_in_duration_minutes?: (Scalars['Int'] | null),individual_check_in_ends_at?: (Scalars['timestamptz'] | null),latitude?: (Scalars['float8'] | null),location?: (Scalars['String'] | null),logo?: (Scalars['String'] | null),longitude?: (Scalars['float8'] | null),match_options_id?: (Scalars['uuid'] | null),name?: (Scalars['String'] | null),organizer_steam_id?: (Scalars['bigint'] | null),scheduling_mode?: (Scalars['String'] | null),start?: (Scalars['timestamptz'] | null),status?: (e_tournament_status_enum | null),trophies_enabled?: (Scalars['Boolean'] | null)}
 
 
 /** aggregate sum on columns */
 export interface tournaments_sum_fieldsGenqlSelection{
+    individual_check_in_duration_minutes?: boolean | number
     latitude?: boolean | number
     longitude?: boolean | number
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -96366,7 +96405,7 @@ export interface tournaments_sum_fieldsGenqlSelection{
 
 
 /** order by sum() on columns of table "tournaments" */
-export interface tournaments_sum_order_by {latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
+export interface tournaments_sum_order_by {individual_check_in_duration_minutes?: (order_by | null),latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
 
 export interface tournaments_updates {
 /** increments the numeric columns with given value of the filtered values */
@@ -96379,6 +96418,7 @@ where: tournaments_bool_exp}
 
 /** aggregate var_pop on columns */
 export interface tournaments_var_pop_fieldsGenqlSelection{
+    individual_check_in_duration_minutes?: boolean | number
     latitude?: boolean | number
     longitude?: boolean | number
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -96392,11 +96432,12 @@ export interface tournaments_var_pop_fieldsGenqlSelection{
 
 
 /** order by var_pop() on columns of table "tournaments" */
-export interface tournaments_var_pop_order_by {latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
+export interface tournaments_var_pop_order_by {individual_check_in_duration_minutes?: (order_by | null),latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
 
 
 /** aggregate var_samp on columns */
 export interface tournaments_var_samp_fieldsGenqlSelection{
+    individual_check_in_duration_minutes?: boolean | number
     latitude?: boolean | number
     longitude?: boolean | number
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -96410,11 +96451,12 @@ export interface tournaments_var_samp_fieldsGenqlSelection{
 
 
 /** order by var_samp() on columns of table "tournaments" */
-export interface tournaments_var_samp_order_by {latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
+export interface tournaments_var_samp_order_by {individual_check_in_duration_minutes?: (order_by | null),latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
 
 
 /** aggregate variance on columns */
 export interface tournaments_variance_fieldsGenqlSelection{
+    individual_check_in_duration_minutes?: boolean | number
     latitude?: boolean | number
     longitude?: boolean | number
     /** A computed field, executes function "tournament_max_players_per_lineup" */
@@ -96428,7 +96470,7 @@ export interface tournaments_variance_fieldsGenqlSelection{
 
 
 /** order by variance() on columns of table "tournaments" */
-export interface tournaments_variance_order_by {latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
+export interface tournaments_variance_order_by {individual_check_in_duration_minutes?: (order_by | null),latitude?: (order_by | null),longitude?: (order_by | null),organizer_steam_id?: (order_by | null)}
 
 
 /** Boolean expression to compare columns of type "uuid". All fields are combined with logical 'AND'. */
@@ -127140,6 +127182,7 @@ export const enumTournamentIndividualSignupsConstraint = {
 }
 
 export const enumTournamentIndividualSignupsSelectColumn = {
+   checked_in_at: 'checked_in_at' as const,
    created_at: 'created_at' as const,
    id: 'id' as const,
    player_steam_id: 'player_steam_id' as const,
@@ -127149,6 +127192,7 @@ export const enumTournamentIndividualSignupsSelectColumn = {
 }
 
 export const enumTournamentIndividualSignupsUpdateColumn = {
+   checked_in_at: 'checked_in_at' as const,
    created_at: 'created_at' as const,
    id: 'id' as const,
    player_steam_id: 'player_steam_id' as const,
@@ -127427,6 +127471,8 @@ export const enumTournamentsSelectColumn = {
    discord_webhook: 'discord_webhook' as const,
    homepage: 'homepage' as const,
    id: 'id' as const,
+   individual_check_in_duration_minutes: 'individual_check_in_duration_minutes' as const,
+   individual_check_in_ends_at: 'individual_check_in_ends_at' as const,
    latitude: 'latitude' as const,
    location: 'location' as const,
    logo: 'logo' as const,
@@ -127545,6 +127591,8 @@ export const enumTournamentsUpdateColumn = {
    discord_webhook: 'discord_webhook' as const,
    homepage: 'homepage' as const,
    id: 'id' as const,
+   individual_check_in_duration_minutes: 'individual_check_in_duration_minutes' as const,
+   individual_check_in_ends_at: 'individual_check_in_ends_at' as const,
    latitude: 'latitude' as const,
    location: 'location' as const,
    logo: 'logo' as const,

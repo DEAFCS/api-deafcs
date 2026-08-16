@@ -469,6 +469,8 @@ select_permissions:
         - start
         - status
         - trophies_enabled
+        - individual_check_in_ends_at
+        - individual_check_in_duration_minutes
       computed_fields:
         - can_cancel
         - can_close_registration
@@ -525,6 +527,8 @@ select_permissions:
         - start
         - status
         - trophies_enabled
+        - individual_check_in_ends_at
+        - individual_check_in_duration_minutes
       computed_fields:
         - can_cancel
         - can_close_registration
@@ -567,6 +571,8 @@ select_permissions:
         - start
         - status
         - trophies_enabled
+        - individual_check_in_ends_at
+        - individual_check_in_duration_minutes
       computed_fields:
         - can_cancel
         - can_close_registration

@@ -108288,6 +108288,9 @@ export default {
             ]
         },
         "tournament_individual_signups": {
+            "checked_in_at": [
+                4701
+            ],
             "created_at": [
                 4701
             ],
@@ -108477,6 +108480,9 @@ export default {
             "_or": [
                 4823
             ],
+            "checked_in_at": [
+                4702
+            ],
             "created_at": [
                 4702
             ],
@@ -108518,6 +108524,9 @@ export default {
             ]
         },
         "tournament_individual_signups_insert_input": {
+            "checked_in_at": [
+                4701
+            ],
             "created_at": [
                 4701
             ],
@@ -108550,6 +108559,9 @@ export default {
             ]
         },
         "tournament_individual_signups_max_fields": {
+            "checked_in_at": [
+                4701
+            ],
             "created_at": [
                 4701
             ],
@@ -108570,6 +108582,9 @@ export default {
             ]
         },
         "tournament_individual_signups_max_order_by": {
+            "checked_in_at": [
+                3099
+            ],
             "created_at": [
                 3099
             ],
@@ -108590,6 +108605,9 @@ export default {
             ]
         },
         "tournament_individual_signups_min_fields": {
+            "checked_in_at": [
+                4701
+            ],
             "created_at": [
                 4701
             ],
@@ -108610,6 +108628,9 @@ export default {
             ]
         },
         "tournament_individual_signups_min_order_by": {
+            "checked_in_at": [
+                3099
+            ],
             "created_at": [
                 3099
             ],
@@ -108655,6 +108676,9 @@ export default {
             ]
         },
         "tournament_individual_signups_order_by": {
+            "checked_in_at": [
+                3099
+            ],
             "created_at": [
                 3099
             ],
@@ -108696,6 +108720,9 @@ export default {
         },
         "tournament_individual_signups_select_column": {},
         "tournament_individual_signups_set_input": {
+            "checked_in_at": [
+                4701
+            ],
             "created_at": [
                 4701
             ],
@@ -108778,6 +108805,9 @@ export default {
             ]
         },
         "tournament_individual_signups_stream_cursor_value_input": {
+            "checked_in_at": [
+                4701
+            ],
             "created_at": [
                 4701
             ],
@@ -116245,6 +116275,12 @@ export default {
             "id": [
                 5317
             ],
+            "individual_check_in_duration_minutes": [
+                41
+            ],
+            "individual_check_in_ends_at": [
+                4701
+            ],
             "individual_signups": [
                 4814,
                 {
@@ -117139,6 +117175,9 @@ export default {
             ]
         },
         "tournaments_avg_fields": {
+            "individual_check_in_duration_minutes": [
+                31
+            ],
             "latitude": [
                 31
             ],
@@ -117159,6 +117198,9 @@ export default {
             ]
         },
         "tournaments_avg_order_by": {
+            "individual_check_in_duration_minutes": [
+                3099
+            ],
             "latitude": [
                 3099
             ],
@@ -117293,6 +117335,12 @@ export default {
             "id": [
                 5319
             ],
+            "individual_check_in_duration_minutes": [
+                42
+            ],
+            "individual_check_in_ends_at": [
+                4702
+            ],
             "individual_signups": [
                 4823
             ],
@@ -117416,6 +117464,9 @@ export default {
         },
         "tournaments_constraint": {},
         "tournaments_inc_input": {
+            "individual_check_in_duration_minutes": [
+                41
+            ],
             "latitude": [
                 1748
             ],
@@ -117510,6 +117561,12 @@ export default {
             ],
             "id": [
                 5317
+            ],
+            "individual_check_in_duration_minutes": [
+                41
+            ],
+            "individual_check_in_ends_at": [
+                4701
             ],
             "individual_signups": [
                 4820
@@ -117612,6 +117669,12 @@ export default {
             "id": [
                 5317
             ],
+            "individual_check_in_duration_minutes": [
+                41
+            ],
+            "individual_check_in_ends_at": [
+                4701
+            ],
             "latitude": [
                 1748
             ],
@@ -117674,6 +117737,12 @@ export default {
             "id": [
                 3099
             ],
+            "individual_check_in_duration_minutes": [
+                3099
+            ],
+            "individual_check_in_ends_at": [
+                3099
+            ],
             "latitude": [
                 3099
             ],
@@ -117729,6 +117798,12 @@ export default {
             ],
             "id": [
                 5317
+            ],
+            "individual_check_in_duration_minutes": [
+                41
+            ],
+            "individual_check_in_ends_at": [
+                4701
             ],
             "latitude": [
                 1748
@@ -117790,6 +117865,12 @@ export default {
                 3099
             ],
             "id": [
+                3099
+            ],
+            "individual_check_in_duration_minutes": [
+                3099
+            ],
+            "individual_check_in_ends_at": [
                 3099
             ],
             "latitude": [
@@ -117966,6 +118047,12 @@ export default {
                 3099
             ],
             "id": [
+                3099
+            ],
+            "individual_check_in_duration_minutes": [
+                3099
+            ],
+            "individual_check_in_ends_at": [
                 3099
             ],
             "individual_signups_aggregate": [
@@ -118148,6 +118235,12 @@ export default {
             "id": [
                 5317
             ],
+            "individual_check_in_duration_minutes": [
+                41
+            ],
+            "individual_check_in_ends_at": [
+                4701
+            ],
             "latitude": [
                 1748
             ],
@@ -118186,6 +118279,9 @@ export default {
             ]
         },
         "tournaments_stddev_fields": {
+            "individual_check_in_duration_minutes": [
+                31
+            ],
             "latitude": [
                 31
             ],
@@ -118206,6 +118302,9 @@ export default {
             ]
         },
         "tournaments_stddev_order_by": {
+            "individual_check_in_duration_minutes": [
+                3099
+            ],
             "latitude": [
                 3099
             ],
@@ -118220,6 +118319,9 @@ export default {
             ]
         },
         "tournaments_stddev_pop_fields": {
+            "individual_check_in_duration_minutes": [
+                31
+            ],
             "latitude": [
                 31
             ],
@@ -118240,6 +118342,9 @@ export default {
             ]
         },
         "tournaments_stddev_pop_order_by": {
+            "individual_check_in_duration_minutes": [
+                3099
+            ],
             "latitude": [
                 3099
             ],
@@ -118254,6 +118359,9 @@ export default {
             ]
         },
         "tournaments_stddev_samp_fields": {
+            "individual_check_in_duration_minutes": [
+                31
+            ],
             "latitude": [
                 31
             ],
@@ -118274,6 +118382,9 @@ export default {
             ]
         },
         "tournaments_stddev_samp_order_by": {
+            "individual_check_in_duration_minutes": [
+                3099
+            ],
             "latitude": [
                 3099
             ],
@@ -118371,6 +118482,12 @@ export default {
             "id": [
                 5317
             ],
+            "individual_check_in_duration_minutes": [
+                41
+            ],
+            "individual_check_in_ends_at": [
+                4701
+            ],
             "latitude": [
                 1748
             ],
@@ -118409,6 +118526,9 @@ export default {
             ]
         },
         "tournaments_sum_fields": {
+            "individual_check_in_duration_minutes": [
+                41
+            ],
             "latitude": [
                 1748
             ],
@@ -118429,6 +118549,9 @@ export default {
             ]
         },
         "tournaments_sum_order_by": {
+            "individual_check_in_duration_minutes": [
+                3099
+            ],
             "latitude": [
                 3099
             ],
@@ -118458,6 +118581,9 @@ export default {
             ]
         },
         "tournaments_var_pop_fields": {
+            "individual_check_in_duration_minutes": [
+                31
+            ],
             "latitude": [
                 31
             ],
@@ -118478,6 +118604,9 @@ export default {
             ]
         },
         "tournaments_var_pop_order_by": {
+            "individual_check_in_duration_minutes": [
+                3099
+            ],
             "latitude": [
                 3099
             ],
@@ -118492,6 +118621,9 @@ export default {
             ]
         },
         "tournaments_var_samp_fields": {
+            "individual_check_in_duration_minutes": [
+                31
+            ],
             "latitude": [
                 31
             ],
@@ -118512,6 +118644,9 @@ export default {
             ]
         },
         "tournaments_var_samp_order_by": {
+            "individual_check_in_duration_minutes": [
+                3099
+            ],
             "latitude": [
                 3099
             ],
@@ -118526,6 +118661,9 @@ export default {
             ]
         },
         "tournaments_variance_fields": {
+            "individual_check_in_duration_minutes": [
+                31
+            ],
             "latitude": [
                 31
             ],
@@ -118546,6 +118684,9 @@ export default {
             ]
         },
         "tournaments_variance_order_by": {
+            "individual_check_in_duration_minutes": [
+                3099
+            ],
             "latitude": [
                 3099
             ],
@@ -152599,6 +152740,15 @@ export default {
                     ]
                 }
             ],
+            "checkIntoTournament": [
+                85,
+                {
+                    "tournament_id": [
+                        5317,
+                        "uuid!"
+                    ]
+                }
+            ],
             "clearClipRenderBatch": [
                 85,
                 {
@@ -160825,6 +160975,19 @@ export default {
                     ],
                     "server_id": [
                         5317
+                    ]
+                }
+            ],
+            "startTournamentIndividualCheckIn": [
+                85,
+                {
+                    "duration_minutes": [
+                        41,
+                        "Int!"
+                    ],
+                    "tournament_id": [
+                        5317,
+                        "uuid!"
                     ]
                 }
             ],

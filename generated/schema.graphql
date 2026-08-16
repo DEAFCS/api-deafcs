@@ -37929,6 +37929,11 @@ type mutation_root {
   checkIntoMatch(match_id: uuid!): SuccessOutput
 
   """
+  Player self-check-in during a tournament's individual sign-up check-in window
+  """
+  checkIntoTournament(tournament_id: uuid!): SuccessOutput
+
+  """
   Delete terminal-state clip_render_jobs rows for a single match_map batch.
   """
   clearClipRenderBatch(match_map_id: uuid!): SuccessOutput
@@ -44054,6 +44059,9 @@ type mutation_root {
 
   """startMatch"""
   startMatch(match_id: uuid!, server_id: uuid): SuccessOutput
+
+  """Open a check-in window for individually-registered tournament players"""
+  startTournamentIndividualCheckIn(duration_minutes: Int!, tournament_id: uuid!): SuccessOutput
   stopGpuSession(game_server_node_id: uuid!): SuccessOutput
   stopLive(match_id: uuid!): SuccessOutput
   stopWatchDemo(match_map_id: uuid!): SuccessOutput
@@ -100348,6 +100356,7 @@ input tournament_categories_updates {
 columns and relationships of "tournament_individual_signups"
 """
 type tournament_individual_signups {
+  checked_in_at: timestamptz
   created_at: timestamptz!
   id: uuid!
 
@@ -100447,6 +100456,7 @@ input tournament_individual_signups_bool_exp {
   _and: [tournament_individual_signups_bool_exp!]
   _not: tournament_individual_signups_bool_exp
   _or: [tournament_individual_signups_bool_exp!]
+  checked_in_at: timestamptz_comparison_exp
   created_at: timestamptz_comparison_exp
   id: uuid_comparison_exp
   player: players_bool_exp
@@ -100484,6 +100494,7 @@ input tournament_individual_signups_inc_input {
 input type for inserting data into table "tournament_individual_signups"
 """
 input tournament_individual_signups_insert_input {
+  checked_in_at: timestamptz
   created_at: timestamptz
   id: uuid
   player: players_obj_rel_insert_input
@@ -100497,6 +100508,7 @@ input tournament_individual_signups_insert_input {
 
 """aggregate max on columns"""
 type tournament_individual_signups_max_fields {
+  checked_in_at: timestamptz
   created_at: timestamptz
   id: uuid
   player_steam_id: bigint
@@ -100508,6 +100520,7 @@ type tournament_individual_signups_max_fields {
 order by max() on columns of table "tournament_individual_signups"
 """
 input tournament_individual_signups_max_order_by {
+  checked_in_at: order_by
   created_at: order_by
   id: order_by
   player_steam_id: order_by
@@ -100517,6 +100530,7 @@ input tournament_individual_signups_max_order_by {
 
 """aggregate min on columns"""
 type tournament_individual_signups_min_fields {
+  checked_in_at: timestamptz
   created_at: timestamptz
   id: uuid
   player_steam_id: bigint
@@ -100528,6 +100542,7 @@ type tournament_individual_signups_min_fields {
 order by min() on columns of table "tournament_individual_signups"
 """
 input tournament_individual_signups_min_order_by {
+  checked_in_at: order_by
   created_at: order_by
   id: order_by
   player_steam_id: order_by
@@ -100559,6 +100574,7 @@ input tournament_individual_signups_on_conflict {
 Ordering options when selecting data from "tournament_individual_signups".
 """
 input tournament_individual_signups_order_by {
+  checked_in_at: order_by
   created_at: order_by
   id: order_by
   player: players_order_by
@@ -100579,6 +100595,9 @@ input tournament_individual_signups_pk_columns_input {
 select columns of table "tournament_individual_signups"
 """
 enum tournament_individual_signups_select_column {
+  """column name"""
+  checked_in_at
+
   """column name"""
   created_at
 
@@ -100602,6 +100621,7 @@ enum tournament_individual_signups_select_column {
 input type for updating data in table "tournament_individual_signups"
 """
 input tournament_individual_signups_set_input {
+  checked_in_at: timestamptz
   created_at: timestamptz
   id: uuid
   player_steam_id: bigint
@@ -100659,6 +100679,7 @@ input tournament_individual_signups_stream_cursor_input {
 
 """Initial value of the column from where the streaming should start"""
 input tournament_individual_signups_stream_cursor_value_input {
+  checked_in_at: timestamptz
   created_at: timestamptz
   id: uuid
   player_steam_id: bigint
@@ -100683,6 +100704,9 @@ input tournament_individual_signups_sum_order_by {
 update columns of table "tournament_individual_signups"
 """
 enum tournament_individual_signups_update_column {
+  """column name"""
+  checked_in_at
+
   """column name"""
   created_at
 
@@ -105415,6 +105439,8 @@ type tournaments {
   has_min_teams: Boolean
   homepage: String
   id: uuid!
+  individual_check_in_duration_minutes: Int
+  individual_check_in_ends_at: timestamptz
 
   """An array relationship"""
   individual_signups(
@@ -106005,6 +106031,7 @@ input tournaments_arr_rel_insert_input {
 
 """aggregate avg on columns"""
 type tournaments_avg_fields {
+  individual_check_in_duration_minutes: Float
   latitude: Float
   longitude: Float
 
@@ -106024,6 +106051,7 @@ type tournaments_avg_fields {
 order by avg() on columns of table "tournaments"
 """
 input tournaments_avg_order_by {
+  individual_check_in_duration_minutes: order_by
   latitude: order_by
   longitude: order_by
   organizer_steam_id: order_by
@@ -106073,6 +106101,8 @@ input tournaments_bool_exp {
   has_min_teams: Boolean_comparison_exp
   homepage: String_comparison_exp
   id: uuid_comparison_exp
+  individual_check_in_duration_minutes: Int_comparison_exp
+  individual_check_in_ends_at: timestamptz_comparison_exp
   individual_signups: tournament_individual_signups_bool_exp
   individual_signups_aggregate: tournament_individual_signups_aggregate_bool_exp
   is_organizer: Boolean_comparison_exp
@@ -106133,6 +106163,7 @@ enum tournaments_constraint {
 input type for incrementing numeric columns in table "tournaments"
 """
 input tournaments_inc_input {
+  individual_check_in_duration_minutes: Int
   latitude: float8
   longitude: float8
   organizer_steam_id: bigint
@@ -106169,6 +106200,8 @@ input tournaments_insert_input {
   e_tournament_status: e_tournament_status_obj_rel_insert_input
   homepage: String
   id: uuid
+  individual_check_in_duration_minutes: Int
+  individual_check_in_ends_at: timestamptz
   individual_signups: tournament_individual_signups_arr_rel_insert_input
   latitude: float8
   league_season_division: league_season_divisions_obj_rel_insert_input
@@ -106205,6 +106238,8 @@ type tournaments_max_fields {
   discord_webhook: String
   homepage: String
   id: uuid
+  individual_check_in_duration_minutes: Int
+  individual_check_in_ends_at: timestamptz
   latitude: float8
   location: String
   logo: String
@@ -106238,6 +106273,8 @@ input tournaments_max_order_by {
   discord_webhook: order_by
   homepage: order_by
   id: order_by
+  individual_check_in_duration_minutes: order_by
+  individual_check_in_ends_at: order_by
   latitude: order_by
   location: order_by
   logo: order_by
@@ -106259,6 +106296,8 @@ type tournaments_min_fields {
   discord_webhook: String
   homepage: String
   id: uuid
+  individual_check_in_duration_minutes: Int
+  individual_check_in_ends_at: timestamptz
   latitude: float8
   location: String
   logo: String
@@ -106292,6 +106331,8 @@ input tournaments_min_order_by {
   discord_webhook: order_by
   homepage: order_by
   id: order_by
+  individual_check_in_duration_minutes: order_by
+  individual_check_in_ends_at: order_by
   latitude: order_by
   location: order_by
   logo: order_by
@@ -106371,6 +106412,8 @@ input tournaments_order_by {
   has_min_teams: order_by
   homepage: order_by
   id: order_by
+  individual_check_in_duration_minutes: order_by
+  individual_check_in_ends_at: order_by
   individual_signups_aggregate: tournament_individual_signups_aggregate_order_by
   is_organizer: order_by
   joined_tournament: order_by
@@ -106481,6 +106524,12 @@ enum tournaments_select_column {
 
   """column name"""
   id
+
+  """column name"""
+  individual_check_in_duration_minutes
+
+  """column name"""
+  individual_check_in_ends_at
 
   """column name"""
   latitude
@@ -106744,6 +106793,8 @@ input tournaments_set_input {
   discord_webhook: String
   homepage: String
   id: uuid
+  individual_check_in_duration_minutes: Int
+  individual_check_in_ends_at: timestamptz
   latitude: float8
   location: String
   logo: String
@@ -106759,6 +106810,7 @@ input tournaments_set_input {
 
 """aggregate stddev on columns"""
 type tournaments_stddev_fields {
+  individual_check_in_duration_minutes: Float
   latitude: Float
   longitude: Float
 
@@ -106778,6 +106830,7 @@ type tournaments_stddev_fields {
 order by stddev() on columns of table "tournaments"
 """
 input tournaments_stddev_order_by {
+  individual_check_in_duration_minutes: order_by
   latitude: order_by
   longitude: order_by
   organizer_steam_id: order_by
@@ -106785,6 +106838,7 @@ input tournaments_stddev_order_by {
 
 """aggregate stddev_pop on columns"""
 type tournaments_stddev_pop_fields {
+  individual_check_in_duration_minutes: Float
   latitude: Float
   longitude: Float
 
@@ -106804,6 +106858,7 @@ type tournaments_stddev_pop_fields {
 order by stddev_pop() on columns of table "tournaments"
 """
 input tournaments_stddev_pop_order_by {
+  individual_check_in_duration_minutes: order_by
   latitude: order_by
   longitude: order_by
   organizer_steam_id: order_by
@@ -106811,6 +106866,7 @@ input tournaments_stddev_pop_order_by {
 
 """aggregate stddev_samp on columns"""
 type tournaments_stddev_samp_fields {
+  individual_check_in_duration_minutes: Float
   latitude: Float
   longitude: Float
 
@@ -106830,6 +106886,7 @@ type tournaments_stddev_samp_fields {
 order by stddev_samp() on columns of table "tournaments"
 """
 input tournaments_stddev_samp_order_by {
+  individual_check_in_duration_minutes: order_by
   latitude: order_by
   longitude: order_by
   organizer_steam_id: order_by
@@ -106872,6 +106929,8 @@ input tournaments_stream_cursor_value_input {
   discord_webhook: String
   homepage: String
   id: uuid
+  individual_check_in_duration_minutes: Int
+  individual_check_in_ends_at: timestamptz
   latitude: float8
   location: String
   logo: String
@@ -106887,6 +106946,7 @@ input tournaments_stream_cursor_value_input {
 
 """aggregate sum on columns"""
 type tournaments_sum_fields {
+  individual_check_in_duration_minutes: Int
   latitude: float8
   longitude: float8
 
@@ -106906,6 +106966,7 @@ type tournaments_sum_fields {
 order by sum() on columns of table "tournaments"
 """
 input tournaments_sum_order_by {
+  individual_check_in_duration_minutes: order_by
   latitude: order_by
   longitude: order_by
   organizer_steam_id: order_by
@@ -106988,6 +107049,12 @@ enum tournaments_update_column {
   id
 
   """column name"""
+  individual_check_in_duration_minutes
+
+  """column name"""
+  individual_check_in_ends_at
+
+  """column name"""
   latitude
 
   """column name"""
@@ -107034,6 +107101,7 @@ input tournaments_updates {
 
 """aggregate var_pop on columns"""
 type tournaments_var_pop_fields {
+  individual_check_in_duration_minutes: Float
   latitude: Float
   longitude: Float
 
@@ -107053,6 +107121,7 @@ type tournaments_var_pop_fields {
 order by var_pop() on columns of table "tournaments"
 """
 input tournaments_var_pop_order_by {
+  individual_check_in_duration_minutes: order_by
   latitude: order_by
   longitude: order_by
   organizer_steam_id: order_by
@@ -107060,6 +107129,7 @@ input tournaments_var_pop_order_by {
 
 """aggregate var_samp on columns"""
 type tournaments_var_samp_fields {
+  individual_check_in_duration_minutes: Float
   latitude: Float
   longitude: Float
 
@@ -107079,6 +107149,7 @@ type tournaments_var_samp_fields {
 order by var_samp() on columns of table "tournaments"
 """
 input tournaments_var_samp_order_by {
+  individual_check_in_duration_minutes: order_by
   latitude: order_by
   longitude: order_by
   organizer_steam_id: order_by
@@ -107086,6 +107157,7 @@ input tournaments_var_samp_order_by {
 
 """aggregate variance on columns"""
 type tournaments_variance_fields {
+  individual_check_in_duration_minutes: Float
   latitude: Float
   longitude: Float
 
@@ -107105,6 +107177,7 @@ type tournaments_variance_fields {
 order by variance() on columns of table "tournaments"
 """
 input tournaments_variance_order_by {
+  individual_check_in_duration_minutes: order_by
   latitude: order_by
   longitude: order_by
   organizer_steam_id: order_by
