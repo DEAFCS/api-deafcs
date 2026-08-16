@@ -44064,6 +44064,11 @@ type mutation_root {
   startTournamentIndividualCheckIn(duration_minutes: Int!, tournament_id: uuid!): SuccessOutput
   stopGpuSession(game_server_node_id: uuid!): SuccessOutput
   stopLive(match_id: uuid!): SuccessOutput
+
+  """
+  Organizer ends an individual sign-up check-in window early for everyone
+  """
+  stopTournamentIndividualCheckIn(tournament_id: uuid!): SuccessOutput
   stopWatchDemo(match_map_id: uuid!): SuccessOutput
 
   """Submit a Steam Guard code for a presence bot account"""

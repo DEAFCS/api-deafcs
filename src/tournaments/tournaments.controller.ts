@@ -490,6 +490,21 @@ export class TournamentsController {
     }
 
     await this.postgres.transaction(async (client) => {
+      // tbi_tournament_team_roster (hasura/triggers/tournament_team_roster.sql)
+      // reads current_setting('hasura.user') to decide whether a roster
+      // insert is admin/organizer-driven (allowed straight through) or a
+      // regular player join (redirected into a tournament_team_invites
+      // row instead). That GUC only exists because Hasura's GraphQL engine
+      // sets it per-request -- this raw connection never gets it set,
+      // which the trigger treats as an unrecognized-setting error rather
+      // than "missing". Fake it for this transaction only: these rosters
+      // are entirely organizer-triggered (the auto-balance action itself
+      // already required is_organizer), so "administrator" here is
+      // accurate, not a privilege escalation.
+      await client.query(
+        `SELECT set_config('hasura.user', '{"x-hasura-role":"administrator"}', true)`,
+      );
+
       for (const [teamIndex, roster] of teams.entries()) {
         // Highest-ELO player on the generated roster stands in as
         // owner/captain -- there's no "team owner" concept for a pool of
@@ -605,6 +620,51 @@ export class TournamentsController {
     this.logger.log(
       `[${tournament_id}] individual check-in window opened, ${duration_minutes}m`,
     );
+
+    return { success: true };
+  }
+
+  // Ends the current window right now for everyone, instead of waiting out
+  // the clock. Deliberately doesn't duplicate the removal/waitlist-promotion
+  // logic here -- just moves individual_check_in_ends_at to "now", which
+  // ProcessTournamentCheckInExpiry (the same 15s-interval job that closes a
+  // naturally-expired window) picks up on its next pass and resolves
+  // exactly the same way a real expiry would.
+  @HasuraAction()
+  public async stopTournamentIndividualCheckIn(data: {
+    user: User;
+    tournament_id: string;
+  }) {
+    const { tournament_id } = data;
+
+    const { tournaments_by_pk: tournament } = await this.hasura.query(
+      {
+        tournaments_by_pk: {
+          __args: { id: tournament_id },
+          id: true,
+          is_organizer: true,
+          individual_check_in_ends_at: true,
+        },
+      },
+      data.user.steam_id,
+    );
+
+    if (!tournament) {
+      throw Error("tournament not found");
+    }
+    if (!tournament.is_organizer) {
+      throw Error("not the tournament organizer");
+    }
+    if (!tournament.individual_check_in_ends_at) {
+      throw Error("no check-in window is currently open");
+    }
+
+    await this.postgres.query(
+      `UPDATE public.tournaments SET individual_check_in_ends_at = now() WHERE id = $1`,
+      [tournament_id],
+    );
+
+    this.logger.log(`[${tournament_id}] individual check-in stopped early`);
 
     return { success: true };
   }

@@ -14149,6 +14149,8 @@ export interface mutation_root {
     startTournamentIndividualCheckIn: (SuccessOutput | null)
     stopGpuSession: (SuccessOutput | null)
     stopLive: (SuccessOutput | null)
+    /** Organizer ends an individual sign-up check-in window early for everyone */
+    stopTournamentIndividualCheckIn: (SuccessOutput | null)
     stopWatchDemo: (SuccessOutput | null)
     /** Submit a Steam Guard code for a presence bot account */
     submitSteamPresenceSteamGuard: (SuccessOutput | null)
@@ -61440,6 +61442,8 @@ export interface mutation_rootGenqlSelection{
     startTournamentIndividualCheckIn?: (SuccessOutputGenqlSelection & { __args: {duration_minutes: Scalars['Int'], tournament_id: Scalars['uuid']} })
     stopGpuSession?: (SuccessOutputGenqlSelection & { __args: {game_server_node_id: Scalars['uuid']} })
     stopLive?: (SuccessOutputGenqlSelection & { __args: {match_id: Scalars['uuid']} })
+    /** Organizer ends an individual sign-up check-in window early for everyone */
+    stopTournamentIndividualCheckIn?: (SuccessOutputGenqlSelection & { __args: {tournament_id: Scalars['uuid']} })
     stopWatchDemo?: (SuccessOutputGenqlSelection & { __args: {match_map_id: Scalars['uuid']} })
     /** Submit a Steam Guard code for a presence bot account */
     submitSteamPresenceSteamGuard?: (SuccessOutputGenqlSelection & { __args: {account_id: Scalars['String'], code: Scalars['String']} })

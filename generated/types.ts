@@ -161009,6 +161009,15 @@ export default {
                     ]
                 }
             ],
+            "stopTournamentIndividualCheckIn": [
+                85,
+                {
+                    "tournament_id": [
+                        5317,
+                        "uuid!"
+                    ]
+                }
+            ],
             "stopWatchDemo": [
                 85,
                 {
