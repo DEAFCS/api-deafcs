@@ -548,6 +548,23 @@ export class TournamentsController {
           [waitlisted.map((player) => player.signupId)],
         );
       }
+
+      // tbu_tournaments (hasura/triggers/tournaments.sql) rebuilds the
+      // whole bracket (update_tournament_stages) and seeds every eligible
+      // team (assign_seeds_to_teams) -- but only on the
+      // Setup/RegistrationOpen -> Live/RegistrationClosed transition,
+      // which already happened before any of these teams existed (they're
+      // created here, after registration closed). Without this, the
+      // bracket stays built for 0 teams and every one of these teams sits
+      // at seed = NULL forever. Re-run both explicitly now that the real
+      // teams exist.
+      await client.query(`SELECT update_tournament_stages($1)`, [
+        tournament_id,
+      ]);
+      await client.query(
+        `SELECT assign_seeds_to_teams(t) FROM public.tournaments t WHERE t.id = $1`,
+        [tournament_id],
+      );
     });
 
     this.logger.log(
