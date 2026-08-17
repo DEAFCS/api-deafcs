@@ -18,9 +18,16 @@ export type InAppNotificationTypeConfig = {
 // so a toggle for them here would control nothing. Chat has its own
 // unread-count badge on the chat icon instead; the bell is reserved for
 // non-message alerts (match imports, server/system status, etc.).
+// NewsPublished deliberately absent -- it was also a push category
+// ("news", see notification-categories.ts, defaults ON), and having
+// both a push toggle AND a separate bell toggle for the exact same
+// event was reported as confusing/redundant. Push is the one that
+// actually matters here (reaches you even when you're not looking at
+// the phone), so that's the single remaining on/off switch -- news
+// items still show up in the bell same as before, just without their
+// own dedicated control.
 export const IN_APP_TOGGLEABLE_TYPES: InAppNotificationTypeConfig[] = [
   { type: "MatchImported", defaultEnabled: false, adminOnly: false },
-  { type: "NewsPublished", defaultEnabled: true, adminOnly: false },
   { type: "DedicatedServerRconStatus", defaultEnabled: true, adminOnly: true },
   { type: "DedicatedServerStatus", defaultEnabled: true, adminOnly: true },
   { type: "EloRecompute", defaultEnabled: true, adminOnly: true },

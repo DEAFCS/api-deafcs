@@ -11956,6 +11956,9 @@ enum e_notification_types_enum {
   """A news article was published"""
   NewsPublished
 
+  """New message in Organizer Chat"""
+  OrganizerChatMessage
+
   """Player search reindex finished"""
   PlayerReindex
 
@@ -14831,6 +14834,11 @@ enum e_tournament_individual_signup_status_enum {
 
   """Waiting for the organizer to generate teams"""
   Registered
+
+  """
+  Did not check in before the window closed -- replaced from the waitlist
+  """
+  Removed
 
   """
   Left over once teams were generated -- not evenly divisible by team size

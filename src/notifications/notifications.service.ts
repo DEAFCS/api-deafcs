@@ -41,6 +41,7 @@ export class NotificationsService {
     "ChatMessage",
     "MatchChatMessage",
     "GlobalChatMessage",
+    "OrganizerChatMessage",
   ]);
 
   constructor(

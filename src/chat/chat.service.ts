@@ -510,6 +510,28 @@ export class ChatService {
       return;
     }
 
+    // Organizer chat has the same "no fixed roster, role-gated instead"
+    // shape as Global (see joinMatchLobby's Organizer case, gated on
+    // isRoleAbove(user.role, "match_organizer")) -- getLobbyMemberSteamIds
+    // below has no case for it and always returns [], so without this
+    // early branch notifyLobbyMembers would silently bail at the
+    // `!members.length` check right after and never actually notify
+    // anyone. This is why OrganizerChatMessage push never fired at all
+    // previously, not just why it lacked its own toggle.
+    if (type === ChatLobbyType.Organizer) {
+      await this.notifications.sendSilent(
+        "OrganizerChatMessage" as unknown as e_notification_types_enum,
+        {
+          title: sender.name || "New message",
+          message:
+            message.length > 200 ? `${message.slice(0, 200)}…` : message,
+          role: "match_organizer" as e_player_roles_enum,
+          entity_id: `${type}:${id}`,
+        },
+      );
+      return;
+    }
+
     const members = await this.getLobbyMemberSteamIds(type, id);
     if (!members.length) return;
 
@@ -524,11 +546,12 @@ export class ChatService {
     // actually live (including in-game console chat relayed in via
     // ChatMessageEvent), which players reported as distracting on
     // their phone mid-match. Defaults to OFF (see
-    // notification-categories.ts) unlike the rest.
+    // notification-categories.ts) unlike the rest. (Organizer chat is
+    // handled in its own early-return branch above, not here.)
+    const notificationType =
+      type === ChatLobbyType.Match ? "MatchChatMessage" : "ChatMessage";
     await this.notifications.notifyPlayers(
-      (type === ChatLobbyType.Match
-        ? "MatchChatMessage"
-        : "ChatMessage") as unknown as e_notification_types_enum,
+      notificationType as unknown as e_notification_types_enum,
       {
         title: sender.name || "New message",
         message: message.length > 200 ? `${message.slice(0, 200)}…` : message,

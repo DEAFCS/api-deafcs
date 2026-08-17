@@ -4523,7 +4523,7 @@ export interface e_notification_types_aggregate_fields {
 /** unique or primary key constraints on table "e_notification_types" */
 export type e_notification_types_constraint = 'e_notification_types_pkey'
 
-export type e_notification_types_enum = 'ChatMessage' | 'DedicatedServerRconStatus' | 'DedicatedServerStatus' | 'EloRecompute' | 'FormTeamSuggestion' | 'GameNodeStatus' | 'GameUpdate' | 'GlobalChatMessage' | 'LeagueMatchUnscheduled' | 'LeagueProposalAccepted' | 'LeagueProposalDeclined' | 'LeagueProposalReceived' | 'LeagueRegistrationDecision' | 'LeagueRosterUndersized' | 'MatchChatMessage' | 'MatchImported' | 'MatchStatusChange' | 'MatchSupport' | 'NameChangeApproved' | 'NameChangeDenied' | 'NameChangeRequest' | 'NewsPublished' | 'PlayerReindex' | 'PlayerSanctioned' | 'ScrimAlertMatch' | 'ScrimMatchCanceled' | 'ScrimMatchScheduled' | 'ScrimRequestAccepted' | 'ScrimRequestCountered' | 'ScrimRequestDeclined' | 'ScrimRequestExpired' | 'ScrimRequestReceived' | 'ScrimTimeChanged' | 'StorageScan' | 'TournamentCreated' | 'TournamentReminder'
+export type e_notification_types_enum = 'ChatMessage' | 'DedicatedServerRconStatus' | 'DedicatedServerStatus' | 'EloRecompute' | 'FormTeamSuggestion' | 'GameNodeStatus' | 'GameUpdate' | 'GlobalChatMessage' | 'LeagueMatchUnscheduled' | 'LeagueProposalAccepted' | 'LeagueProposalDeclined' | 'LeagueProposalReceived' | 'LeagueRegistrationDecision' | 'LeagueRosterUndersized' | 'MatchChatMessage' | 'MatchImported' | 'MatchStatusChange' | 'MatchSupport' | 'NameChangeApproved' | 'NameChangeDenied' | 'NameChangeRequest' | 'NewsPublished' | 'OrganizerChatMessage' | 'PlayerReindex' | 'PlayerSanctioned' | 'ScrimAlertMatch' | 'ScrimMatchCanceled' | 'ScrimMatchScheduled' | 'ScrimRequestAccepted' | 'ScrimRequestCountered' | 'ScrimRequestDeclined' | 'ScrimRequestExpired' | 'ScrimRequestReceived' | 'ScrimTimeChanged' | 'StorageScan' | 'TournamentCreated' | 'TournamentReminder'
 
 
 /** aggregate max on columns */
@@ -5465,7 +5465,7 @@ export interface e_tournament_individual_signup_status_aggregate_fields {
 /** unique or primary key constraints on table "e_tournament_individual_signup_status" */
 export type e_tournament_individual_signup_status_constraint = 'e_tournament_individual_signup_status_pkey'
 
-export type e_tournament_individual_signup_status_enum = 'Assigned' | 'Registered' | 'Waitlisted'
+export type e_tournament_individual_signup_status_enum = 'Assigned' | 'Registered' | 'Removed' | 'Waitlisted'
 
 
 /** aggregate max on columns */
@@ -123544,6 +123544,7 @@ export const enumENotificationTypesEnum = {
    NameChangeDenied: 'NameChangeDenied' as const,
    NameChangeRequest: 'NameChangeRequest' as const,
    NewsPublished: 'NewsPublished' as const,
+   OrganizerChatMessage: 'OrganizerChatMessage' as const,
    PlayerReindex: 'PlayerReindex' as const,
    PlayerSanctioned: 'PlayerSanctioned' as const,
    ScrimAlertMatch: 'ScrimAlertMatch' as const,
@@ -123854,6 +123855,7 @@ export const enumETournamentIndividualSignupStatusConstraint = {
 export const enumETournamentIndividualSignupStatusEnum = {
    Assigned: 'Assigned' as const,
    Registered: 'Registered' as const,
+   Removed: 'Removed' as const,
    Waitlisted: 'Waitlisted' as const
 }
 

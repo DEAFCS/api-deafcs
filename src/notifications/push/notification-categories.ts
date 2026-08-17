@@ -15,6 +15,11 @@ export const NOTIFICATION_CATEGORIES: Record<string, string[]> = {
   // defaults to OFF (see CATEGORY_DEFAULT_ENABLED below) unlike every
   // other category, which defaults to on.
   global_chat: ["GlobalChatMessage"],
+  // Was bundled under `chat` (shared with matchmaking/draft/tournament
+  // chat) with no way to mute/enable it independently -- split out on
+  // request. Role-gated (match_organizer+), not a fixed roster, so it's
+  // also its own early-return branch in ChatService.notifyLobbyMembers.
+  organizer_chat: ["OrganizerChatMessage"],
   news: ["NewsPublished"],
   tournaments: ["TournamentCreated", "TournamentReminder"],
   matches: ["MatchStatusChange", "MatchImported", "MatchSupport"],
