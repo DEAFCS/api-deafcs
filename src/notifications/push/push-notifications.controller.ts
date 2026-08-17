@@ -23,6 +23,7 @@ type NotificationRow = {
   message: string;
   type: string;
   entity_id: string;
+  exclude_steam_id?: string | null;
 };
 
 @Controller("notifications/push")

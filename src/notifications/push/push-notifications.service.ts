@@ -136,6 +136,7 @@ export class PushNotificationsService {
     message: string;
     type: string;
     entity_id: string;
+    exclude_steam_id?: string | null;
   }): Promise<void> {
     if (!this.vapidConfigured) return;
 
@@ -155,6 +156,17 @@ export class PushNotificationsService {
          JOIN public.players p ON p.steam_id = ps.steam_id`,
       );
       rows = withRole.filter((row) => isRoleAbove(row.player_role, targetRole));
+      // Role-broadcasts (Global Chat, Organizer Chat, …) have no single
+      // recipient to gate on -- without this, whoever triggered the
+      // notification got pushed it too, on every one of their own
+      // devices/sessions (reported: sending a Global Chat message from
+      // the phone notified that same account's PC about "its own"
+      // message).
+      if (notification.exclude_steam_id) {
+        rows = rows.filter(
+          (row) => String(row.steam_id) !== String(notification.exclude_steam_id),
+        );
+      }
     }
 
     if (!rows.length) return;

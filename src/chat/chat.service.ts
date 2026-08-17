@@ -510,6 +510,7 @@ export class ChatService {
             message.length > 200 ? `${message.slice(0, 200)}…` : message,
           role: "verified_user" as e_player_roles_enum,
           entity_id: `${type}:${id}`,
+          excludeSteamId: sender.steam_id,
         },
       );
       return;
@@ -532,6 +533,7 @@ export class ChatService {
             message.length > 200 ? `${message.slice(0, 200)}…` : message,
           role: "match_organizer" as e_player_roles_enum,
           entity_id: `${type}:${id}`,
+          excludeSteamId: sender.steam_id,
         },
       );
       return;

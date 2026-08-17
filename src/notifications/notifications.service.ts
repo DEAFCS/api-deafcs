@@ -284,6 +284,12 @@ export class NotificationsService {
       role: e_player_roles_enum;
       entity_id?: string;
       deletable?: boolean;
+      // Role-broadcasts (steam_id left unset here) otherwise resolve to
+      // *every* player matching the role, including whoever just
+      // triggered the notification themselves -- e.g. sending a Global
+      // Chat message notified every one of your own devices/sessions
+      // about your own message. See handleNotificationInsert.
+      excludeSteamId?: string;
     },
   ) {
     await this.insertNotification({
@@ -293,6 +299,7 @@ export class NotificationsService {
       role: notification.role,
       entity_id: notification.entity_id,
       deletable: notification.deletable,
+      exclude_steam_id: notification.excludeSteamId,
     });
   }
 
@@ -729,6 +736,7 @@ export class NotificationsService {
     role: e_player_roles_enum;
     steam_id?: string;
     deletable?: boolean;
+    exclude_steam_id?: string;
   }) {
     await this.hasura.mutation({
       insert_notifications_one: {
