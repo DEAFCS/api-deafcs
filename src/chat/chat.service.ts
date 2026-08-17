@@ -489,6 +489,30 @@ export class ChatService {
   // merely visited the page earlier. Always notifying every other member
   // costs an occasional redundant push while actively chatting, which is
   // a far smaller problem than never notifying at all.
+  // Human-readable channel label prefixed onto the notification title
+  // (e.g. "[GLOBAL CHAT] Theft") so a push/bell notification says which
+  // chat it's from -- Direct (1:1 DMs) deliberately has no entry, so the
+  // title stays just the sender's name there, matching how a private
+  // message app would show it.
+  private static readonly CHAT_LABELS: Partial<Record<ChatLobbyType, string>> = {
+    [ChatLobbyType.Global]: "GLOBAL CHAT",
+    [ChatLobbyType.Organizer]: "ORGANIZER",
+    [ChatLobbyType.MatchMaking]: "LOBBY",
+    [ChatLobbyType.Draft]: "DRAFT",
+    [ChatLobbyType.Tournament]: "TOURNAMENT",
+    [ChatLobbyType.Match]: "MATCH",
+    [ChatLobbyType.MatchTeam]: "TEAM",
+  };
+
+  private notificationTitle(
+    type: ChatLobbyType,
+    senderName: string | null | undefined,
+  ): string {
+    const name = senderName || "Someone";
+    const label = ChatService.CHAT_LABELS[type];
+    return label ? `[${label}] ${name}` : name;
+  }
+
   private async notifyLobbyMembers(
     type: ChatLobbyType,
     id: string,
@@ -505,7 +529,7 @@ export class ChatService {
       await this.notifications.sendSilent(
         "GlobalChatMessage" as unknown as e_notification_types_enum,
         {
-          title: sender.name || "New message",
+          title: this.notificationTitle(type, sender.name),
           message:
             message.length > 200 ? `${message.slice(0, 200)}…` : message,
           role: "verified_user" as e_player_roles_enum,
@@ -528,7 +552,7 @@ export class ChatService {
       await this.notifications.sendSilent(
         "OrganizerChatMessage" as unknown as e_notification_types_enum,
         {
-          title: sender.name || "New message",
+          title: this.notificationTitle(type, sender.name),
           message:
             message.length > 200 ? `${message.slice(0, 200)}…` : message,
           role: "match_organizer" as e_player_roles_enum,
@@ -560,7 +584,7 @@ export class ChatService {
     await this.notifications.notifyPlayers(
       notificationType as unknown as e_notification_types_enum,
       {
-        title: sender.name || "New message",
+        title: this.notificationTitle(type, sender.name),
         message: message.length > 200 ? `${message.slice(0, 200)}…` : message,
         role: "user" as e_player_roles_enum,
         entity_id: `${type}:${id}`,
