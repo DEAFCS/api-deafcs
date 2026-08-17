@@ -409,6 +409,7 @@ export class ChatService {
     player: User,
     _message: string,
     skipCheck = false,
+    clientId?: string,
   ) {
     // verify they are in the lobby
     if (skipCheck === false) {
@@ -444,6 +445,10 @@ export class ChatService {
         avatar_url: player.avatar_url,
         profile_url: player.profile_url,
       },
+      // Echoed straight back to every recipient (including the sender's
+      // own other sessions) -- see chat.gateway.ts's comment on why this
+      // is needed alongside from.steam_id.
+      clientId,
     };
 
     const messageKey = `chat_${type}_${id}`;

@@ -54,6 +54,13 @@ export class ChatGateway {
       id: string;
       message: string;
       type: ChatLobbyType;
+      // Per-browser-session id (see web-sockets/Socket.ts) -- echoed back
+      // in the broadcast so a *different* session for the same account
+      // (e.g. a PC browser while the phone sent this) can tell "my
+      // account sent this" apart from "this exact tab/app sent this",
+      // which is what the unread badge/sound need to check instead of
+      // steam_id alone.
+      clientId?: string;
     },
     @ConnectedSocket() client: FiveStackWebSocketClient,
   ) {
@@ -72,6 +79,8 @@ export class ChatGateway {
       data.id,
       client.user,
       data.message,
+      false,
+      data.clientId,
     );
 
     if (data.type !== ChatLobbyType.Match) {
