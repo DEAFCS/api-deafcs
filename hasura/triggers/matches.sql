@@ -417,7 +417,7 @@ BEGIN
             NEW.cancels_at = COALESCE(scheduled_at, NOW()) + (_auto_cancel_duration)::interval;
         END IF;
         NEW.ended_at = null;
-        NEW.map_veto_pick_expires_at = NOW() + (get_int_setting('public.map_veto_pick_seconds', 20) || ' seconds')::interval;
+        NEW.map_veto_pick_expires_at = NOW() + (get_int_setting('public.map_veto_pick_seconds', 30) || ' seconds')::interval;
     END IF;
 
     IF NEW.status = 'WaitingForServer' AND OLD.status != 'WaitingForServer' THEN
