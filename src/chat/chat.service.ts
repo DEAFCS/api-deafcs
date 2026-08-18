@@ -591,6 +591,38 @@ export class ChatService {
         steamIds: targets,
       },
     );
+
+    // Reported bug: a brand-new incoming DM (or any first message in a
+    // chat the recipient has never opened a tab for) produced no unread
+    // indicator anywhere -- the only realtime delivery path is to()
+    // above, which is scoped to sockets that have actually joined this
+    // lobby's room, something a recipient can only do by opening the
+    // conversation first. That's a chicken-and-egg problem: they had no
+    // reason to open it since nothing told them a message arrived.
+    // Ride the same steamId-addressed pub/sub channel to() uses, but
+    // targeted at every recipient regardless of lobby membership, so the
+    // frontend can register/update the tab and its unread badge even
+    // when it was never joined. Deliberately sent to everyone in
+    // `targets` (not just the ones missing from the lobby) -- the
+    // frontend already knows how to no-op this for a tab it currently
+    // has visibly open (see handleMessageReceived's isVisible check).
+    for (const steamId of targets) {
+      await this.redis.publish(
+        "send-message-to-steam-id",
+        JSON.stringify({
+          steamId,
+          event: "chat:new-message",
+          data: {
+            type,
+            id,
+            senderSteamId: sender.steam_id,
+            senderName: sender.name,
+            senderAvatarUrl: sender.avatar_url,
+            message: message.length > 200 ? `${message.slice(0, 200)}…` : message,
+          },
+        }),
+      );
+    }
   }
 
   // Resolves the fixed member roster for a lobby (distinct from
