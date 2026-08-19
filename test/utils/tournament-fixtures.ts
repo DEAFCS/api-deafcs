@@ -45,9 +45,18 @@ export class TournamentFixtures {
        FROM map_pools WHERE type = $1 AND seed = true RETURNING id`,
       [matchType],
     );
+    // The rest of this fixture (and most of the existing suite) predates
+    // awards_enabled defaulting to false for new tournaments -- keep the
+    // fixture's own default at true so unrelated tests keep exercising the
+    // calculated-awards path they already assume. Tests for the
+    // awards-disabled behavior itself set it back to false explicitly.
+    // Both columns must be set together: nothing syncs them at INSERT time
+    // (the sync trigger only fires on UPDATE), so leaving trophies_enabled
+    // on its column default here would desync it from awards_enabled=true.
     const [tournament] = await this.postgres.query<Array<{ id: string }>>(
-      `INSERT INTO tournaments (name, start, organizer_steam_id, match_options_id, status)
-       VALUES ($1, now() + interval '1 day', $2, $3, 'Setup') RETURNING id`,
+      `INSERT INTO tournaments
+          (name, start, organizer_steam_id, match_options_id, status, awards_enabled, trophies_enabled)
+       VALUES ($1, now() + interval '1 day', $2, $3, 'Setup', true, true) RETURNING id`,
       [this.fx.nextName("cup"), organizer, options.id],
     );
     const stageIds: Array<string> = [];

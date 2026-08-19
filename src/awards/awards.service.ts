@@ -202,6 +202,9 @@ export class AwardsService {
       );
     }
     this.assertSingleScope(input);
+    if (input.tournament_id) {
+      await this.requireAwardsEnabled(input.tournament_id);
+    }
     const award = await this.requireAward(input.award_id);
     if (award.archived_at) {
       throw new BadRequestException("Archived awards cannot be granted");
@@ -570,6 +573,32 @@ export class AwardsService {
         stat.metaData?.["content-type"] || this.guessContentType(filename),
       etag: stat.etag,
     };
+  }
+
+  // Only gates manual grants -- the automatic/calculated path already
+  // respects awards_enabled inside calculate_tournament_awards(), and
+  // setTournamentAward (slot configuration, not a grant) is deliberately
+  // left alone so an organizer can preselect awards while disabled.
+  public async requireAwardsEnabled(tournamentId: string): Promise<void> {
+    const rows = await this.postgres.query<
+      Array<{ awards_enabled: boolean }>
+    >(
+      `SELECT awards_enabled
+         FROM public.tournaments
+        WHERE id = $1
+        LIMIT 1`,
+      [tournamentId],
+    );
+
+    if (!rows || rows.length === 0) {
+      throw new ForbiddenException("Tournament not found");
+    }
+
+    if (!rows[0].awards_enabled) {
+      throw new ForbiddenException(
+        "Awards are disabled for this tournament",
+      );
+    }
   }
 
   public async requireOrganizer(

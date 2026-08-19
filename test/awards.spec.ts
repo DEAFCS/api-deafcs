@@ -760,6 +760,56 @@ describe("awards (SQL-driven)", () => {
       );
       expect(Number(c)).toBe(1);
     });
+
+    it("defaults a newly created tournament to awards disabled", async () => {
+      const organizer = await fx.player();
+      const [options] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO match_options (mr, best_of, type, map_pool_id, map_veto, region_veto, regions)
+          SELECT 8, 1, 'Wingman', id, false, true, '{TestA}'
+          FROM map_pools WHERE type = 'Wingman' AND seed = true RETURNING id`,
+      );
+      // Deliberately omits awards_enabled/trophies_enabled -- this is the
+      // real column default, not TournamentFixtures' explicit override.
+      const [tournament] = await postgres.query<
+        Array<{ awards_enabled: boolean; trophies_enabled: boolean }>
+      >(
+        `INSERT INTO tournaments
+            (name, start, organizer_steam_id, match_options_id, status)
+          VALUES ($1, now() + interval '1 day', $2, $3, 'Setup')
+          RETURNING awards_enabled, trophies_enabled`,
+        ["default-awards-cup", organizer, options.id],
+      );
+      expect(tournament.awards_enabled).toBe(false);
+      expect(tournament.trophies_enabled).toBe(false);
+    });
+
+    it("preserves tournament_award_slots across disabling and re-enabling", async () => {
+      const t = await playedOutCup();
+      const customId = await createAward("Kept Slot", "gold", true);
+      await postgres.query(
+        `INSERT INTO tournament_award_slots (tournament_id, slot, award_id)
+          VALUES ($1, 'champion', $2)
+          ON CONFLICT (tournament_id, slot)
+          DO UPDATE SET award_id=excluded.award_id`,
+        [t.id, customId],
+      );
+
+      await postgres.query(
+        "UPDATE tournaments SET awards_enabled = false WHERE id = $1",
+        [t.id],
+      );
+      await postgres.query(
+        "UPDATE tournaments SET awards_enabled = true WHERE id = $1",
+        [t.id],
+      );
+
+      const [slot] = await postgres.query<Array<{ award_id: string }>>(
+        `SELECT award_id FROM tournament_award_slots
+          WHERE tournament_id = $1 AND slot = 'champion'`,
+        [t.id],
+      );
+      expect(slot.award_id).toBe(customId);
+    });
   });
   // The table permissions are read-only, so every write path runs through the
   // action layer. These cover the authorization it adds on top of the SQL
@@ -1066,6 +1116,58 @@ describe("awards (SQL-driven)", () => {
         expect(transaction).toHaveBeenCalledTimes(1);
         transaction.mockRestore();
       });
+
+      it("denies a manual player grant when the tournament has awards disabled", async () => {
+        const t = await playedOutCup();
+        await postgres.query(
+          "UPDATE tournaments SET awards_enabled = false WHERE id = $1",
+          [t.id],
+        );
+        const awardId = await createAward("Should Be Blocked");
+        const roster = await rosterOf(t.id);
+
+        await expect(
+          controller.grantAward({
+            award_id: awardId,
+            player_steam_id: roster.player_steam_id,
+            tournament_id: t.id,
+            user: user(t.organizer, "user"),
+          }),
+        ).rejects.toThrow("Awards are disabled for this tournament");
+      });
+
+      it("denies a manual team grant when the tournament has awards disabled", async () => {
+        const t = await playedOutCup();
+        await postgres.query(
+          "UPDATE tournaments SET awards_enabled = false WHERE id = $1",
+          [t.id],
+        );
+        const awardId = await createAward("Should Be Blocked Team", "special", true);
+        const roster = await rosterOf(t.id);
+
+        await expect(
+          controller.grantAward({
+            award_id: awardId,
+            team_id: roster.team_id,
+            tournament_id: t.id,
+            user: user(t.organizer, "user"),
+          }),
+        ).rejects.toThrow("Awards are disabled for this tournament");
+      });
+
+      it("allows a manual grant when the tournament has awards enabled", async () => {
+        const t = await playedOutCup();
+        const awardId = await createAward("Should Be Allowed");
+        const roster = await rosterOf(t.id);
+
+        const granted = await controller.grantAward({
+          award_id: awardId,
+          player_steam_id: roster.player_steam_id,
+          tournament_id: t.id,
+          user: user(t.organizer, "user"),
+        });
+        expect(granted.id).toBeTruthy();
+      });
     });
 
     describe("setTournamentAward", () => {
@@ -1102,6 +1204,30 @@ describe("awards (SQL-driven)", () => {
             user: organizer,
           }),
         ).rejects.toThrow("not available to this tournament");
+      });
+
+      it("still allows configuring award slots while the tournament has awards disabled", async () => {
+        const tournament = await tfx.createTournament(SE4);
+        await postgres.query(
+          "UPDATE tournaments SET awards_enabled = false WHERE id = $1",
+          [tournament.id],
+        );
+        const awardId = await createAward("Preselected", "gold", true);
+
+        const result = await controller.setTournamentAward({
+          tournament_id: tournament.id,
+          placement: 1,
+          award_id: awardId,
+          user: user(tournament.organizer, "user"),
+        });
+        expect(result).toBeTruthy();
+
+        const [slot] = await postgres.query<Array<{ award_id: string }>>(
+          `SELECT award_id FROM tournament_award_slots
+            WHERE tournament_id = $1 AND slot = 'champion'`,
+          [tournament.id],
+        );
+        expect(slot.award_id).toBe(awardId);
       });
     });
 
@@ -1278,6 +1404,36 @@ describe("awards (SQL-driven)", () => {
         );
         expect(stored.revoked_at).not.toBeNull();
         expect(stored.revocation_reason).toBe("Granted in error");
+      });
+
+      it("still allows revoking a manual award after the tournament disables awards", async () => {
+        const t = await playedOutCup();
+        const awardId = await createAward("Revoke While Disabled");
+        const roster = await rosterOf(t.id);
+        const granted = await controller.grantAward({
+          award_id: awardId,
+          player_steam_id: roster.player_steam_id,
+          tournament_id: t.id,
+          user: user(t.organizer, "user"),
+        });
+
+        await postgres.query(
+          "UPDATE tournaments SET awards_enabled = false WHERE id = $1",
+          [t.id],
+        );
+
+        await controller.revokeAward({
+          id: granted.id,
+          reason: "test revocation while disabled",
+          user: user(t.organizer, "user"),
+        });
+
+        const [stored] = await postgres.query<
+          Array<{ revoked_at: string | null }>
+        >(`SELECT revoked_at FROM award_recipients WHERE id=$1`, [
+          granted.id,
+        ]);
+        expect(stored.revoked_at).not.toBeNull();
       });
     });
   });

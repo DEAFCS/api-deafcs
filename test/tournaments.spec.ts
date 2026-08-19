@@ -59,9 +59,14 @@ describe("tournaments (SQL-driven)", () => {
        FROM map_pools WHERE type = 'Wingman' AND seed = true RETURNING id`,
       [substitutes],
     );
+    // awards_enabled/trophies_enabled default to false for new tournaments;
+    // this suite predates that default and assumes calculated trophies exist,
+    // so pin both columns to true explicitly (they aren't synced at INSERT
+    // time -- only an UPDATE trigger keeps them aligned afterward).
     const [tournament] = await postgres.query<Array<{ id: string }>>(
-      `INSERT INTO tournaments (name, start, organizer_steam_id, match_options_id, status)
-       VALUES ($1, now() + $2::interval, $3, $4, 'Setup') RETURNING id`,
+      `INSERT INTO tournaments
+          (name, start, organizer_steam_id, match_options_id, status, awards_enabled, trophies_enabled)
+       VALUES ($1, now() + $2::interval, $3, $4, 'Setup', true, true) RETURNING id`,
       [fx.nextName("cup"), start, organizer, options.id],
     );
     if (withStage) {
