@@ -118,12 +118,17 @@ export class MatchesController {
     }
 
     const rows = await this.postgres.query<Array<{ steam_id: string }>>(
+      // IS DISTINCT FROM, not <>: sanctioned_by_steam_id <> $1 silently
+      // excluded NULL rows too (NULL <> '0' is NULL, not true), but NULL
+      // is exactly what the VAC-ban auto-sanction system uses for its
+      // own auto-issued bans -- a VAC-banned player was silently not
+      // being recognized as admin-sanctioned here.
       `SELECT DISTINCT player_steam_id::text AS steam_id
          FROM public.player_sanctions
         WHERE type = 'ban'
           AND deleted_at IS NULL
           AND (remove_sanction_date IS NULL OR remove_sanction_date > now())
-          AND sanctioned_by_steam_id <> $1
+          AND sanctioned_by_steam_id IS DISTINCT FROM $1
           AND player_steam_id = ANY($2::bigint[])`,
       [SYSTEM_STEAM_ID, steamIds],
     );
