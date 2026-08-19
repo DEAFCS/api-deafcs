@@ -128,6 +128,15 @@ export class TypeSenseService {
       { name: "country", type: "string", optional: true, index: true },
       { name: "sanctions", type: "int32", optional: true, index: true },
       { name: "is_banned", type: "bool", optional: true, index: true },
+      // Real admin Sanction only (excludes automated leaver bans) -- the
+      // player-list "BANNED" badge (PlayerDisplay.vue) reads this field
+      // specifically, not is_banned, so it must be indexed separately.
+      {
+        name: "is_admin_sanctioned",
+        type: "bool",
+        optional: true,
+        index: true,
+      },
       { name: "is_gagged", type: "bool", optional: true, index: true },
       { name: "is_muted", type: "bool", optional: true, index: true },
       {
@@ -332,6 +341,7 @@ export class TypeSenseService {
         roster_image_url: true,
         profile_url: true,
         is_banned: true,
+        is_admin_sanctioned: true,
         is_gagged: true,
         is_muted: true,
         teams: {
@@ -446,6 +456,7 @@ export class TypeSenseService {
           }),
           sanctions: player.sanctions_aggregate?.aggregate?.count || 0,
           is_banned: player.is_banned,
+          is_admin_sanctioned: player.is_admin_sanctioned,
           is_gagged: player.is_gagged,
           is_muted: player.is_muted,
         }),
