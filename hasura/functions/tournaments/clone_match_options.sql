@@ -13,7 +13,7 @@ BEGIN
         overtime, knife_round, mr, best_of, coaches, number_of_substitutes,
         map_veto, timeout_setting, tech_timeout_setting, map_pool_id, type,
         regions, prefer_dedicated_server, invite_code,
-        region_veto, ready_setting, check_in_setting, default_models, tv_delay,
+        region_veto, ready_setting, check_in_setting, check_in_duration, default_models, tv_delay,
         auto_cancellation, match_mode, auto_cancel_duration, live_match_timeout,
         round_restart_delay, halftime_pausematch, camera_required
     )
@@ -21,7 +21,7 @@ BEGIN
         overtime, knife_round, mr, best_of, coaches, number_of_substitutes,
         map_veto, timeout_setting, tech_timeout_setting, map_pool_id, type,
         regions, prefer_dedicated_server, invite_code,
-        region_veto, ready_setting, check_in_setting, default_models, tv_delay,
+        region_veto, ready_setting, check_in_setting, check_in_duration, default_models, tv_delay,
         auto_cancellation, match_mode, auto_cancel_duration, live_match_timeout,
         round_restart_delay, halftime_pausematch, camera_required
     FROM match_options

@@ -51,6 +51,7 @@ insert_permissions:
       columns:
         - best_of
         - check_in_setting
+        - check_in_duration
         - coaches
         - default_models
         - knife_round
@@ -106,6 +107,7 @@ select_permissions:
       columns:
         - best_of
         - check_in_setting
+        - check_in_duration
         - coaches
         - default_models
         - id
@@ -139,6 +141,7 @@ update_permissions:
       columns:
         - best_of
         - check_in_setting
+        - check_in_duration
         - coaches
         - default_models
         - knife_round

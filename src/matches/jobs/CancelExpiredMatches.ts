@@ -116,15 +116,61 @@ export class CancelExpiredMatches extends WorkerHost {
       return;
     }
 
-    const hasReadyLineup = match.lineup_1.is_ready || match.lineup_2.is_ready;
-    const isAdminMode = match.options?.match_mode === "admin";
+    // Check-in Time (Captains/Players check_in_setting) has its own expiry
+    // rules, independent of the general Match Cancellation Time handling
+    // below -- see handleExpiredCheckIn.
+    if (match.status === "WaitingForCheckIn") {
+      await this.handleExpiredCheckIn(match);
+      return;
+    }
 
-    if (!hasReadyLineup && isAdminMode) {
+    const hasReadyLineup = match.lineup_1.is_ready || match.lineup_2.is_ready;
+
+    if (!hasReadyLineup) {
+      // Neither lineup ready: page an organizer instead of picking a
+      // winner -- competitive tournament advancement must never come down
+      // to chance.
       await this.requestOrganizerAttention(match.id);
       return;
     }
 
     await this.forfeitMatch(match);
+  }
+
+  // Check-in Time expiry:
+  //  - both lineups completed check-in: continue normally, no forfeit. In
+  //    practice this should be unreachable -- checkIntoMatch already flips
+  //    the match to Live the moment the second lineup becomes ready -- but
+  //    if it's ever hit, clear cancels_at rather than forfeiting so this job
+  //    stops reprocessing a match that is actually fine.
+  //  - exactly one lineup ready: that lineup wins by forfeit/walkover.
+  //  - neither lineup ready: never pick a winner. Page an organizer, same
+  //    as the Match Cancellation Time "neither ready" path above.
+  private async handleExpiredCheckIn(
+    match: Awaited<ReturnType<typeof this.getTournamentMatches>>[number],
+  ) {
+    const lineup1Ready = match.lineup_1.is_ready;
+    const lineup2Ready = match.lineup_2.is_ready;
+
+    if (lineup1Ready && lineup2Ready) {
+      await this.hasura.mutation({
+        update_matches_by_pk: {
+          __args: {
+            pk_columns: { id: match.id },
+            _set: { cancels_at: null },
+          },
+          __typename: true,
+        },
+      });
+      return;
+    }
+
+    if (lineup1Ready || lineup2Ready) {
+      await this.forfeitMatch(match);
+      return;
+    }
+
+    await this.requestOrganizerAttention(match.id);
   }
 
   private async forfeitMatch(
@@ -154,14 +200,11 @@ export class CancelExpiredMatches extends WorkerHost {
       return match.lineup_1.id;
     }
 
-    if (match.lineup_2.is_ready) {
-      return match.lineup_2.id;
-    }
-
-    // Neither side checked in. In auto mode there is no one watching the
-    // bracket, so coin-toss a winner to keep the tournament moving rather
-    // than stalling it (admin mode routes to a human instead).
-    return Math.random() < 0.5 ? match.lineup_1.id : match.lineup_2.id;
+    // Callers only reach forfeitMatch once at least one lineup is confirmed
+    // ready (see handleExpiredTournamentMatch / handleExpiredCheckIn) --
+    // competitive tournament advancement must never be decided by chance,
+    // so this is never a coin toss.
+    return match.lineup_2.id;
   }
 
   private async requestOrganizerAttention(matchId: string) {
@@ -242,9 +285,7 @@ export class CancelExpiredMatches extends WorkerHost {
         id: true,
         is_tournament_match: true,
         server_id: true,
-        options: {
-          match_mode: true,
-        },
+        status: true,
         lineup_1: {
           id: true,
           is_ready: true,

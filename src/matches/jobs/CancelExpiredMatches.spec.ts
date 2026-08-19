@@ -10,9 +10,7 @@ const expiredTournamentMatch = (overrides: Record<string, any> = {}) => ({
   id: "match-1",
   is_tournament_match: true,
   server_id: "server-1",
-  options: {
-    match_mode: "auto",
-  },
+  status: "Veto",
   lineup_1: {
     id: "lineup-1",
     is_ready: false,
@@ -99,14 +97,8 @@ describe("CancelExpiredMatches", () => {
     );
   });
 
-  it("requests organizer attention for admin-mode tournament matches when neither lineup is ready", async () => {
-    tournamentMatches = [
-      expiredTournamentMatch({
-        options: {
-          match_mode: "admin",
-        },
-      }),
-    ];
+  it("requests organizer attention when neither lineup is ready", async () => {
+    tournamentMatches = [expiredTournamentMatch()];
 
     await expect(job.process()).resolves.toBe(1);
 
@@ -153,13 +145,7 @@ describe("CancelExpiredMatches", () => {
 
   it("does not re-notify when an organizer notification is already pending", async () => {
     pendingNotificationCount = 1;
-    tournamentMatches = [
-      expiredTournamentMatch({
-        options: {
-          match_mode: "admin",
-        },
-      }),
-    ];
+    tournamentMatches = [expiredTournamentMatch()];
 
     await job.process();
 
@@ -177,37 +163,9 @@ describe("CancelExpiredMatches", () => {
     expect(notifications.send).not.toHaveBeenCalled();
   });
 
-  it("forfeits auto-mode tournament matches when neither lineup is ready", async () => {
-    jest.spyOn(Math, "random").mockReturnValue(0.25);
-    tournamentMatches = [expiredTournamentMatch()];
-
-    await job.process();
-
-    expect(hasura.mutation).toHaveBeenCalledWith(
-      expect.objectContaining({
-        update_matches_by_pk: expect.objectContaining({
-          __args: expect.objectContaining({
-            pk_columns: {
-              id: "match-1",
-            },
-            _set: {
-              status: "Forfeit",
-              winning_lineup_id: "lineup-1",
-            },
-          }),
-        }),
-      }),
-    );
-    expect(notifications.send).not.toHaveBeenCalled();
-    expect(rconService.connect).not.toHaveBeenCalled();
-  });
-
-  it("forfeits to the ready lineup even in admin mode", async () => {
+  it("forfeits to the ready lineup", async () => {
     tournamentMatches = [
       expiredTournamentMatch({
-        options: {
-          match_mode: "admin",
-        },
         lineup_2: {
           id: "lineup-2",
           is_ready: true,
@@ -260,5 +218,104 @@ describe("CancelExpiredMatches", () => {
       }),
     );
     expect(notifications.send).not.toHaveBeenCalled();
+  });
+
+  describe("Check-in Time expiry (status: WaitingForCheckIn)", () => {
+    it("continues normally without forfeiting when both lineups completed check-in", async () => {
+      tournamentMatches = [
+        expiredTournamentMatch({
+          status: "WaitingForCheckIn",
+          lineup_1: {
+            id: "lineup-1",
+            is_ready: true,
+            lineup_players: [{ steam_id: "111", connected_at: null }],
+          },
+          lineup_2: {
+            id: "lineup-2",
+            is_ready: true,
+            lineup_players: [{ steam_id: "222", connected_at: null }],
+          },
+        }),
+      ];
+
+      await job.process();
+
+      expect(hasura.mutation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update_matches_by_pk: expect.objectContaining({
+            __args: expect.objectContaining({
+              pk_columns: { id: "match-1" },
+              _set: { cancels_at: null },
+            }),
+          }),
+        }),
+      );
+      expect(hasura.mutation).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          update_matches_by_pk: expect.objectContaining({
+            __args: expect.objectContaining({
+              _set: expect.objectContaining({ status: "Forfeit" }),
+            }),
+          }),
+        }),
+      );
+      expect(notifications.send).not.toHaveBeenCalled();
+    });
+
+    it("forfeits to the checked-in lineup when only one completed check-in", async () => {
+      tournamentMatches = [
+        expiredTournamentMatch({
+          status: "WaitingForCheckIn",
+          lineup_1: {
+            id: "lineup-1",
+            is_ready: true,
+            lineup_players: [{ steam_id: "111", connected_at: null }],
+          },
+        }),
+      ];
+
+      await job.process();
+
+      expect(hasura.mutation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update_matches_by_pk: expect.objectContaining({
+            __args: expect.objectContaining({
+              _set: {
+                status: "Forfeit",
+                winning_lineup_id: "lineup-1",
+              },
+            }),
+          }),
+        }),
+      );
+      expect(notifications.send).not.toHaveBeenCalled();
+    });
+
+    it("requests organizer attention, never a random winner, when neither lineup completed check-in", async () => {
+      tournamentMatches = [
+        expiredTournamentMatch({ status: "WaitingForCheckIn" }),
+      ];
+
+      await job.process();
+
+      expect(hasura.mutation).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          update_matches_by_pk: expect.objectContaining({
+            __args: expect.objectContaining({
+              _set: expect.objectContaining({ status: "Forfeit" }),
+            }),
+          }),
+        }),
+      );
+      expect(notifications.send).toHaveBeenCalledWith(
+        "MatchSupport",
+        expect.objectContaining({
+          role: "tournament_organizer",
+          entity_id: "match-1",
+        }),
+        undefined,
+        DISCORD_COLORS.RED,
+      );
+    });
   });
 });

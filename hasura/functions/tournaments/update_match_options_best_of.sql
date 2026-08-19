@@ -51,7 +51,7 @@ BEGIN
         overtime, knife_round, mr, best_of, coaches, number_of_substitutes,
         map_veto, timeout_setting, tech_timeout_setting, map_pool_id, type,
         regions, prefer_dedicated_server, invite_code,
-        region_veto, ready_setting, check_in_setting, default_models, tv_delay,
+        region_veto, ready_setting, check_in_setting, check_in_duration, default_models, tv_delay,
         camera_required
     ) VALUES (
         match_options_record.overtime, match_options_record.knife_round,
@@ -63,6 +63,7 @@ BEGIN
         match_options_record.prefer_dedicated_server, match_options_record.invite_code,
         match_options_record.region_veto,
         match_options_record.ready_setting, match_options_record.check_in_setting,
+        match_options_record.check_in_duration,
         match_options_record.default_models, match_options_record.tv_delay,
         match_options_record.camera_required
     )

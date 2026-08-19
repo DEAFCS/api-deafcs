@@ -284,9 +284,13 @@ DECLARE
     _match_options match_options%ROWTYPE;
     _auto_cancellation boolean;
     _auto_cancel_duration_override integer;
+    _check_in_setting text;
+    _check_in_duration_override integer;
 BEGIN
     SELECT auto_cancellation, auto_cancel_duration INTO _auto_cancellation, _auto_cancel_duration_override FROM resolve_match_auto_cancel(NEW.id);
     _auto_cancel_duration := COALESCE(_auto_cancel_duration_override, get_int_setting('auto_cancel_duration', 15))::text || ' minutes';
+
+    SELECT check_in_setting, check_in_duration INTO _check_in_setting, _check_in_duration_override FROM resolve_match_check_in(NEW.id);
 
     IF OLD.server_id IS NOT NULL AND (NEW.server_id IS NULL OR OLD.server_id != NEW.server_id) THEN
         UPDATE servers SET reserved_by_match_id = null WHERE id = OLD.server_id;
@@ -392,7 +396,15 @@ BEGIN
     END IF;
 
     IF (NEW.status = 'WaitingForCheckIn' AND OLD.status != 'WaitingForCheckIn')  THEN
-        IF _auto_cancellation THEN
+        IF _check_in_setting IS NOT NULL THEN
+            -- Tournament match: Check-in Time is independent of
+            -- auto_cancel_duration (Match Cancellation Time), which continues
+            -- to apply unchanged starting at Veto below. Admin check-in has
+            -- no automatic timer at all -- the organizer controls progression.
+            IF _check_in_setting != 'Admin' THEN
+                NEW.cancels_at = COALESCE(scheduled_at, NOW()) + (COALESCE(_check_in_duration_override, get_int_setting('check_in_duration', 5))::text || ' minutes')::interval;
+            END IF;
+        ELSIF _auto_cancellation THEN
             NEW.cancels_at = COALESCE(scheduled_at, NOW()) + (_auto_cancel_duration)::interval;
         END IF;
         NEW.ended_at = null;
