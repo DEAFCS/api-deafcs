@@ -80,6 +80,9 @@ insert_permissions:
               - tournament:
                   status:
                     _eq: RegistrationOpen
+              - tournament:
+                  meets_min_role:
+                    _eq: true
               - _or:
                   - team:
                       roster:

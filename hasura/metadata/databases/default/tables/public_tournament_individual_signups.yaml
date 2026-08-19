@@ -25,6 +25,9 @@ insert_permissions:
               options:
                 individual_registration_enabled:
                   _eq: true
+          - tournament:
+              meets_min_role:
+                _eq: true
       columns:
         - tournament_id
         - player_steam_id

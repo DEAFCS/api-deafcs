@@ -184,6 +184,12 @@ computed_fields:
       function:
         name: tournament_max_players_per_lineup
         schema: public
+  - name: meets_min_role
+    definition:
+      function:
+        name: meets_min_role
+        schema: public
+      session_argument: hasura_session
   - name: min_players_per_lineup
     definition:
       function:
@@ -222,6 +228,7 @@ insert_permissions:
         - logo
         - longitude
         - match_options_id
+        - min_role
         - name
         - scheduling_mode
         - start
@@ -264,6 +271,7 @@ insert_permissions:
         - logo
         - longitude
         - match_options_id
+        - min_role
         - name
         - scheduling_mode
         - start
@@ -305,6 +313,7 @@ insert_permissions:
         - logo
         - longitude
         - match_options_id
+        - min_role
         - name
         - scheduling_mode
         - start
@@ -365,6 +374,7 @@ insert_permissions:
         - logo
         - longitude
         - match_options_id
+        - min_role
         - name
         - scheduling_mode
         - start
@@ -404,6 +414,7 @@ insert_permissions:
         - logo
         - longitude
         - match_options_id
+        - min_role
         - name
         - scheduling_mode
         - start
@@ -444,6 +455,7 @@ insert_permissions:
         - logo
         - longitude
         - match_options_id
+        - min_role
         - name
         - scheduling_mode
         - start
@@ -463,6 +475,7 @@ select_permissions:
         - logo
         - longitude
         - match_options_id
+        - min_role
         - name
         - scheduling_mode
         - organizer_steam_id
@@ -484,6 +497,7 @@ select_permissions:
         - is_organizer
         - joined_tournament
         - max_players_per_lineup
+        - meets_min_role
         - min_players_per_lineup
       filter:
         status:
@@ -521,6 +535,7 @@ select_permissions:
         - logo
         - longitude
         - match_options_id
+        - min_role
         - name
         - scheduling_mode
         - organizer_steam_id
@@ -542,6 +557,7 @@ select_permissions:
         - is_organizer
         - joined_tournament
         - max_players_per_lineup
+        - meets_min_role
         - min_players_per_lineup
       filter:
         _or:
@@ -565,6 +581,7 @@ select_permissions:
         - logo
         - longitude
         - match_options_id
+        - min_role
         - name
         - scheduling_mode
         - organizer_steam_id
@@ -586,6 +603,7 @@ select_permissions:
         - is_organizer
         - joined_tournament
         - max_players_per_lineup
+        - meets_min_role
         - min_players_per_lineup
       filter:
         _or:
@@ -624,6 +642,7 @@ update_permissions:
         - banner
         - logo
         - longitude
+        - min_role
         - name
         - scheduling_mode
         - start
@@ -647,6 +666,7 @@ update_permissions:
         - banner
         - logo
         - longitude
+        - min_role
         - name
         - scheduling_mode
         - start
