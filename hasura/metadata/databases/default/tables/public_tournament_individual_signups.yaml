@@ -30,6 +30,18 @@ insert_permissions:
         - player_steam_id
     comment: ""
 select_permissions:
+  - role: guest
+    permission:
+      columns:
+        - id
+        - tournament_id
+        - player_steam_id
+        - status
+        - tournament_team_id
+        - created_at
+        - checked_in_at
+      filter: {}
+    comment: ""
   - role: user
     permission:
       columns:
