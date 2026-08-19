@@ -193,17 +193,13 @@ export class NotificationsService {
       return;
     }
 
-    const played = await this.postgres.query<Array<{ exists: boolean }>>(
-      `SELECT EXISTS (
-         SELECT 1 FROM public.match_lineup_players
-          WHERE steam_id = $1::bigint
-       ) AS exists`,
-      [sanction.steamId],
-    );
-    if (!played.at(0)?.exists) {
-      return;
-    }
-
+    // Reported bug: a brand-new VAC-banned account is exactly the case
+    // admins most need to hear about (catching it before the player ever
+    // gets to queue), but this used to require the player to already
+    // have a match_lineup_players row -- a fresh registrant obviously
+    // doesn't have one yet, so the notification silently never fired for
+    // the scenario it was built for. Removed; notify admins of every
+    // real (non-system) ban regardless of match history.
     const reasonSuffix = sanction.reason
       ? ` (${NotificationsService.escapeHtml(sanction.reason)})`
       : "";
