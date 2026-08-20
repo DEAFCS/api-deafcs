@@ -2,7 +2,7 @@ table:
   name: verification_application_messages
   schema: public
 event_triggers:
-  - name: verification_application_messages_events
+  - name: verification_application_messages
     definition:
       enable_manual: true
       insert:

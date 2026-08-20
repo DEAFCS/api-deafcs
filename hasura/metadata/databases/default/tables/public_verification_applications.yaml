@@ -2,7 +2,7 @@ table:
   name: verification_applications
   schema: public
 event_triggers:
-  - name: verification_applications_events
+  - name: verification_applications
     definition:
       enable_manual: true
       insert:
