@@ -57,6 +57,7 @@ import { EventsModule } from "./events/events.module";
 import { ScrimsModule } from "./scrims/scrims.module";
 import { LeaguesModule } from "./leagues/leagues.module";
 import { PluginsModule } from "./plugins/plugins.module";
+import { VerificationApplicationsModule } from "./verification-applications/verification-applications.module";
 
 @Module({
   imports: [
@@ -154,6 +155,7 @@ import { PluginsModule } from "./plugins/plugins.module";
     ScrimsModule,
     LeaguesModule,
     PluginsModule,
+    VerificationApplicationsModule,
   ],
   providers: [loggerFactory()],
   controllers: [AppController, QuickConnectController],

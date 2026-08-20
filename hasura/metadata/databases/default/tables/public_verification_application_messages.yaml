@@ -1,0 +1,81 @@
+table:
+  name: verification_application_messages
+  schema: public
+event_triggers:
+  - name: verification_application_messages_events
+    definition:
+      enable_manual: true
+      insert:
+        columns: '*'
+    retry_conf:
+      interval_sec: 10
+      num_retries: 6
+      timeout_sec: 60
+    webhook: '{{HASURA_GRAPHQL_EVENT_HOOK}}'
+object_relationships:
+  - name: application
+    using:
+      foreign_key_constraint_on: application_id
+  - name: sender
+    using:
+      foreign_key_constraint_on: sender_steam_id
+insert_permissions:
+  - role: user
+    permission:
+      check:
+        _and:
+          - sender_steam_id:
+              _eq: X-Hasura-User-Id
+          - is_admin:
+              _eq: false
+          - application:
+              player_steam_id:
+                _eq: X-Hasura-User-Id
+      set:
+        sender_steam_id: x-hasura-user-id
+        is_admin: "false"
+      columns:
+        - application_id
+        - message
+    comment: A player can reply on their own application only, never as admin.
+  - role: administrator
+    permission:
+      check:
+        _and:
+          - sender_steam_id:
+              _eq: X-Hasura-User-Id
+          - is_admin:
+              _eq: true
+      set:
+        sender_steam_id: x-hasura-user-id
+        is_admin: "true"
+      columns:
+        - application_id
+        - message
+    comment: An admin can reply on any application.
+select_permissions:
+  - role: user
+    permission:
+      columns:
+        - id
+        - application_id
+        - sender_steam_id
+        - is_admin
+        - message
+        - created_at
+      filter:
+        application:
+          player_steam_id:
+            _eq: X-Hasura-User-Id
+    comment: A player can see the thread on their own application only.
+  - role: administrator
+    permission:
+      columns:
+        - id
+        - application_id
+        - sender_steam_id
+        - is_admin
+        - message
+        - created_at
+      filter: {}
+    comment: Admins can see every thread.

@@ -196,3 +196,5 @@
 - "!include public_v_team_stage_results.yaml"
 - "!include public_v_team_tournament_results.yaml"
 - "!include public_v_tournament_player_stats.yaml"
+- "!include public_verification_application_messages.yaml"
+- "!include public_verification_applications.yaml"

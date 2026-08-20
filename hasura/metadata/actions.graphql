@@ -1730,3 +1730,11 @@ type TournamentAward {
   silhouette: Int
   image_url: String
 }
+
+type Mutation {
+  approveVerificationApplication(application_id: uuid!): SuccessOutput
+}
+
+type Mutation {
+  rejectVerificationApplication(application_id: uuid!, reason: String): SuccessOutput
+}

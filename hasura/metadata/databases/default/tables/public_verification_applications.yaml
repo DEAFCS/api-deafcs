@@ -1,0 +1,85 @@
+table:
+  name: verification_applications
+  schema: public
+event_triggers:
+  - name: verification_applications_events
+    definition:
+      enable_manual: true
+      insert:
+        columns: '*'
+    retry_conf:
+      interval_sec: 10
+      num_retries: 6
+      timeout_sec: 60
+    webhook: '{{HASURA_GRAPHQL_EVENT_HOOK}}'
+object_relationships:
+  - name: player
+    using:
+      foreign_key_constraint_on: player_steam_id
+  - name: reviewed_by
+    using:
+      foreign_key_constraint_on: reviewed_by_steam_id
+array_relationships:
+  - name: messages
+    using:
+      foreign_key_constraint_on:
+        column: application_id
+        table:
+          name: verification_application_messages
+          schema: public
+insert_permissions:
+  - role: user
+    permission:
+      check:
+        _and:
+          - player_steam_id:
+              _eq: X-Hasura-User-Id
+          - status:
+              _eq: pending
+      set:
+        player_steam_id: x-hasura-user-id
+        status: pending
+      columns:
+        - is_deaf
+        - country
+        - found_via
+        - knows_deaf_player
+        - deaf_player_steam_url
+    comment: A logged-in, not-yet-verified player can submit their own application.
+select_permissions:
+  - role: user
+    permission:
+      columns:
+        - id
+        - player_steam_id
+        - is_deaf
+        - country
+        - found_via
+        - knows_deaf_player
+        - deaf_player_steam_url
+        - status
+        - reviewed_by_steam_id
+        - reviewed_at
+        - created_at
+        - updated_at
+      filter:
+        player_steam_id:
+          _eq: X-Hasura-User-Id
+    comment: A player can see their own applications only.
+  - role: administrator
+    permission:
+      columns:
+        - id
+        - player_steam_id
+        - is_deaf
+        - country
+        - found_via
+        - knows_deaf_player
+        - deaf_player_steam_url
+        - status
+        - reviewed_by_steam_id
+        - reviewed_at
+        - created_at
+        - updated_at
+      filter: {}
+    comment: Admins can see every application.
