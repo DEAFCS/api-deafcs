@@ -64,9 +64,10 @@ export class HasuraService {
 
   public async mutation<R extends mutation_rootGenqlSelection>(
     request: R & { __name?: string },
+    steamId?: string,
   ): Promise<FieldsSelection<mutation_root, R>> {
     try {
-      return await (await this.getClient()).mutation(request);
+      return await (await this.getClient(steamId)).mutation(request);
     } catch (error) {
       if (error?.response) {
         throw error?.response.errors.at(0).message;

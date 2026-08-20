@@ -62,11 +62,15 @@ describe("tournaments (SQL-driven)", () => {
     // awards_enabled/trophies_enabled default to false for new tournaments;
     // this suite predates that default and assumes calculated trophies exist,
     // so pin both columns to true explicitly (they aren't synced at INSERT
-    // time -- only an UPDATE trigger keeps them aligned afterward).
+    // time -- only an UPDATE trigger keeps them aligned afterward). Same
+    // reasoning for min_role: it defaults to 'verified_user', and
+    // roster-insert enforcement of that default is real now (see
+    // hasura/triggers/tournament_team_roster.sql), so it's pinned to NULL
+    // since this suite's fixture players stay at the default 'user' role.
     const [tournament] = await postgres.query<Array<{ id: string }>>(
       `INSERT INTO tournaments
-          (name, start, organizer_steam_id, match_options_id, status, awards_enabled, trophies_enabled)
-       VALUES ($1, now() + $2::interval, $3, $4, 'Setup', true, true) RETURNING id`,
+          (name, start, organizer_steam_id, match_options_id, status, awards_enabled, trophies_enabled, min_role)
+       VALUES ($1, now() + $2::interval, $3, $4, 'Setup', true, true, NULL) RETURNING id`,
       [fx.nextName("cup"), start, organizer, options.id],
     );
     if (withStage) {

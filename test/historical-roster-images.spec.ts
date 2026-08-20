@@ -48,10 +48,15 @@ describe("historical tournament roster image snapshots", () => {
        WHERE type = 'Wingman' AND seed = true
        RETURNING id`,
     );
+    // min_role explicitly NULL: this suite's fixture players stay at the
+    // default 'user' role, and roster-insert enforcement of the column's
+    // 'verified_user' default is real now (see hasura/triggers/
+    // tournament_team_roster.sql), so leaving it on would block every
+    // registerTeams() call below.
     const [tournament] = await postgres.query<Array<{ id: string }>>(
       `INSERT INTO tournaments
-         (name, start, organizer_steam_id, match_options_id, status)
-       VALUES ($1, now() + interval '1 day', $2, $3, 'Setup')
+         (name, start, organizer_steam_id, match_options_id, status, min_role)
+       VALUES ($1, now() + interval '1 day', $2, $3, 'Setup', NULL)
        RETURNING id`,
       [fx.nextName("snapshot-cup"), organizer, options.id],
     );

@@ -94,24 +94,35 @@ export class InvitesController {
       };
     }
 
-    await this.hasura.mutation({
-      insert_tournament_team_roster_one: {
-        __args: {
-          object: {
-            role: "Member",
-            tournament_id: tournament_team_invites_by_pk.team.tournament_id,
-            tournament_team_id:
-              tournament_team_invites_by_pk.tournament_team_id,
-            player_steam_id: user.steam_id,
+    // Run this as the accepting player's own session (not the blanket
+    // admin-secret client) so the normal tournament_team_roster insert
+    // permission -- including its target_meets_min_role check -- actually
+    // runs. Accepting an invite you're not eligible for must fail the same
+    // way a captain adding you directly would. "role" is deliberately left
+    // out of the object: it isn't in the `user` role's permitted insert
+    // columns (a regular session can't set it directly), so this leans on
+    // the column default ('Member') the same way a captain's own direct add
+    // already does.
+    await this.hasura.mutation(
+      {
+        insert_tournament_team_roster_one: {
+          __args: {
+            object: {
+              tournament_id: tournament_team_invites_by_pk.team.tournament_id,
+              tournament_team_id:
+                tournament_team_invites_by_pk.tournament_team_id,
+              player_steam_id: user.steam_id,
+            },
+            on_conflict: {
+              constraint: "tournament_roster_pkey",
+              update_columns: ["role"],
+            },
           },
-          on_conflict: {
-            constraint: "tournament_roster_pkey",
-            update_columns: ["role"],
-          },
+          __typename: true,
         },
-        __typename: true,
       },
-    });
+      user.steam_id,
+    );
 
     await this.hasura.mutation({
       delete_tournament_team_invites_by_pk: {

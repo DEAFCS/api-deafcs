@@ -53,10 +53,20 @@ export class TournamentFixtures {
     // Both columns must be set together: nothing syncs them at INSERT time
     // (the sync trigger only fires on UPDATE), so leaving trophies_enabled
     // on its column default here would desync it from awards_enabled=true.
+    //
+    // Same reasoning for min_role: it defaults to 'verified_user' for new
+    // tournaments, and roster-insert enforcement of that default now
+    // genuinely runs (tbi_tournament_team_roster / target_meets_min_role),
+    // where before it only gated the acting session, never the target
+    // player. registerTeam()/launch() below enroll default-role ('user')
+    // fixture players, so leaving the column default here would newly block
+    // every unrelated suite's fixture rosters. Explicitly unrestricted;
+    // the tournament-min-role*.spec.ts suites set their own min_role
+    // per-test via direct UPDATEs, so this doesn't affect them.
     const [tournament] = await this.postgres.query<Array<{ id: string }>>(
       `INSERT INTO tournaments
-          (name, start, organizer_steam_id, match_options_id, status, awards_enabled, trophies_enabled)
-       VALUES ($1, now() + interval '1 day', $2, $3, 'Setup', true, true) RETURNING id`,
+          (name, start, organizer_steam_id, match_options_id, status, awards_enabled, trophies_enabled, min_role)
+       VALUES ($1, now() + interval '1 day', $2, $3, 'Setup', true, true, NULL) RETURNING id`,
       [this.fx.nextName("cup"), organizer, options.id],
     );
     const stageIds: Array<string> = [];

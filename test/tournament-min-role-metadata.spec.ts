@@ -85,6 +85,46 @@ describe("tournaments.min_role registration enforcement (Hasura-driven)", () => 
       steamId,
     ]);
 
+  // Registers a permanent-team-linked tournament_teams row. Shared across
+  // the insert and update describes below: a free-agent (team_id null)
+  // tournament_teams row routes non-owner roster adds through an invite
+  // instead of a direct insert (see tbi_tournament_team_roster in
+  // hasura/triggers/tournament_team_roster.sql), so these use a linked
+  // registration -- the path a real owner adding teammates actually takes
+  // -- to exercise the roster insert/update checks directly rather than
+  // that unrelated invite redirect.
+  //
+  // tai_tournament_team (hasura/triggers/tournament_teams.sql) auto-fills
+  // tournament_team_roster from the linked team's own team_roster right
+  // after this insert (deferred to commit), which now goes through the
+  // same target_meets_min_role gate as everything else -- so the owner's
+  // *real* stored role has to clear the tournament's minimum before
+  // registration will even succeed, independent of the session role used
+  // to make this call. ownerRole sets that; defaults to "verified_user"
+  // since every caller here targets a verified_user-minimum tournament
+  // except the unrestricted (min_role null) case, where it's irrelevant.
+  const registerLinkedTeam = (
+    tournamentId: string,
+    teamId: string,
+    owner: string,
+    sessionRole: string,
+    ownerRole = "verified_user",
+  ) =>
+    setPlayerRole(owner, ownerRole).then(() =>
+      gql(
+        `mutation {
+          insert_tournament_teams_one(object: {
+            tournament_id: "${tournamentId}"
+            team_id: "${teamId}"
+            name: "Linked Team"
+            short_name: "LT"
+          }) { id }
+        }`,
+        sessionRole,
+        owner,
+      ),
+    );
+
   const openTournament = async (minRole: string | null) => {
     // can_open_tournament_registration() requires at least one stage.
     const t = await tournaments.createTournament([
@@ -202,26 +242,6 @@ describe("tournaments.min_role registration enforcement (Hasura-driven)", () => 
   });
 
   describe("tournament_team_roster insert (adding a player to a registered team)", () => {
-    // A free-agent tournament_teams row (team_id null) routes non-owner
-    // roster adds through an invite instead of a direct insert (see
-    // tbi_tournament_team_roster in hasura/triggers/tournament_team_roster.sql),
-    // so these use a permanent-team-linked registration -- the path a real
-    // owner adding teammates actually takes -- to exercise the roster insert
-    // check itself rather than that unrelated invite redirect.
-    const registerLinkedTeam = (tournamentId: string, teamId: string, owner: string, role: string) =>
-      gql(
-        `mutation {
-          insert_tournament_teams_one(object: {
-            tournament_id: "${tournamentId}"
-            team_id: "${teamId}"
-            name: "Linked Team"
-            short_name: "LT"
-          }) { id }
-        }`,
-        role,
-        owner,
-      );
-
     it("denies below the minimum role", async () => {
       const t = await openTournament("verified_user");
       const team = await fx.team(0);
@@ -257,6 +277,9 @@ describe("tournaments.min_role registration enforcement (Hasura-driven)", () => 
       const entry = await registerLinkedTeam(t.id, team.id, team.owner, "verified_user");
       const tournamentTeamId = entry.data.insert_tournament_teams_one.id;
       const mate = await fx.player();
+      // The target player's own stored role must also clear the minimum,
+      // independent of the acting session's role.
+      await setPlayerRole(mate, "verified_user");
 
       const result = await gql(
         `mutation {
@@ -280,6 +303,374 @@ describe("tournaments.min_role registration enforcement (Hasura-driven)", () => 
         [tournamentTeamId, mate],
       );
       expect((rows as unknown[]).length).toBe(1);
+    });
+
+    // CASE B from the bug report: an eligible captain of a linked
+    // (permanent-team-backed) tournament_teams row must not be able to put
+    // an ineligible teammate onto the roster just because the captain
+    // themself clears meets_min_role and owns the team. Regression test for
+    // the hole target_meets_min_role closes.
+    it("denies an ineligible target even when the acting captain is fully eligible and authorized", async () => {
+      const t = await openTournament("verified_user");
+      const team = await fx.team(0);
+      const entry = await registerLinkedTeam(t.id, team.id, team.owner, "verified_user");
+      const tournamentTeamId = entry.data.insert_tournament_teams_one.id;
+      const mate = await fx.player(); // defaults to role 'user'
+
+      const result = await gql(
+        `mutation {
+          insert_tournament_team_roster_one(object: {
+            tournament_id: "${t.id}"
+            tournament_team_id: "${tournamentTeamId}"
+            player_steam_id: "${mate}"
+          }) { player_steam_id }
+        }`,
+        "verified_user",
+        team.owner,
+      );
+      expect(result.errors).toBeDefined();
+      expect(result.data?.insert_tournament_team_roster_one ?? null).toBeNull();
+      const rows = await postgres.query(
+        "SELECT 1 FROM tournament_team_roster WHERE tournament_team_id = $1 AND player_steam_id = $2",
+        [tournamentTeamId, mate],
+      );
+      expect((rows as unknown[]).length).toBe(0);
+    });
+
+    it("missing target player fails closed", async () => {
+      const t = await openTournament("verified_user");
+      const team = await fx.team(0);
+      const entry = await registerLinkedTeam(t.id, team.id, team.owner, "verified_user");
+      const tournamentTeamId = entry.data.insert_tournament_teams_one.id;
+
+      const result = await gql(
+        `mutation {
+          insert_tournament_team_roster_one(object: {
+            tournament_id: "${t.id}"
+            tournament_team_id: "${tournamentTeamId}"
+            player_steam_id: "76561199999999999"
+          }) { player_steam_id }
+        }`,
+        "verified_user",
+        team.owner,
+      );
+      expect(result.errors).toBeDefined();
+      expect(result.data?.insert_tournament_team_roster_one ?? null).toBeNull();
+    });
+
+    it("unrestricted (min_role null) allows a normal user target", async () => {
+      const t = await openTournament(null);
+      const team = await fx.team(0);
+      const entry = await registerLinkedTeam(t.id, team.id, team.owner, "user");
+      const tournamentTeamId = entry.data.insert_tournament_teams_one.id;
+      const mate = await fx.player(); // defaults to role 'user'
+
+      const result = await gql(
+        `mutation {
+          insert_tournament_team_roster_one(object: {
+            tournament_id: "${t.id}"
+            tournament_team_id: "${tournamentTeamId}"
+            player_steam_id: "${mate}"
+          }) { player_steam_id }
+        }`,
+        "user",
+        team.owner,
+      );
+      expect(result.errors).toBeUndefined();
+      const rows = await postgres.query(
+        "SELECT 1 FROM tournament_team_roster WHERE tournament_team_id = $1 AND player_steam_id = $2",
+        [tournamentTeamId, mate],
+      );
+      expect((rows as unknown[]).length).toBe(1);
+    });
+
+    describe("tournament_organizer role", () => {
+      it("denies an organizer adding an ineligible target -- no broad organizer bypass remains", async () => {
+        const t = await openTournament("verified_user");
+        const team = await fx.team(0);
+        const entry = await registerLinkedTeam(t.id, team.id, team.owner, "verified_user");
+        const tournamentTeamId = entry.data.insert_tournament_teams_one.id;
+        const mate = await fx.player(); // defaults to role 'user'
+
+        const result = await gql(
+          `mutation {
+            insert_tournament_team_roster_one(object: {
+              tournament_id: "${t.id}"
+              tournament_team_id: "${tournamentTeamId}"
+              player_steam_id: "${mate}"
+            }) { player_steam_id }
+          }`,
+          "tournament_organizer",
+          t.organizer,
+        );
+        expect(result.errors).toBeDefined();
+        expect(result.data?.insert_tournament_team_roster_one ?? null).toBeNull();
+        const rows = await postgres.query(
+          "SELECT 1 FROM tournament_team_roster WHERE tournament_team_id = $1 AND player_steam_id = $2",
+          [tournamentTeamId, mate],
+        );
+        expect((rows as unknown[]).length).toBe(0);
+      });
+
+      it("allows an organizer adding an eligible target", async () => {
+        const t = await openTournament("verified_user");
+        const team = await fx.team(0);
+        const entry = await registerLinkedTeam(t.id, team.id, team.owner, "verified_user");
+        const tournamentTeamId = entry.data.insert_tournament_teams_one.id;
+        const mate = await fx.player();
+        await setPlayerRole(mate, "verified_user");
+
+        const result = await gql(
+          `mutation {
+            insert_tournament_team_roster_one(object: {
+              tournament_id: "${t.id}"
+              tournament_team_id: "${tournamentTeamId}"
+              player_steam_id: "${mate}"
+            }) { player_steam_id }
+          }`,
+          "tournament_organizer",
+          t.organizer,
+        );
+        expect(result.errors).toBeUndefined();
+        const rows = await postgres.query(
+          "SELECT 1 FROM tournament_team_roster WHERE tournament_team_id = $1 AND player_steam_id = $2",
+          [tournamentTeamId, mate],
+        );
+        expect((rows as unknown[]).length).toBe(1);
+      });
+    });
+  });
+
+  describe("tournament_team_roster update", () => {
+    // Seeds a roster row directly (bypassing Hasura AND the
+    // tbi_tournament_team_roster trigger's own INSERT-time eligibility
+    // check) the way an already-existing/legacy row -- seated before this
+    // fix shipped -- would sit in the database, so the UPDATE check can be
+    // exercised on its own rather than proving the (already-covered)
+    // INSERT check instead.
+    const seedRosterRow = async (tournamentTeamId: string, tournamentId: string, steamId: string) => {
+      await postgres.query(
+        "ALTER TABLE tournament_team_roster DISABLE TRIGGER tbi_tournament_team_roster",
+      );
+      try {
+        await postgres.query(
+          `INSERT INTO tournament_team_roster (tournament_team_id, tournament_id, player_steam_id, role)
+           VALUES ($1, $2, $3, 'Member')`,
+          [tournamentTeamId, tournamentId, steamId],
+        );
+      } finally {
+        await postgres.query(
+          "ALTER TABLE tournament_team_roster ENABLE TRIGGER tbi_tournament_team_roster",
+        );
+      }
+    };
+
+    // registerLinkedTeam's auto-fill (tai_tournament_team) seats the owner
+    // as a plain 'Member', not 'Admin' -- the update permission's
+    // authorization only allows an existing tournament-roster Admin (or the
+    // organizer) to change a role, so give the owner that standing directly
+    // (a raw role UPDATE, not an insert, so it doesn't touch the INSERT-time
+    // eligibility check at all).
+    const promoteToAdmin = (tournamentTeamId: string, steamId: string) =>
+      postgres.query(
+        "UPDATE tournament_team_roster SET role = 'Admin' WHERE tournament_team_id = $1 AND player_steam_id = $2",
+        [tournamentTeamId, steamId],
+      );
+
+    it("denies a role update on an existing roster row whose target player is ineligible -- no reassignment/update loophole", async () => {
+      const t = await openTournament("verified_user");
+      const team = await fx.team(0);
+      const entry = await registerLinkedTeam(t.id, team.id, team.owner, "verified_user");
+      const tournamentTeamId = entry.data.insert_tournament_teams_one.id;
+      await promoteToAdmin(tournamentTeamId, team.owner);
+      const mate = await fx.player(); // defaults to role 'user', below the minimum
+      await seedRosterRow(tournamentTeamId, t.id, mate);
+
+      const result = await gql(
+        `mutation {
+          update_tournament_team_roster(
+            where: { tournament_team_id: { _eq: "${tournamentTeamId}" }, player_steam_id: { _eq: "${mate}" } }
+            _set: { role: Admin }
+          ) { affected_rows }
+        }`,
+        "verified_user",
+        team.owner,
+      );
+      expect(result.data?.update_tournament_team_roster?.affected_rows ?? 0).toBe(0);
+      const rows = await postgres.query<Array<{ role: string }>>(
+        "SELECT role FROM tournament_team_roster WHERE tournament_team_id = $1 AND player_steam_id = $2",
+        [tournamentTeamId, mate],
+      );
+      expect((rows as Array<{ role: string }>)[0]?.role).toBe("Member");
+    });
+
+    it("allows a role update on an existing roster row whose target player is eligible", async () => {
+      const t = await openTournament("verified_user");
+      const team = await fx.team(0);
+      const entry = await registerLinkedTeam(t.id, team.id, team.owner, "verified_user");
+      const tournamentTeamId = entry.data.insert_tournament_teams_one.id;
+      await promoteToAdmin(tournamentTeamId, team.owner);
+      const mate = await fx.player();
+      await setPlayerRole(mate, "verified_user");
+      await seedRosterRow(tournamentTeamId, t.id, mate);
+
+      const result = await gql(
+        `mutation {
+          update_tournament_team_roster(
+            where: { tournament_team_id: { _eq: "${tournamentTeamId}" }, player_steam_id: { _eq: "${mate}" } }
+            _set: { role: Admin }
+          ) { affected_rows }
+        }`,
+        "verified_user",
+        team.owner,
+      );
+      expect(result.errors).toBeUndefined();
+      expect(result.data?.update_tournament_team_roster?.affected_rows).toBe(1);
+    });
+
+    it("denies a tournament_organizer role update on an existing roster row whose target player is ineligible", async () => {
+      const t = await openTournament("verified_user");
+      const team = await fx.team(0);
+      const entry = await registerLinkedTeam(t.id, team.id, team.owner, "verified_user");
+      const tournamentTeamId = entry.data.insert_tournament_teams_one.id;
+      const mate = await fx.player(); // defaults to role 'user'
+      await seedRosterRow(tournamentTeamId, t.id, mate);
+
+      const result = await gql(
+        `mutation {
+          update_tournament_team_roster(
+            where: { tournament_team_id: { _eq: "${tournamentTeamId}" }, player_steam_id: { _eq: "${mate}" } }
+            _set: { role: Admin }
+          ) { affected_rows }
+        }`,
+        "tournament_organizer",
+        t.organizer,
+      );
+      expect(result.data?.update_tournament_team_roster?.affected_rows ?? 0).toBe(0);
+    });
+  });
+
+  // CASE A from the bug report: a tournament-only (free-agent) team's
+  // captain invites a below-minimum player; accepting that invite must not
+  // be able to seat them on the roster. invites.controller.ts now issues
+  // the same insert_tournament_team_roster_one mutation under the
+  // *accepting player's own session* instead of the admin secret, so this
+  // exercises the exact permission path acceptance now goes through --
+  // the invite row itself is seeded directly since the normal captain ->
+  // invite path is independently blocked before it ever creates one (see
+  // "captain cannot invite an ineligible player" below).
+  describe("tournament team invite acceptance (self-insert)", () => {
+    const createFreeAgentTeam = (tournamentId: string, captain: string, captainRole: string) =>
+      gql(
+        `mutation {
+          insert_tournament_teams_one(object: {
+            tournament_id: "${tournamentId}"
+            name: "Free Agents"
+            short_name: "FA"
+            roster: { data: [{ tournament_id: "${tournamentId}", player_steam_id: "${captain}" }] }
+          }) { id }
+        }`,
+        captainRole,
+        captain,
+      );
+
+    const seedInvite = (tournamentTeamId: string, steamId: string, invitedBy: string) =>
+      postgres.query(
+        `INSERT INTO tournament_team_invites (tournament_team_id, steam_id, invited_by_player_steam_id)
+         VALUES ($1, $2, $3)`,
+        [tournamentTeamId, steamId, invitedBy],
+      );
+
+    it("denies acceptance for a below-minimum invited player -- the invite-acceptance bypass is fixed", async () => {
+      const t = await openTournament("verified_user");
+      const captain = await fx.player();
+      await setPlayerRole(captain, "verified_user");
+      const entry = await createFreeAgentTeam(t.id, captain, "verified_user");
+      const tournamentTeamId = entry.data.insert_tournament_teams_one.id;
+
+      const invitee = await fx.player(); // defaults to role 'user'
+      await seedInvite(tournamentTeamId, invitee, captain);
+
+      const result = await gql(
+        `mutation {
+          insert_tournament_team_roster_one(
+            object: {
+              tournament_id: "${t.id}"
+              tournament_team_id: "${tournamentTeamId}"
+              player_steam_id: "${invitee}"
+            }
+            on_conflict: { constraint: tournament_roster_pkey, update_columns: [role] }
+          ) { player_steam_id }
+        }`,
+        "user",
+        invitee,
+      );
+      expect(result.errors).toBeDefined();
+      const rows = await postgres.query(
+        "SELECT 1 FROM tournament_team_roster WHERE tournament_team_id = $1 AND player_steam_id = $2",
+        [tournamentTeamId, invitee],
+      );
+      expect((rows as unknown[]).length).toBe(0);
+    });
+
+    it("allows acceptance for an eligible invited player", async () => {
+      const t = await openTournament("verified_user");
+      const captain = await fx.player();
+      await setPlayerRole(captain, "verified_user");
+      const entry = await createFreeAgentTeam(t.id, captain, "verified_user");
+      const tournamentTeamId = entry.data.insert_tournament_teams_one.id;
+
+      const invitee = await fx.player();
+      await setPlayerRole(invitee, "verified_user");
+      await seedInvite(tournamentTeamId, invitee, captain);
+
+      const result = await gql(
+        `mutation {
+          insert_tournament_team_roster_one(
+            object: {
+              tournament_id: "${t.id}"
+              tournament_team_id: "${tournamentTeamId}"
+              player_steam_id: "${invitee}"
+            }
+            on_conflict: { constraint: tournament_roster_pkey, update_columns: [role] }
+          ) { player_steam_id }
+        }`,
+        "verified_user",
+        invitee,
+      );
+      expect(result.errors).toBeUndefined();
+      const rows = await postgres.query(
+        "SELECT 1 FROM tournament_team_roster WHERE tournament_team_id = $1 AND player_steam_id = $2",
+        [tournamentTeamId, invitee],
+      );
+      expect((rows as unknown[]).length).toBe(1);
+    });
+
+    it("captain cannot invite (redirect-insert) an ineligible player onto a free-agent team in the first place", async () => {
+      const t = await openTournament("verified_user");
+      const captain = await fx.player();
+      await setPlayerRole(captain, "verified_user");
+      const entry = await createFreeAgentTeam(t.id, captain, "verified_user");
+      const tournamentTeamId = entry.data.insert_tournament_teams_one.id;
+
+      const target = await fx.player(); // defaults to role 'user'
+      const result = await gql(
+        `mutation {
+          insert_tournament_team_roster_one(object: {
+            tournament_id: "${t.id}"
+            tournament_team_id: "${tournamentTeamId}"
+            player_steam_id: "${target}"
+          }) { player_steam_id }
+        }`,
+        "verified_user",
+        captain,
+      );
+      expect(result.errors).toBeDefined();
+      const invites = await postgres.query(
+        "SELECT 1 FROM tournament_team_invites WHERE tournament_team_id = $1 AND steam_id = $2",
+        [tournamentTeamId, target],
+      );
+      expect((invites as unknown[]).length).toBe(0);
     });
   });
 

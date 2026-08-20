@@ -79,6 +79,25 @@ DECLARE
     _team_id uuid;
     _owner_steam_id bigint;
 BEGIN
+    -- Player eligibility is checked unconditionally, before the
+    -- admin/organizer bypass and before the free-agent invite redirect
+    -- below: management authorization (who may write to this roster) and
+    -- target-player eligibility (tournament.min_role) are independent, and
+    -- this is the one path every insert into this table goes through --
+    -- Hasura's declarative `check` can't be relied on alone here, since the
+    -- invite-redirect branch returns NULL (zero rows), which would leave
+    -- nothing for a RETURNING-based permission check to evaluate.
+    --
+    -- `IS NOT TRUE`, not `NOT ...`: player_meets_min_role can return NULL
+    -- (fail-closed, same as meets_min_role), and PL/pgSQL's IF treats a NULL
+    -- condition as false -- `NOT NULL` is NULL, so a plain `IF NOT ...`
+    -- would silently skip the exception instead of raising it.
+    IF public.player_meets_min_role(NEW.tournament_id, NEW.player_steam_id) IS NOT TRUE THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '22000',
+            MESSAGE = 'Target player does not meet this tournament''s minimum role requirement';
+    END IF;
+
     IF current_setting('hasura.user')::jsonb ->> 'x-hasura-role' IN ('admin', 'administrator', 'tournament_organizer') THEN
         RETURN NEW;
     END IF;
@@ -86,8 +105,24 @@ BEGIN
     SELECT team_id, owner_steam_id INTO _team_id, _owner_steam_id FROM tournament_teams WHERE id = NEW.tournament_team_id;
 
     IF _team_id IS NULL THEN
-        IF _owner_steam_id = NEW.player_steam_id THEN 
+        IF _owner_steam_id = NEW.player_steam_id THEN
             NEW.role = 'Admin';
+            RETURN NEW;
+        END IF;
+
+        -- Accepting your own pending invite: an authorized team admin/owner
+        -- already extended it (that's how the invite row got there in the
+        -- first place -- see the INSERT below), so this is a direct insert,
+        -- not another invite to redirect into. Without this branch, a
+        -- self-accept (player_steam_id = the acting session) would loop
+        -- back into the INSERT below and collide with the existing invite's
+        -- unique constraint instead of ever landing on the roster.
+        IF NEW.player_steam_id = (current_setting('hasura.user')::jsonb->>'x-hasura-user-id')::bigint
+           AND EXISTS (
+               SELECT 1 FROM tournament_team_invites
+               WHERE tournament_team_id = NEW.tournament_team_id
+                 AND steam_id = NEW.player_steam_id
+           ) THEN
             RETURN NEW;
         END IF;
 

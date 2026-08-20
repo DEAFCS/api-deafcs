@@ -41,9 +41,12 @@ describe("tournament roster duplicate key (SQL-driven)", () => {
        SELECT 8, 1, 'Wingman', id, false, true, '{TestA}'
        FROM map_pools WHERE type = 'Wingman' AND seed = true RETURNING id`,
     );
+    // min_role explicitly NULL: fixture players stay at the default 'user'
+    // role, and roster-insert enforcement of the column's 'verified_user'
+    // default is real now (see hasura/triggers/tournament_team_roster.sql).
     const [tournament] = await postgres.query<Array<{ id: string }>>(
-      `INSERT INTO tournaments (name, start, organizer_steam_id, match_options_id, status)
-       VALUES ($1, now() + interval '1 day', $2, $3, 'Setup') RETURNING id`,
+      `INSERT INTO tournaments (name, start, organizer_steam_id, match_options_id, status, min_role)
+       VALUES ($1, now() + interval '1 day', $2, $3, 'Setup', NULL) RETURNING id`,
       [fx.nextName("cup"), organizer, options.id],
     );
     return { id: tournament.id, organizer };
