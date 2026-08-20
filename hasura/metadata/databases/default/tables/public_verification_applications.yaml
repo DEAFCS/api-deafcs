@@ -45,6 +45,7 @@ insert_permissions:
         - found_via
         - knows_deaf_player
         - deaf_player_steam_url
+        - additional_info
     comment: A logged-in, not-yet-verified player can submit their own application.
 select_permissions:
   - role: user
@@ -57,6 +58,7 @@ select_permissions:
         - found_via
         - knows_deaf_player
         - deaf_player_steam_url
+        - additional_info
         - status
         - reviewed_by_steam_id
         - reviewed_at
@@ -76,6 +78,7 @@ select_permissions:
         - found_via
         - knows_deaf_player
         - deaf_player_steam_url
+        - additional_info
         - status
         - reviewed_by_steam_id
         - reviewed_at

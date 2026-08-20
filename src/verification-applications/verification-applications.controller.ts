@@ -161,8 +161,11 @@ export class VerificationApplicationsController {
     }
 
     if (message.is_admin) {
+      // Applicant-facing -- distinct from the player-reply type below so the
+      // client can route a push-notification click straight to /verify
+      // (this player's own status page) without needing to know their role.
       await this.notifications.notifyPlayers(
-        "VerificationApplicationReplied" as unknown as e_notification_types_enum,
+        "VerificationApplicationAdminReply" as unknown as e_notification_types_enum,
         {
           title: "Verification Application Reply",
           message: "An admin replied on your verification application.",
@@ -183,8 +186,9 @@ export class VerificationApplicationsController {
     const name = player?.name ?? `Player ${application.player_steam_id}`;
     const applicationUrl = `${this.appConfig.webDomain}/verification-applications/${message.application_id}`;
 
+    // Admin-facing -- see the comment above on the applicant-facing branch.
     await this.notifications.send(
-      "VerificationApplicationReplied" as unknown as e_notification_types_enum,
+      "VerificationApplicationPlayerReply" as unknown as e_notification_types_enum,
       {
         title: "Verification Application Reply",
         message: `<a href="${applicationUrl}">${NotificationsService.escapeHtml(name)}</a> replied on their verification application.`,
