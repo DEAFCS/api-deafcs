@@ -86,3 +86,8 @@ select_permissions:
         - updated_at
       filter: {}
     comment: Admins can see every application.
+delete_permissions:
+  - role: administrator
+    permission:
+      filter: {}
+    comment: Admins can delete any application (cascades to its message thread).
