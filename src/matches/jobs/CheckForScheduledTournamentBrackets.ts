@@ -28,7 +28,18 @@ export class CheckForScheduledTournamentBrackets extends WorkerHost {
           AND tb.finished = false
           AND tb.scheduled_at IS NOT NULL
           AND tb.scheduled_at <= $1::timestamptz
-          AND t.status = 'Live'
+          -- Live tournaments materialize as before. RegistrationClosed
+          -- tournaments also materialize once their own scheduled start is
+          -- imminent (same 15-minute window as $1) -- this is what gives
+          -- round-1 matches their pre-kickoff prep/check-in buffer now that
+          -- CheckForTournamentStart no longer flips status to Live early to
+          -- get that same effect. Every later round is already covered by
+          -- the plain Live branch, since status stays Live from round 1
+          -- onward.
+          AND (
+            t.status = 'Live'
+            OR (t.status = 'RegistrationClosed' AND t.start <= $1::timestamptz)
+          )
       )
       SELECT COUNT(*)::int AS scheduled_count
       FROM (

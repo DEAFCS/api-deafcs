@@ -11,6 +11,7 @@ import { PostgresService } from "../postgres/postgres.service";
 import { AwardsService } from "../awards/awards.service";
 import { tournaments_set_input, e_notification_types_enum } from "../../generated";
 import { NotificationsService } from "../notifications/notifications.service";
+import { TournamentTeamGenerationService } from "./tournament-team-generation.service";
 
 // These tables are newer than the generated GraphQL types; event payloads are
 // typed locally (mirrors the leagues controller).
@@ -36,6 +37,7 @@ export class TournamentsController {
     private readonly postgres: PostgresService,
     private readonly awards: AwardsService,
     private readonly notifications: NotificationsService,
+    private readonly teamGeneration: TournamentTeamGenerationService,
   ) {}
 
   @HasuraEvent()
@@ -423,168 +425,15 @@ export class TournamentsController {
       throw Error("tournament has no configured lineup size");
     }
 
-    const { tournament_individual_signups: signups } = await this.hasura.query({
-      tournament_individual_signups: {
-        __args: {
-          where: {
-            tournament_id: { _eq: tournament_id },
-            status: { _eq: "Registered" },
-          },
-        },
-        id: true,
-        player_steam_id: true,
-        player: {
-          name: true,
-          elo: true,
-        },
-      },
-    });
-
-    if (!signups?.length) {
-      throw Error("no individually-registered players to generate teams from");
-    }
-
-    // wingman = 2v2, everything else (competitive 5v5, etc.) uses the
-    // competitive ladder -- there's no third team-size bracket today.
-    const eloKey = teamSize === 2 ? "wingman" : "competitive";
-
-    const shuffled = TournamentsController.shuffle(signups);
-    const ranked = shuffled
-      .map((signup) => ({
-        signupId: signup.id as string,
-        steamId: String(signup.player_steam_id),
-        name: (signup.player?.name as string) ?? null,
-        elo: Number((signup.player?.elo as Record<string, number>)?.[eloKey] ?? 5000),
-      }))
-      .sort((a, b) => b.elo - a.elo);
-
-    const teamCount = Math.floor(ranked.length / teamSize);
-    if (teamCount < 1) {
-      throw Error(
-        `not enough registered players (${ranked.length}) for a single ${teamSize}-player team`,
-      );
-    }
-
-    const assignedCount = teamCount * teamSize;
-    const waitlisted = ranked.slice(assignedCount);
-    const toAssign = ranked.slice(0, assignedCount);
-
-    // Snake draft across teamCount teams.
-    const teams: Array<typeof toAssign> = Array.from(
-      { length: teamCount },
-      (): typeof toAssign => [],
+    // Extracted to TournamentTeamGenerationService so
+    // ProcessTournamentAttendance (the automatic scheduler) can call the
+    // exact same generation logic -- a click and a timer, not two
+    // implementations. This action's only job is auth + status checks;
+    // see the service for selection/balancing/idempotency details.
+    return this.teamGeneration.generateTournamentTeamsForTournament(
+      tournament_id,
+      teamSize,
     );
-    let round = 0;
-    let index = 0;
-    while (index < toAssign.length) {
-      const order =
-        round % 2 === 0
-          ? Array.from({ length: teamCount }, (_, i) => i)
-          : Array.from({ length: teamCount }, (_, i) => teamCount - 1 - i);
-      for (const teamIndex of order) {
-        if (index >= toAssign.length) break;
-        teams[teamIndex].push(toAssign[index]);
-        index++;
-      }
-      round++;
-    }
-
-    await this.postgres.transaction(async (client) => {
-      // tbi_tournament_team_roster (hasura/triggers/tournament_team_roster.sql)
-      // reads current_setting('hasura.user') to decide whether a roster
-      // insert is admin/organizer-driven (allowed straight through) or a
-      // regular player join (redirected into a tournament_team_invites
-      // row instead). That GUC only exists because Hasura's GraphQL engine
-      // sets it per-request -- this raw connection never gets it set,
-      // which the trigger treats as an unrecognized-setting error rather
-      // than "missing". Fake it for this transaction only: these rosters
-      // are entirely organizer-triggered (the auto-balance action itself
-      // already required is_organizer), so "administrator" here is
-      // accurate, not a privilege escalation.
-      await client.query(
-        `SELECT set_config('hasura.user', '{"x-hasura-role":"administrator"}', true)`,
-      );
-
-      for (const [teamIndex, roster] of teams.entries()) {
-        // Highest-ELO player on the generated roster stands in as
-        // owner/captain -- there's no "team owner" concept for a pool of
-        // strangers auto-assigned together, this just satisfies
-        // tournament_teams.owner_steam_id NOT NULL with a defensible pick.
-        const captain = roster[0];
-        const teamRow = await client.query<{ id: string }>(
-          `INSERT INTO public.tournament_teams
-             (tournament_id, name, owner_steam_id, captain_steam_id, team_id)
-           VALUES ($1, $2, $3, $3, NULL)
-           RETURNING id`,
-          [
-            tournament_id,
-            `Team ${teamIndex + 1}`,
-            captain.steamId,
-          ],
-        );
-        const tournamentTeamId = teamRow.rows[0].id;
-
-        for (const player of roster) {
-          await client.query(
-            `INSERT INTO public.tournament_team_roster
-               (tournament_team_id, player_steam_id, tournament_id)
-             VALUES ($1, $2, $3)`,
-            [tournamentTeamId, player.steamId, tournament_id],
-          );
-          await client.query(
-            `UPDATE public.tournament_individual_signups
-             SET status = 'Assigned', tournament_team_id = $1
-             WHERE id = $2`,
-            [tournamentTeamId, player.signupId],
-          );
-        }
-      }
-
-      if (waitlisted.length) {
-        await client.query(
-          `UPDATE public.tournament_individual_signups
-           SET status = 'Waitlisted'
-           WHERE id = ANY($1::uuid[])`,
-          [waitlisted.map((player) => player.signupId)],
-        );
-      }
-
-      // tbu_tournaments (hasura/triggers/tournaments.sql) rebuilds the
-      // whole bracket (update_tournament_stages), seeds every eligible
-      // team (assign_seeds_to_teams), then resolves those seeds into
-      // actual team_1/team_2 match lineups (seed_stage) -- but only on
-      // the Setup/RegistrationOpen -> Live/RegistrationClosed
-      // transition, which already happened before any of these teams
-      // existed (they're created here, after registration closed).
-      // Without re-running all three, the bracket stays built for 0
-      // teams, every team sits at seed = NULL, and even once seeded the
-      // bracket UI shows bare seed numbers (#1, #2, ...) instead of
-      // team names since nothing ever resolved seed -> team into the
-      // actual matches.
-      await client.query(`SELECT update_tournament_stages($1)`, [
-        tournament_id,
-      ]);
-      await client.query(
-        `SELECT assign_seeds_to_teams(t) FROM public.tournaments t WHERE t.id = $1`,
-        [tournament_id],
-      );
-      const firstStage = await client.query<{ id: string }>(
-        `SELECT id FROM public.tournament_stages WHERE tournament_id = $1 AND "order" = 1 LIMIT 1`,
-        [tournament_id],
-      );
-      if (firstStage.rows[0]) {
-        await client.query(`SELECT seed_stage($1)`, [firstStage.rows[0].id]);
-      }
-    });
-
-    this.logger.log(
-      `[${tournament_id}] generated ${teamCount} team(s) (${assignedCount} players) from individual sign-ups, ${waitlisted.length} waitlisted`,
-    );
-
-    return {
-      teamsCreated: teamCount,
-      waitlisted: waitlisted.length,
-    };
   }
 
   // Opens (or re-opens) a check-in window for everyone currently
@@ -671,6 +520,7 @@ export class TournamentsController {
           id: true,
           is_organizer: true,
           individual_check_in_ends_at: true,
+          options: { individual_registration_enabled: true },
         },
       },
       data.user.steam_id,
@@ -681,6 +531,14 @@ export class TournamentsController {
     }
     if (!tournament.is_organizer) {
       throw Error("not the tournament organizer");
+    }
+    // individual_check_in_ends_at is shared with team tournaments' attendance
+    // window now, so this action states explicitly what its siblings
+    // (startTournamentIndividualCheckIn / generateTournamentTeams) already
+    // do: it is Solo-Random-only. Team attendance windows are resolved by
+    // ProcessTournamentAttendance, not by ending them through here.
+    if (!tournament.options?.individual_registration_enabled) {
+      throw Error("individual registration is not enabled for this tournament");
     }
     if (!tournament.individual_check_in_ends_at) {
       throw Error("no check-in window is currently open");
@@ -734,15 +592,60 @@ export class TournamentsController {
     return { success: true };
   }
 
-  private static shuffle<T>(items: Array<T>): Array<T> {
-    const result = [...items];
-    for (let index = result.length - 1; index > 0; index--) {
-      const swap = Math.floor(Math.random() * (index + 1));
-      const temp = result[index];
-      result[index] = result[swap];
-      result[swap] = temp;
+  // Team-tournament counterpart to checkIntoTournament above: same shared
+  // attendance window (tournaments.individual_check_in_ends_at), but
+  // confirms the whole team at once via the captain/authorized
+  // representative rather than requiring every roster player to check in
+  // individually. Reuses can_manage_tournament_team (the same
+  // captain/owner/team-admin/organizer check already used for editing a
+  // tournament team) instead of a new authorization rule.
+  @HasuraAction()
+  public async checkInTournamentTeam(data: {
+    user: User;
+    tournament_team_id: string;
+  }) {
+    const { tournament_team_id } = data;
+
+    const { tournament_teams_by_pk: team } = await this.hasura.query(
+      {
+        tournament_teams_by_pk: {
+          __args: { id: tournament_team_id },
+          id: true,
+          tournament_id: true,
+          can_manage: true,
+          tournament: {
+            individual_check_in_ends_at: true,
+          },
+        },
+      },
+      data.user.steam_id,
+    );
+
+    if (!team) {
+      throw Error("tournament team not found");
     }
-    return result;
+    if (!team.can_manage) {
+      throw Error("not authorized to check in this team");
+    }
+    if (
+      !team.tournament?.individual_check_in_ends_at ||
+      new Date(
+        team.tournament.individual_check_in_ends_at as unknown as string,
+      ) <= new Date()
+    ) {
+      throw Error("check-in is not currently open for this tournament");
+    }
+
+    await this.postgres.query(
+      `UPDATE public.tournament_teams SET checked_in_at = now() WHERE id = $1`,
+      [tournament_team_id],
+    );
+
+    this.logger.log(
+      `[${team.tournament_id}] team ${tournament_team_id} checked in for tournament attendance`,
+    );
+
+    return { success: true };
   }
 
   // Deletes this tournament's match rows through the supplied transaction

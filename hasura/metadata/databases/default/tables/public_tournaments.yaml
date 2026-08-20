@@ -484,6 +484,8 @@ select_permissions:
         - trophies_enabled
         - individual_check_in_ends_at
         - individual_check_in_duration_minutes
+        - attendance_check_in_open_before_minutes
+        - attendance_check_in_close_before_minutes
       computed_fields:
         - can_cancel
         - can_close_registration
@@ -544,6 +546,8 @@ select_permissions:
         - trophies_enabled
         - individual_check_in_ends_at
         - individual_check_in_duration_minutes
+        - attendance_check_in_open_before_minutes
+        - attendance_check_in_close_before_minutes
       computed_fields:
         - can_cancel
         - can_close_registration
@@ -590,6 +594,8 @@ select_permissions:
         - trophies_enabled
         - individual_check_in_ends_at
         - individual_check_in_duration_minutes
+        - attendance_check_in_open_before_minutes
+        - attendance_check_in_close_before_minutes
       computed_fields:
         - can_cancel
         - can_close_registration
@@ -648,6 +654,8 @@ update_permissions:
         - start
         - status
         - trophies_enabled
+        - attendance_check_in_open_before_minutes
+        - attendance_check_in_close_before_minutes
       filter:
         is_organizer:
           _eq: true
@@ -672,6 +680,8 @@ update_permissions:
         - start
         - status
         - trophies_enabled
+        - attendance_check_in_open_before_minutes
+        - attendance_check_in_close_before_minutes
       filter:
         is_organizer:
           _eq: true

@@ -84,8 +84,26 @@ describe("tournament check-in time (SQL-driven)", () => {
     return match;
   };
 
+  // These tests are about WHICH duration is applied (check_in_duration vs
+  // auto_cancel_duration), not about the baseline it is added to.
+  // schedule_tournament_match() bases a not-yet-started tournament match on
+  // the tournament's scheduled start (see
+  // tournament-match-prep-timeout.spec.ts), and TournamentFixtures starts
+  // tournaments a day out, so the deadline is measured from that start
+  // rather than from now.
+  const minutesAfterScheduledStart = async (
+    tournamentId: string,
+    cancelsAt: Date,
+  ) => {
+    const [{ start }] = await postgres.query<Array<{ start: Date }>>(
+      "SELECT start FROM tournaments WHERE id = $1",
+      [tournamentId],
+    );
+    return (cancelsAt.getTime() - start.getTime()) / 60_000;
+  };
+
   it("uses check_in_duration (not auto_cancel_duration) for a Captains check-in tournament match", async () => {
-    const { matchId } = await launchWithOptions({
+    const { tournament, matchId } = await launchWithOptions({
       check_in_setting: "Captains",
       check_in_duration: 5,
     });
@@ -94,26 +112,32 @@ describe("tournament check-in time (SQL-driven)", () => {
     expect(match.status).toBe("WaitingForCheckIn");
     expect(match.cancels_at).not.toBeNull();
 
-    const minutesOut = (match.cancels_at!.getTime() - Date.now()) / 60_000;
+    const minutesOut = await minutesAfterScheduledStart(
+      tournament.id,
+      match.cancels_at!,
+    );
     // 5 minutes, not the 15-minute auto_cancel_duration default.
     expect(minutesOut).toBeGreaterThan(3);
     expect(minutesOut).toBeLessThan(7);
   });
 
   it("uses check_in_duration for a Players check-in tournament match", async () => {
-    const { matchId } = await launchWithOptions({
+    const { tournament, matchId } = await launchWithOptions({
       check_in_setting: "Players",
       check_in_duration: 5,
     });
 
     const match = await getMatch(matchId);
-    const minutesOut = (match.cancels_at!.getTime() - Date.now()) / 60_000;
+    const minutesOut = await minutesAfterScheduledStart(
+      tournament.id,
+      match.cancels_at!,
+    );
     expect(minutesOut).toBeGreaterThan(3);
     expect(minutesOut).toBeLessThan(7);
   });
 
   it("falls back to the global check_in_duration setting when unset", async () => {
-    const { matchId } = await launchWithOptions({
+    const { tournament, matchId } = await launchWithOptions({
       check_in_setting: "Captains",
       // check_in_duration left NULL: falls back to the global setting
       // default of 5 minutes, mirroring auto_cancel_duration's own
@@ -121,7 +145,10 @@ describe("tournament check-in time (SQL-driven)", () => {
     });
 
     const match = await getMatch(matchId);
-    const minutesOut = (match.cancels_at!.getTime() - Date.now()) / 60_000;
+    const minutesOut = await minutesAfterScheduledStart(
+      tournament.id,
+      match.cancels_at!,
+    );
     expect(minutesOut).toBeGreaterThan(3);
     expect(minutesOut).toBeLessThan(7);
   });

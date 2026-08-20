@@ -13,8 +13,14 @@ export class CheckForTournamentStart extends WorkerHost {
     super();
   }
   async process(): Promise<number> {
-    const fifteenMinutesAhead = new Date();
-    fifteenMinutesAhead.setMinutes(fifteenMinutesAhead.getMinutes() + 15);
+    // Exactly now, not 15 minutes early: RegistrationClosed -> Live is meant
+    // to mean "the tournament's scheduled start has actually been reached",
+    // not "about to start". The 15-minute early-materialization behavior
+    // this used to provide (so round-1 matches exist with a prep/check-in
+    // buffer before kickoff) is preserved separately in
+    // CheckForScheduledTournamentBrackets, which now also fires while still
+    // RegistrationClosed -- see that job's comment for why.
+    const now = new Date();
 
     try {
       const { update_tournaments } = await this.hasura.mutation({
@@ -24,7 +30,7 @@ export class CheckForTournamentStart extends WorkerHost {
               _and: [
                 {
                   start: {
-                    _lte: fifteenMinutesAhead,
+                    _lte: now,
                   },
                 },
                 {

@@ -8,6 +8,7 @@ import { PostgresModule } from "../postgres/postgres.module";
 import { AwardsModule } from "../awards/awards.module";
 import { loggerFactory } from "../utilities/LoggerFactory";
 import { NotificationsModule } from "../notifications/notifications.module";
+import { TournamentTeamGenerationModule } from "./tournament-team-generation.module";
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { NotificationsModule } from "../notifications/notifications.module";
     PostgresModule,
     AwardsModule,
     NotificationsModule,
+    TournamentTeamGenerationModule,
   ],
   controllers: [TournamentsController],
   providers: [loggerFactory()],

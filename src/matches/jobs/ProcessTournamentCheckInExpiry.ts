@@ -24,13 +24,43 @@ export class ProcessTournamentCheckInExpiry extends WorkerHost {
   }
 
   async process(): Promise<number> {
+    // individual_check_in_ends_at is now a SHARED field -- also stamped by
+    // ProcessTournamentAttendance for normal team tournaments' attendance
+    // window (and for Solo Random tournaments using the automatic
+    // single-window flow). Two guards, both required:
+    //
+    //  - mo.individual_registration_enabled: without this, a team
+    //    tournament's window expiring would hit this job too, find zero
+    //    tournament_individual_signups rows (teams don't use that table),
+    //    and just null the field back out from under
+    //    ProcessTournamentAttendance before it gets a chance to finalize
+    //    attendance -- silently breaking the team tournament's registration
+    //    close.
+    //
+    //  - t.status = 'RegistrationClosed': startTournamentIndividualCheckIn
+    //    (the manual action this job's multi-round reopen/promote behavior
+    //    exists for) can only ever be called once status is already
+    //    RegistrationClosed. ProcessTournamentAttendance's own automatic
+    //    window, by contrast, only exists while status is still
+    //    RegistrationOpen -- it flips to RegistrationClosed in the same
+    //    transaction that clears individual_check_in_ends_at back to NULL.
+    //    Without this guard, this job's 15-second cadence could race
+    //    ProcessTournamentAttendance's 1-minute cadence and resolve an
+    //    automatic-flow Solo Random window itself, reopening a second round
+    //    -- exactly the multi-round behavior the automatic flow is
+    //    supposed to never have. The two statuses are mutually exclusive by
+    //    construction, so this fully separates "manual, can reopen" windows
+    //    from "automatic, single-shot" windows.
     const expired = await this.postgres.query<
       Array<{ id: string; individual_check_in_duration_minutes: number | null }>
     >(
-      `SELECT id, individual_check_in_duration_minutes
-       FROM public.tournaments
-       WHERE individual_check_in_ends_at IS NOT NULL
-       AND individual_check_in_ends_at <= now()`,
+      `SELECT t.id, t.individual_check_in_duration_minutes
+       FROM public.tournaments t
+       JOIN public.match_options mo ON mo.id = t.match_options_id
+       WHERE t.individual_check_in_ends_at IS NOT NULL
+       AND t.individual_check_in_ends_at <= now()
+       AND mo.individual_registration_enabled = true
+       AND t.status = 'RegistrationClosed'`,
     );
 
     for (const tournament of expired) {

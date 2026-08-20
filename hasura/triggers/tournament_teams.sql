@@ -11,6 +11,17 @@ BEGIN
     FROM tournaments
     WHERE id = NEW.tournament_id;
 
+    -- Registering while tournament attendance check-in is already open
+    -- counts as automatically present -- mirrors
+    -- tbi_tournament_individual_signups' late-signup auto-check-in, same
+    -- shared individual_check_in_ends_at window, applied to the team's own
+    -- checked_in_at instead of a per-player one.
+    IF NEW.checked_in_at IS NULL
+        AND tournament.individual_check_in_ends_at IS NOT NULL
+        AND tournament.individual_check_in_ends_at > now() THEN
+        NEW.checked_in_at = now();
+    END IF;
+
     _session_steam_id = nullif(current_setting('hasura.user', true)::jsonb ->> 'x-hasura-user-id', '')::bigint;
 
     IF NEW.team_id IS NOT NULL THEN

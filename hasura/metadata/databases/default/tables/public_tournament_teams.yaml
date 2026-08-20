@@ -115,6 +115,7 @@ select_permissions:
         - captain_steam_id
         - created_at
         - eligible_at
+        - checked_in_at
         - id
         - name
         - owner_steam_id

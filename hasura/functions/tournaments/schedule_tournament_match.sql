@@ -138,7 +138,23 @@ CREATE OR REPLACE FUNCTION public.schedule_tournament_match(bracket public.tourn
          'PickingPlayers',
          tournament.organizer_steam_id,
          _match_options_id,
-         GREATEST(COALESCE(bracket.scheduled_at, now()), now())
+         -- Timeout baseline, in order of specificity: the bracket's own
+         -- schedule if the organizer/league set one, else the tournament's
+         -- scheduled start, else now.
+         --
+         -- The tournament.start term is the addition. Without it a match
+         -- materialized before its scheduled start fell back to now(), so
+         -- tbu_matches derived cancels_at = now() + check_in_duration: a
+         -- 19:00 tournament whose round 1 materialized at 18:45 got an
+         -- 18:50 check-in deadline, ten minutes before the tournament had
+         -- even begun. Opening check-in early must add preparation time,
+         -- never move the no-show deadline earlier than the scheduled start.
+         --
+         -- GREATEST(..., now()) clamps an already-passed start, so a
+         -- tournament that is already underway (and every later round, which
+         -- materializes while Live) keeps exactly its previous now()-based
+         -- timing.
+         GREATEST(COALESCE(bracket.scheduled_at, tournament.start, now()), now())
      )
      RETURNING lineup_1_id, lineup_2_id
        INTO _lineup_1_id, _lineup_2_id;

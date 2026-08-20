@@ -250,6 +250,12 @@ type Mutation {
 }
 
 type Mutation {
+  checkInTournamentTeam(
+    tournament_team_id: uuid!
+  ): SuccessOutput
+}
+
+type Mutation {
   denyInvite(
     invite_id: uuid!
     type: String!

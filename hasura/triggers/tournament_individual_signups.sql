@@ -10,6 +10,7 @@ CREATE OR REPLACE FUNCTION public.tbi_tournament_individual_signups() RETURNS TR
 DECLARE
     _cap int;
     _registered_count int;
+    _check_in_ends_at timestamptz;
 BEGIN
     IF NEW.status IS NULL OR NEW.status = 'Registered' THEN
         SELECT ts.max_teams * public.tournament_min_players_per_lineup(t)
@@ -27,6 +28,22 @@ BEGIN
             IF _registered_count >= _cap THEN
                 NEW.status := 'Waitlisted';
             END IF;
+        END IF;
+    END IF;
+
+    -- Registering while attendance check-in is already open (ie. signing up
+    -- after check-in opened but before registration closes) counts as
+    -- automatically present -- no separate check-in click required. Applies
+    -- regardless of whether the cap above landed this signup on the
+    -- waitlist, since a checked-in waitlisted player can still qualify for
+    -- the final participant pool.
+    IF NEW.checked_in_at IS NULL THEN
+        SELECT individual_check_in_ends_at INTO _check_in_ends_at
+        FROM public.tournaments
+        WHERE id = NEW.tournament_id;
+
+        IF _check_in_ends_at IS NOT NULL AND _check_in_ends_at > now() THEN
+            NEW.checked_in_at := now();
         END IF;
     END IF;
 

@@ -36,6 +36,8 @@ import { RemoveCancelledMatches } from "./jobs/RemoveCancelledMatches";
 import { CheckForTournamentStart } from "./jobs/CheckForTournamentStart";
 import { ProcessTournamentCheckInExpiry } from "./jobs/ProcessTournamentCheckInExpiry";
 import { CheckForScheduledTournamentBrackets } from "./jobs/CheckForScheduledTournamentBrackets";
+import { ProcessTournamentAttendance } from "./jobs/ProcessTournamentAttendance";
+import { TournamentTeamGenerationModule } from "../tournaments/tournament-team-generation.module";
 import { CheckLeagueSeasonTransitions } from "./jobs/CheckLeagueSeasonTransitions";
 import { ApplyLeagueDefaultSchedules } from "./jobs/ApplyLeagueDefaultSchedules";
 import { LeagueWeekReminders } from "./jobs/LeagueWeekReminders";
@@ -98,6 +100,7 @@ import { LobbyCallService } from "./camera/lobby-call.service";
     MatchMaking,
     LeaguesModule,
     PluginRuntimeModule,
+    TournamentTeamGenerationModule,
     BullModule.registerQueue(
       {
         name: MatchQueues.MatchServers,
@@ -177,6 +180,7 @@ import { LobbyCallService } from "./camera/lobby-call.service";
     CheckForTournamentStart,
     ProcessTournamentCheckInExpiry,
     CheckForScheduledTournamentBrackets,
+    ProcessTournamentAttendance,
     CheckLeagueSeasonTransitions,
     ApplyLeagueDefaultSchedules,
     LeagueWeekReminders,
@@ -304,6 +308,16 @@ export class MatchesModule implements NestModule {
       {
         repeat: {
           every: 15_000,
+        },
+      },
+    );
+
+    void scheduleMatchQueue.add(
+      ProcessTournamentAttendance.name,
+      {},
+      {
+        repeat: {
+          pattern: "* * * * *",
         },
       },
     );
