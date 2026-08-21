@@ -239,9 +239,23 @@ CREATE OR REPLACE FUNCTION public.schedule_tournament_match(bracket public.tourn
      -- by the accept path), park it as 'Scheduled' instead so it shows on team
      -- calendars without opening check-in / voice / the cancel timer yet;
      -- CheckForScheduledMatches flips it to WaitingForCheckIn near kickoff.
+     --
+     -- The second 'Scheduled' branch applies the same "visible but not yet
+     -- playable" parking to a tournament match materialized before its
+     -- tournament's own scheduled start. Preparing early is intentional (the
+     -- bracket, seeds and opponents are meant to be visible during
+     -- RegistrationClosed), but opening check-in / veto / the join flow
+     -- early is not: a 12:20 tournament that closed registration at 12:15
+     -- was fully playable at 12:15. tbu_matches enforces the same rule for
+     -- every other path out of 'Scheduled' -- see
+     -- tournament_match_is_pre_start().
      UPDATE matches
      SET status = CASE
              WHEN current_setting('fivestack.schedule_as_pending', true) = 'true'
+                 THEN 'Scheduled'
+             WHEN tournament.status = 'RegistrationClosed'
+                  AND tournament.start IS NOT NULL
+                  AND tournament.start > now()
                  THEN 'Scheduled'
              ELSE 'WaitingForCheckIn'
          END

@@ -55,6 +55,33 @@ BEGIN
         END IF;
     END IF;
 
+    -- Release the pre-start parking the moment the tournament actually
+    -- starts. Matches materialized during RegistrationClosed sit in
+    -- 'Scheduled' (see tournament_match_is_pre_start / tbu_matches); without
+    -- this they would wait up to a full minute for the next
+    -- CheckForScheduledMatches pass, leaving the tournament reading "Live"
+    -- while its first-round matches still showed as merely scheduled.
+    --
+    -- Bounded to matches due around the tournament's own kickoff (the same
+    -- 15-minute window CheckForScheduledMatches uses), so this only opens
+    -- what the guard actually parked: a bracket carrying its own explicit,
+    -- far-later schedule -- a league's negotiated fixture, an admin-mode
+    -- bracket -- keeps waiting for its own time.
+    IF NEW.status IS DISTINCT FROM OLD.status AND NEW.status = 'Live' THEN
+        UPDATE matches m
+           SET status = 'WaitingForCheckIn'
+         WHERE m.status = 'Scheduled'
+           AND m.scheduled_at IS NOT NULL
+           AND m.scheduled_at <= COALESCE(NEW.start, now()) + interval '15 minutes'
+           AND EXISTS (
+               SELECT 1
+               FROM tournament_brackets tb
+               INNER JOIN tournament_stages ts ON ts.id = tb.tournament_stage_id
+               WHERE tb.match_id = m.id
+                 AND ts.tournament_id = NEW.id
+           );
+    END IF;
+
     IF (
          NEW.status IS DISTINCT FROM OLD.status AND
          NEW.status IN ('RegistrationOpen')

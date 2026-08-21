@@ -14,6 +14,7 @@ export class CheckForScheduledMatches extends WorkerHost {
   }
 
   async process(): Promise<number> {
+    const now = new Date();
     const fifteenMinutesAhead = new Date();
     fifteenMinutesAhead.setMinutes(fifteenMinutesAhead.getMinutes() + 15);
     const { update_matches } = await this.hasura.mutation({
@@ -34,6 +35,34 @@ export class CheckForScheduledMatches extends WorkerHost {
               {
                 status: {
                   _eq: "Scheduled",
+                },
+              },
+              // A tournament match materialized before its tournament's own
+              // scheduled start stays 'Scheduled' until the tournament
+              // actually begins -- tbu_matches enforces that regardless, so
+              // selecting one here would only produce a no-op UPDATE (and a
+              // misleading "N matches started" log) on every pass. Mirrors
+              // tournament_match_is_pre_start()'s condition exactly.
+              {
+                _not: {
+                  tournament_brackets: {
+                    stage: {
+                      tournament: {
+                        _and: [
+                          {
+                            status: {
+                              _eq: "RegistrationClosed",
+                            },
+                          },
+                          {
+                            start: {
+                              _gt: now,
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
                 },
               },
             ],

@@ -256,6 +256,13 @@ type Mutation {
 }
 
 type Mutation {
+  addTournamentIndividualPlayer(
+    tournament_id: uuid!
+    player_steam_id: String!
+  ): AddTournamentIndividualPlayerOutput
+}
+
+type Mutation {
   denyInvite(
     invite_id: uuid!
     type: String!
@@ -1021,6 +1028,12 @@ type MeResponse {
 
 type SuccessOutput {
   success: Boolean!
+}
+
+type AddTournamentIndividualPlayerOutput {
+  success: Boolean!
+  status: String!
+  checked_in: Boolean!
 }
 
 type DraftGamePreviewPlayer {

@@ -292,6 +292,30 @@ BEGIN
 
     SELECT check_in_setting, check_in_duration INTO _check_in_setting, _check_in_duration_override FROM resolve_match_check_in(NEW.id);
 
+    -- Prepared before start != playable before start.
+    --
+    -- A tournament match materialized ahead of its tournament's own kickoff
+    -- is parked in 'Scheduled' (schedule_tournament_match), the existing
+    -- status for "on the calendar, opponent visible, nothing started yet".
+    -- This is the single canonical gate that keeps it there: it refuses
+    -- every transition onto the playable ladder while the tournament is
+    -- still RegistrationClosed with its start in the future, no matter
+    -- which path attempts it (CheckForScheduledMatches, an organizer
+    -- action, a lineup-ready cascade). Once CheckForTournamentStart flips
+    -- the tournament to Live at its scheduled start -- or an organizer
+    -- starts it early -- the gate opens and the ordinary match flow runs
+    -- exactly as before.
+    --
+    -- Only the playable ladder is blocked; Canceled/Finished/Forfeit/etc.
+    -- still resolve normally, so cancellation, tournament reset and
+    -- deletion are unaffected.
+    IF OLD.status = 'Scheduled'
+       AND NEW.status IS DISTINCT FROM OLD.status
+       AND NEW.status IN ('WaitingForCheckIn', 'Veto', 'WaitingForServer', 'Live')
+       AND public.tournament_match_is_pre_start(NEW.id) THEN
+        NEW.status := 'Scheduled';
+    END IF;
+
     IF OLD.server_id IS NOT NULL AND (NEW.server_id IS NULL OR OLD.server_id != NEW.server_id) THEN
         UPDATE servers SET reserved_by_match_id = null WHERE id = OLD.server_id;
     END IF;

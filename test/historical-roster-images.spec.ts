@@ -531,6 +531,14 @@ describe("historical tournament roster image snapshots", () => {
        LIMIT 1`,
       [bracket.match_id],
     );
+    // The tournament itself has to be under way before one of its matches can
+    // go Live: a match materialized during RegistrationClosed is parked in
+    // 'Scheduled' until the tournament's scheduled start, and the pre-start
+    // guard refuses to move it onto the playable ladder before then (see
+    // tournament-pre-start-playability.spec.ts). This test is about roster
+    // snapshots surviving a Live/Finished match, not about that gate, so it
+    // sets up the same state production would have.
+    await setStatus(tournament, "Live");
     await postgres.query("UPDATE matches SET status = 'Live' WHERE id = $1", [
       bracket.match_id,
     ]);

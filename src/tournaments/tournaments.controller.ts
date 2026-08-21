@@ -592,6 +592,120 @@ export class TournamentsController {
     return { success: true };
   }
 
+  // Organizer/admin counterpart to a player's own Solo Random sign-up.
+  //
+  // The ordinary sign-up path is a direct Hasura insert on
+  // tournament_individual_signups, whose `user` insert permission is pinned
+  // to `player_steam_id: _eq: X-Hasura-User-Id` -- self-signup only. Rather
+  // than widening that permission (which would let any user register any
+  // other player), organizer-initiated sign-ups go through this action and
+  // the insert is performed with elevated access only after the organizer
+  // check passes.
+  //
+  // Everything downstream is deliberately the *same* pipeline a self-signup
+  // uses: a plain INSERT, so tbi_tournament_individual_signups applies the
+  // first-come-first-served capacity cap (overflow -> Waitlisted) and the
+  // late-signup auto-check-in (registering while the attendance window is
+  // open stamps checked_in_at) exactly as it would for the player
+  // themselves. created_at defaults to now(), so an organizer-added player
+  // takes their priority from when they were actually added -- there is no
+  // way to backdate it through here, and final team generation treats them
+  // like any other signup.
+  @HasuraAction()
+  public async addTournamentIndividualPlayer(data: {
+    user: User;
+    tournament_id: string;
+    player_steam_id: string;
+  }) {
+    const { tournament_id } = data;
+    const playerSteamId = String(data.player_steam_id ?? "").trim();
+
+    if (!/^\d+$/.test(playerSteamId)) {
+      throw Error("invalid player steam id");
+    }
+
+    const { tournaments_by_pk: tournament } = await this.hasura.query(
+      {
+        tournaments_by_pk: {
+          __args: { id: tournament_id },
+          id: true,
+          is_organizer: true,
+          status: true,
+          options: { individual_registration_enabled: true },
+        },
+      },
+      data.user.steam_id,
+    );
+
+    if (!tournament) {
+      throw Error("tournament not found");
+    }
+    // is_tournament_organizer() already covers the global admin /
+    // administrator / tournament_organizer roles as well as this
+    // tournament's own organizer and co-organizers -- no separate role
+    // hierarchy is introduced here.
+    if (!tournament.is_organizer) {
+      throw Error("not the tournament organizer");
+    }
+    if (!tournament.options?.individual_registration_enabled) {
+      throw Error("individual registration is not enabled for this tournament");
+    }
+    if (tournament.status !== "RegistrationOpen") {
+      throw Error("registration is not open for this tournament");
+    }
+
+    const players = await this.postgres.query<Array<{ steam_id: string }>>(
+      `SELECT steam_id FROM public.players WHERE steam_id = $1`,
+      [playerSteamId],
+    );
+    if (!players.length) {
+      throw Error("player not found");
+    }
+
+    // Same canonical role comparison the roster path uses
+    // (player_meets_min_role -> is_above_role), evaluated against the target
+    // player, not the acting organizer.
+    const [{ eligible }] = await this.postgres.query<
+      Array<{ eligible: boolean }>
+    >(`SELECT public.player_meets_min_role($1, $2) AS eligible`, [
+      tournament_id,
+      playerSteamId,
+    ]);
+    if (!eligible) {
+      throw Error("player does not meet the minimum role for this tournament");
+    }
+
+    const existing = await this.postgres.query<Array<{ status: string }>>(
+      `SELECT status FROM public.tournament_individual_signups
+       WHERE tournament_id = $1 AND player_steam_id = $2`,
+      [tournament_id, playerSteamId],
+    );
+    if (existing.length) {
+      throw Error("player is already signed up for this tournament");
+    }
+
+    const [inserted] = await this.postgres.query<
+      Array<{ status: string; checked_in_at: Date | null }>
+    >(
+      `INSERT INTO public.tournament_individual_signups (tournament_id, player_steam_id)
+       VALUES ($1, $2)
+       RETURNING status, checked_in_at`,
+      [tournament_id, playerSteamId],
+    );
+
+    this.logger.log(
+      `[${tournament_id}] organizer ${data.user.steam_id} added individual player ${playerSteamId} (${inserted.status}${
+        inserted.checked_in_at ? ", auto checked-in" : ""
+      })`,
+    );
+
+    return {
+      success: true,
+      status: inserted.status,
+      checked_in: inserted.checked_in_at !== null,
+    };
+  }
+
   // Team-tournament counterpart to checkIntoTournament above: same shared
   // attendance window (tournaments.individual_check_in_ends_at), but
   // confirms the whole team at once via the captain/authorized

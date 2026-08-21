@@ -110,10 +110,18 @@ describe("tournament match prep-window timeout baseline (SQL-driven)", () => {
 
   // Case 1 + 4: the deadline is the scheduled start plus the normal
   // check-in duration -- not "now + duration", and not absent.
+  //
+  // goLive is required now: a match materialized before its tournament's
+  // start is parked in 'Scheduled' (prepared, not playable -- see
+  // tournament-pre-start-playability.spec.ts), and a Scheduled match
+  // deliberately carries no cancels_at. The deadline is stamped when the
+  // tournament actually starts, and the value it lands on is exactly what
+  // this test is about.
   it("materialized 15 minutes early: cancels_at is scheduled start + check_in_duration (19:00 -> 19:05)", async () => {
     const { tournament, start } = await launch({
       startOffsetMinutes: 15,
       checkInDuration: 5,
+      goLive: true,
     });
 
     const matches = await round1Matches(tournament.id);
@@ -130,8 +138,10 @@ describe("tournament match prep-window timeout baseline (SQL-driven)", () => {
     }
   });
 
-  // Case 2: match check-in is genuinely open during the prep window.
-  it("match check-in is open during the prep window, before the tournament is Live", async () => {
+  // Case 2: the prep window prepares the match without opening it. Match
+  // check-in used to start here, which is what made a 12:20 tournament
+  // playable at 12:15; it now waits for the tournament's real start.
+  it("match check-in is NOT open during the prep window, before the tournament is Live", async () => {
     const { tournament } = await launch({ startOffsetMinutes: 15 });
 
     const [{ status: tournamentStatus }] = await postgres.query<
@@ -140,18 +150,21 @@ describe("tournament match prep-window timeout baseline (SQL-driven)", () => {
     expect(tournamentStatus).toBe("RegistrationClosed");
 
     const matches = await round1Matches(tournament.id);
+    expect(matches.length).toBeGreaterThan(0);
     for (const match of matches) {
-      expect(match.status).toBe("WaitingForCheckIn");
+      expect(match.status).toBe("Scheduled");
     }
   });
 
   // Case 3: nothing expires before the tournament starts. Asserted two ways:
-  // the deadline itself is still in the future and past the start, and the
-  // match is outside CancelExpiredMatches' selection criteria.
+  // once open, the deadline itself is still in the future and past the start,
+  // and the match is outside CancelExpiredMatches' selection criteria
+  // throughout.
   it("does not become cancel-eligible before the scheduled start", async () => {
     const { tournament, start } = await launch({
       startOffsetMinutes: 15,
       checkInDuration: 5,
+      goLive: true,
     });
 
     const matches = await round1Matches(tournament.id);
@@ -235,6 +248,13 @@ describe("tournament match prep-window timeout baseline (SQL-driven)", () => {
       tournament.organizer,
       "RegistrationClosed",
     );
+    // Taken Live before the bracket schedules itself, so this test stays
+    // about scheduled_at PRECEDENCE rather than the separate pre-start
+    // parking rule (tournament-pre-start-playability.spec.ts). Nothing is
+    // auto-scheduled by the transition -- auto_start is off, and the
+    // Live-release only opens matches due around kickoff, not one deliberately
+    // parked 90 minutes out.
+    await tfx.setStatus(tournament.id, tournament.organizer, "Live");
 
     const brackets = await tfx.getBrackets(tournament.stageIds[0]);
     const target = brackets.find(
@@ -268,26 +288,31 @@ describe("tournament match prep-window timeout baseline (SQL-driven)", () => {
   });
 
   // Manual early start: the organizer flipping a 19:00 tournament Live at
-  // 18:50 must not shorten an already-issued deadline. Documents that the
-  // generous 19:05 deadline simply stands.
-  it("manual early Start Tournament leaves the already-issued deadline generous, never shortening it", async () => {
+  // 18:50 gets the generous 19:05 deadline, not "now + 5" = 18:55. Nothing
+  // is counting down before they act.
+  it("manual early Start Tournament issues the generous deadline, never a shortened now-based one", async () => {
     const { tournament, start } = await launch({
       startOffsetMinutes: 15,
       checkInDuration: 5,
     });
 
-    const before = await round1Matches(tournament.id);
-    const beforeDeadlines = before.map((m) => m.cancels_at!.getTime());
+    for (const match of await round1Matches(tournament.id)) {
+      expect(match.status).toBe("Scheduled");
+      expect(match.cancels_at).toBeNull();
+    }
 
     // Organizer starts early.
     await tfx.setStatus(tournament.id, tournament.organizer, "Live");
 
     const after = await round1Matches(tournament.id);
-    const afterDeadlines = after.map((m) => m.cancels_at!.getTime());
-
-    expect(afterDeadlines).toEqual(beforeDeadlines);
-    for (const deadline of afterDeadlines) {
-      expect(deadline).toBeGreaterThan(start.getTime());
+    expect(after.length).toBeGreaterThan(0);
+    for (const match of after) {
+      expect(match.status).toBe("WaitingForCheckIn");
+      expect(match.cancels_at!.getTime()).toBeGreaterThan(start.getTime());
+      const minutesAfterStart =
+        (match.cancels_at!.getTime() - start.getTime()) / 60_000;
+      expect(minutesAfterStart).toBeGreaterThan(4.9);
+      expect(minutesAfterStart).toBeLessThan(5.1);
     }
   });
 });

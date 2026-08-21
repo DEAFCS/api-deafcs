@@ -610,7 +610,7 @@ describe("tournament attendance check-in (SQL-driven)", () => {
     // scheduled start, rather than assuming "nothing is playable". Asserted
     // rather than described so a future change to match timing fails here
     // loudly instead of silently shifting when players can act.
-    it("18:45-19:00 prep window: first-round matches exist and are already in match check-in while the tournament is still RegistrationClosed", async () => {
+    it("18:45-19:00 prep window: first-round matches exist but are parked in Scheduled, not playable, while the tournament is still RegistrationClosed", async () => {
       const t = await tfx.createTournament(
         [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 4 }],
         "Wingman",
@@ -651,24 +651,46 @@ describe("tournament attendance check-in (SQL-driven)", () => {
       );
 
       expect(matches.length).toBeGreaterThan(0);
-      // Every materialized match is in WaitingForCheckIn -- match check-in
-      // (a separate system from tournament attendance check-in) is genuinely
-      // OPEN during the prep window, before the tournament goes Live.
+      // Prepared, not playable. Every materialized match sits in 'Scheduled'
+      // -- the bracket and opponents are visible so teams can prepare, but
+      // match check-in, veto and the join/start flow stay shut until the
+      // tournament's own scheduled start. Live testing found the previous
+      // behavior (opening immediately at the cutoff) let a 12:20 tournament
+      // actually be played at 12:15. The gate itself is covered in
+      // tournament-pre-start-playability.spec.ts.
       for (const match of matches) {
-        expect(match.status).toBe("WaitingForCheckIn");
+        expect(match.status).toBe("Scheduled");
+        expect(match.cancels_at).toBeNull();
       }
 
-      // Opening match check-in early must give players EXTRA preparation
-      // time, never move the no-show deadline earlier than the scheduled
-      // start. schedule_tournament_match() bases matches.scheduled_at on the
+      // At kickoff the ordinary flow opens, and the no-show deadline lands
+      // AFTER the scheduled start -- never the ten-minutes-before-kickoff
+      // deadline the scheduled_at precedence fix removed.
+      // schedule_tournament_match() bases matches.scheduled_at on the
       // tournament's start (see tournament-match-prep-timeout.spec.ts for
-      // the full precedence rules), so the deadline lands after kickoff
-      // rather than ten minutes before it.
+      // the full precedence rules). The tournament is taken Live with its
+      // 19:00 start left alone -- an organizer starting early, which is the
+      // stricter case: the deadline must still be 19:05, not 18:50.
+      await tfx.setStatus(t.id, t.organizer, "Live");
+
       const [{ start }] = await postgres.query<Array<{ start: string }>>(
         `SELECT start FROM tournaments WHERE id = $1`,
         [t.id],
       );
-      const timed = matches.filter((match) => match.cancels_at !== null);
+      const opened = await postgres.query<
+        Array<{ status: string; cancels_at: string | null }>
+      >(
+        `SELECT m.status, m.cancels_at
+         FROM matches m
+         JOIN tournament_brackets tb ON tb.match_id = m.id
+         JOIN tournament_stages ts ON ts.id = tb.tournament_stage_id
+         WHERE ts.tournament_id = $1`,
+        [t.id],
+      );
+      for (const match of opened) {
+        expect(match.status).toBe("WaitingForCheckIn");
+      }
+      const timed = opened.filter((match) => match.cancels_at !== null);
       expect(timed.length).toBeGreaterThan(0);
       for (const match of timed) {
         expect(
