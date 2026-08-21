@@ -706,6 +706,203 @@ export class TournamentsController {
     };
   }
 
+  // Organizer/admin counterpart to checkIntoTournament: confirms attendance
+  // on another player's behalf, for the Solo Random players list where the
+  // organizer can see who is still pending but previously had no way to act
+  // on it.
+  //
+  // Deliberately enforces the SAME window rule as the player's own
+  // check-in (individual_check_in_ends_at set and still in the future)
+  // rather than a privileged bypass: an organizer may check somebody in
+  // early or on request, but not resurrect attendance after the cutoff has
+  // passed, which would undermine the no-show finalization that
+  // ProcessTournamentCheckInExpiry performs off the same timestamp.
+  //
+  // Waitlisted players are eligible too, mirroring
+  // tbi_tournament_individual_signups' late-signup auto-check-in: a
+  // checked-in waitlisted player can still qualify for the final pool if a
+  // higher-priority player no-shows.
+  @HasuraAction()
+  public async checkInTournamentIndividualPlayer(data: {
+    user: User;
+    tournament_id: string;
+    player_steam_id: string;
+  }) {
+    const { tournament_id } = data;
+    const playerSteamId = String(data.player_steam_id ?? "").trim();
+
+    if (!/^\d+$/.test(playerSteamId)) {
+      throw Error("invalid player steam id");
+    }
+
+    const { tournaments_by_pk: tournament } = await this.hasura.query(
+      {
+        tournaments_by_pk: {
+          __args: { id: tournament_id },
+          id: true,
+          is_organizer: true,
+          individual_check_in_ends_at: true,
+          options: { individual_registration_enabled: true },
+        },
+      },
+      data.user.steam_id,
+    );
+
+    if (!tournament) {
+      throw Error("tournament not found");
+    }
+    if (!tournament.is_organizer) {
+      throw Error("not the tournament organizer");
+    }
+    if (!tournament.options?.individual_registration_enabled) {
+      throw Error("individual registration is not enabled for this tournament");
+    }
+    if (
+      !tournament.individual_check_in_ends_at ||
+      new Date(tournament.individual_check_in_ends_at as unknown as string) <=
+        new Date()
+    ) {
+      throw Error("check-in is not currently open for this tournament");
+    }
+
+    const existing = await this.postgres.query<
+      Array<{ status: string; checked_in_at: Date | null }>
+    >(
+      `SELECT status, checked_in_at FROM public.tournament_individual_signups
+       WHERE tournament_id = $1 AND player_steam_id = $2`,
+      [tournament_id, playerSteamId],
+    );
+    const signup = existing.at(0);
+
+    if (!signup) {
+      throw Error("player is not signed up for this tournament");
+    }
+    if (!["Registered", "Waitlisted"].includes(signup.status)) {
+      throw Error(`player is not eligible to check in (${signup.status})`);
+    }
+    // Idempotent: checking in an already-confirmed player is a clean no-op
+    // rather than an error, so a double-click or a stale list never fails.
+    if (signup.checked_in_at !== null) {
+      return { success: true, status: signup.status, already_checked_in: true };
+    }
+
+    await this.postgres.query(
+      `UPDATE public.tournament_individual_signups
+       SET checked_in_at = now()
+       WHERE tournament_id = $1 AND player_steam_id = $2`,
+      [tournament_id, playerSteamId],
+    );
+
+    this.logger.log(
+      `[${tournament_id}] organizer ${data.user.steam_id} checked in individual player ${playerSteamId}`,
+    );
+
+    return { success: true, status: signup.status, already_checked_in: false };
+  }
+
+  // Removes an individual sign-up, covering both directions the Solo Random
+  // players list needs: an organizer removing someone, and a player leaving
+  // a tournament they signed up for. Both share exactly the same lifecycle
+  // guards, so they live in one action rather than two that could drift.
+  //
+  // Physical DELETE, not status = 'Removed'. 'Removed' has one specific
+  // meaning in this system -- "did not check in before the window closed,
+  // replaced from the waitlist" (see the enum's own description, and
+  // ProcessTournamentCheckInExpiry, which is the only thing that sets it).
+  // The players list renders those rows as "Removed for not checking in".
+  // Marking a voluntary leave or an organizer removal that way would label
+  // people as no-shows who never were. DELETE is also already the
+  // established model for leaving: it is what the existing self-leave in
+  // TournamentJoinForm/TournamentDetail does today. Freeing the row also
+  // keeps the capacity cap correct on its own, since
+  // tbi_tournament_individual_signups counts live Registered rows.
+  //
+  // Waitlist promotion is deliberately NOT done here. Promotion is owned by
+  // ProcessTournamentCheckInExpiry at the cutoff, driven by no-shows; a
+  // removal during RegistrationOpen simply frees a slot, and the existing
+  // capacity trigger places the next signup correctly.
+  @HasuraAction()
+  public async removeTournamentIndividualPlayer(data: {
+    user: User;
+    tournament_id: string;
+    player_steam_id: string;
+  }) {
+    const { tournament_id } = data;
+    const playerSteamId = String(data.player_steam_id ?? "").trim();
+
+    if (!/^\d+$/.test(playerSteamId)) {
+      throw Error("invalid player steam id");
+    }
+
+    const { tournaments_by_pk: tournament } = await this.hasura.query(
+      {
+        tournaments_by_pk: {
+          __args: { id: tournament_id },
+          id: true,
+          is_organizer: true,
+          status: true,
+          options: { individual_registration_enabled: true },
+        },
+      },
+      data.user.steam_id,
+    );
+
+    if (!tournament) {
+      throw Error("tournament not found");
+    }
+    if (!tournament.options?.individual_registration_enabled) {
+      throw Error("individual registration is not enabled for this tournament");
+    }
+
+    // Either the organizer acting on someone else, or a player acting on
+    // their own sign-up. Nothing else.
+    const isSelf = String(data.user.steam_id) === playerSteamId;
+    if (!tournament.is_organizer && !isSelf) {
+      throw Error("not authorized to remove this player");
+    }
+
+    // The registration/check-in cutoff is exactly the RegistrationOpen ->
+    // RegistrationClosed transition ProcessTournamentAttendance performs, so
+    // the status IS the cutoff guard -- no separate clock comparison that
+    // could disagree with it. Past that point the participant pool is being
+    // finalized and neither side may still edit it here.
+    if (tournament.status !== "RegistrationOpen") {
+      throw Error(
+        "registration is closed for this tournament, the participant list is final",
+      );
+    }
+
+    const existing = await this.postgres.query<Array<{ status: string }>>(
+      `SELECT status FROM public.tournament_individual_signups
+       WHERE tournament_id = $1 AND player_steam_id = $2`,
+      [tournament_id, playerSteamId],
+    );
+    const signup = existing.at(0);
+
+    if (!signup) {
+      throw Error("player is not signed up for this tournament");
+    }
+    // Belt and braces alongside the status guard above: once a player has
+    // been placed on a generated team they are part of the bracket.
+    if (signup.status === "Assigned") {
+      throw Error("player has already been assigned to a team");
+    }
+
+    await this.postgres.query(
+      `DELETE FROM public.tournament_individual_signups
+       WHERE tournament_id = $1 AND player_steam_id = $2`,
+      [tournament_id, playerSteamId],
+    );
+
+    this.logger.log(
+      `[${tournament_id}] ${
+        isSelf ? "player" : `organizer ${data.user.steam_id}`
+      } removed individual signup for ${playerSteamId} (was ${signup.status})`,
+    );
+
+    return { success: true, was_self: isSelf };
+  }
+
   // Team-tournament counterpart to checkIntoTournament above: same shared
   // attendance window (tournaments.individual_check_in_ends_at), but
   // confirms the whole team at once via the captain/authorized

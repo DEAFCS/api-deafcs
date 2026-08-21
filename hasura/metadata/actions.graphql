@@ -263,6 +263,20 @@ type Mutation {
 }
 
 type Mutation {
+  checkInTournamentIndividualPlayer(
+    tournament_id: uuid!
+    player_steam_id: String!
+  ): CheckInTournamentIndividualPlayerOutput
+}
+
+type Mutation {
+  removeTournamentIndividualPlayer(
+    tournament_id: uuid!
+    player_steam_id: String!
+  ): RemoveTournamentIndividualPlayerOutput
+}
+
+type Mutation {
   denyInvite(
     invite_id: uuid!
     type: String!
@@ -1034,6 +1048,17 @@ type AddTournamentIndividualPlayerOutput {
   success: Boolean!
   status: String!
   checked_in: Boolean!
+}
+
+type CheckInTournamentIndividualPlayerOutput {
+  success: Boolean!
+  status: String!
+  already_checked_in: Boolean!
+}
+
+type RemoveTournamentIndividualPlayerOutput {
+  success: Boolean!
+  was_self: Boolean!
 }
 
 type DraftGamePreviewPlayer {

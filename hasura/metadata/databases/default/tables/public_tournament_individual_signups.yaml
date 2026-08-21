@@ -60,10 +60,23 @@ select_permissions:
 delete_permissions:
   - role: user
     permission:
+      # Self-leave only, and only while the participant list is still open.
+      # The registration/check-in cutoff is the RegistrationOpen ->
+      # RegistrationClosed transition ProcessTournamentAttendance performs,
+      # so gating on it here keeps this direct path in step with
+      # removeTournamentIndividualPlayer rather than offering a way around
+      # its cutoff guard. Waitlisted is included because a waitlisted player
+      # may equally change their mind; Assigned is excluded, since by then
+      # they are on a generated team.
       filter:
         _and:
           - player_steam_id:
               _eq: X-Hasura-User-Id
           - status:
-              _eq: Registered
+              _in:
+                - Registered
+                - Waitlisted
+          - tournament:
+              status:
+                _eq: RegistrationOpen
     comment: ""
