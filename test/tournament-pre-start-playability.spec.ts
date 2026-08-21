@@ -268,11 +268,10 @@ describe("tournament pre-start playability guard (SQL-driven)", () => {
         expect(match.status).toBe("Scheduled");
       }
 
-      // What CheckForTournamentStart does once `start` is reached.
-      await postgres.query(
-        `UPDATE tournaments SET start = now() - interval '1 second' WHERE id = $1`,
-        [tournament.id],
-      );
+      // Taken Live directly rather than back-dating `start`: the schedule
+      // freezes once attendance opens (tbu_tournaments), and production never
+      // moves a start anyway, the clock advances. Either way this is the
+      // transition CheckForTournamentStart performs.
       await tfx.setStatus(tournament.id, tournament.organizer, "Live");
 
       for (const match of await round1(tournament.id)) {
@@ -287,10 +286,6 @@ describe("tournament pre-start playability guard (SQL-driven)", () => {
         startOffsetMinutes: 5,
       });
 
-      await postgres.query(
-        `UPDATE tournaments SET start = now() - interval '1 second' WHERE id = $1`,
-        [tournament.id],
-      );
       await tfx.setStatus(tournament.id, tournament.organizer, "Live");
 
       for (const match of await round1(tournament.id)) {
@@ -306,10 +301,6 @@ describe("tournament pre-start playability guard (SQL-driven)", () => {
     // the guard refused above now succeeds.
     it("allows veto once the tournament is Live", async () => {
       const { tournament } = await closeRegistration({ startOffsetMinutes: 5 });
-      await postgres.query(
-        `UPDATE tournaments SET start = now() - interval '1 second' WHERE id = $1`,
-        [tournament.id],
-      );
       await tfx.setStatus(tournament.id, tournament.organizer, "Live");
 
       const [match] = await round1(tournament.id);
@@ -351,10 +342,6 @@ describe("tournament pre-start playability guard (SQL-driven)", () => {
     );
     expect(before.pre_start).toBe(true);
 
-    await postgres.query(
-      `UPDATE tournaments SET start = now() - interval '1 second' WHERE id = $1`,
-      [tournament.id],
-    );
     await tfx.setStatus(tournament.id, tournament.organizer, "Live");
 
     const [after] = await postgres.query<Array<{ pre_start: boolean }>>(

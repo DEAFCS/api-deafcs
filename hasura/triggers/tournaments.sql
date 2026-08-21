@@ -174,6 +174,39 @@ CREATE OR REPLACE FUNCTION public.tbu_tournaments() RETURNS TRIGGER
     LANGUAGE plpgsql
     AS $$
 BEGIN
+    -- The attendance schedule freezes once check-in has opened.
+    --
+    -- start, attendance_check_in_open_before_minutes and
+    -- attendance_check_in_close_before_minutes together define the window the
+    -- scheduler (ProcessTournamentAttendance) and every registered participant
+    -- are already acting on. Editing any of them mid-window retroactively
+    -- moves an active deadline, which is exactly the confusing state live
+    -- testing produced. The UI disables these fields, but the Hasura update
+    -- permission for `user`/`tournament_organizer` exposes all three columns
+    -- behind nothing more than is_organizer, so the UI alone is not a control.
+    --
+    -- Evaluated against OLD on purpose: deciding from NEW would let an
+    -- organizer move the start into the future in the same statement and
+    -- thereby recalculate the window out of the frozen period, escaping the
+    -- lock. The persisted schedule is what determines whether it is frozen.
+    --
+    -- Applies to every tournament using attendance, team and Solo Random
+    -- alike -- this is about the attendance window, not registration type. No
+    -- system path writes these columns after creation (the jobs only touch
+    -- status and individual_check_in_ends_at), so this can only ever reject an
+    -- organizer edit.
+    IF (
+           NEW.start IS DISTINCT FROM OLD.start
+        OR NEW.attendance_check_in_open_before_minutes
+             IS DISTINCT FROM OLD.attendance_check_in_open_before_minutes
+        OR NEW.attendance_check_in_close_before_minutes
+             IS DISTINCT FROM OLD.attendance_check_in_close_before_minutes
+       )
+       AND public.tournament_attendance_started(OLD) THEN
+        RAISE EXCEPTION USING ERRCODE = '22000',
+            MESSAGE = 'Schedule and check-in timing cannot be changed after check-in has started';
+    END IF;
+
     IF NEW.status IS DISTINCT FROM OLD.status THEN
         -- A league owns the lifecycle of its division/playoff tournaments;
         -- resetting or cancelling one directly corrupts the season. Only allow
