@@ -64,15 +64,39 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    tournament_status text;
+    tournament public.tournaments;
 BEGIN
-    SELECT status
-    INTO tournament_status
+    SELECT * INTO tournament
     FROM tournaments
     WHERE id = OLD.tournament_id;
 
     -- If tournament doesn't exist (cascade delete), allow the team removal
-    IF tournament_status IS NOT NULL AND tournament_status IN ('Cancelled', 'CancelledMinTeams', 'Finished') THEN
+    IF tournament.id IS NULL THEN
+        RETURN OLD;
+    END IF;
+
+    -- Terminal statuses: nobody may remove a team, organizer included --
+    -- unchanged from before this check.
+    IF tournament.status IN ('Cancelled', 'CancelledMinTeams', 'Finished') THEN
+        RAISE EXCEPTION 'Cannot leave an active tournament' USING ERRCODE = '22000';
+    END IF;
+
+    -- Defense-in-depth for the participant-facing delete_permissions fix on
+    -- tournament_teams (public_tournament_teams.yaml): once registration
+    -- has closed the bracket exists, so a normal participant/captain must
+    -- not be able to remove the team even via a direct DB/service call that
+    -- bypasses Hasura's own permission filter. Organizers/admins are
+    -- unaffected -- is_tournament_organizer() is the exact same function
+    -- Hasura's own is_organizer computed field and the sibling
+    -- can_pause_tournament/can_close_tournament_registration checks already
+    -- use, so this can't disagree with what the permission layer already
+    -- decided. current_setting('hasura.user', true) is NULL for an internal
+    -- service call with no session set, which is_tournament_organizer folds
+    -- to false/NULL -- PL/pgSQL treats a NULL IF condition as not-true, so
+    -- an internal call with no hasura.user is left exactly as before this
+    -- change (not newly blocked).
+    IF tournament.status IN ('RegistrationClosed', 'Live', 'Paused')
+       AND NOT is_tournament_organizer(tournament, current_setting('hasura.user', true)::json) THEN
         RAISE EXCEPTION 'Cannot leave an active tournament' USING ERRCODE = '22000';
     END IF;
 

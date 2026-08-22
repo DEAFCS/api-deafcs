@@ -195,33 +195,50 @@ delete_permissions:
   - role: user
     permission:
       filter:
-        _and:
-          - _or:
-              - team:
-                  roster:
-                    _and:
-                      - role:
-                          _eq: Admin
-                      - player_steam_id:
-                          _eq: X-Hasura-User-Id
-              - team:
-                  owner_steam_id:
-                    _eq: X-Hasura-User-Id
-              - team:
-                  captain_steam_id:
-                    _eq: X-Hasura-User-Id
-              - _and:
-                  - team_id:
-                      _is_null: true
-                  - owner_steam_id:
-                      _eq: X-Hasura-User-Id
+        _or:
+          # Tournament organizer (self via organizer_steam_id/tournament_organizers,
+          # or an elevated staff role) keeps today's exact behavior: may
+          # remove a team at any status except the three terminal ones,
+          # independent of the narrower participant window below.
+          - _and:
               - tournament:
                   is_organizer:
                     _eq: true
-          - tournament:
-              status:
-                _nin:
-                  - Cancelled
-                  - CancelledMinTeams
-                  - Finished
+              - tournament:
+                  status:
+                    _nin:
+                      - Cancelled
+                      - CancelledMinTeams
+                      - Finished
+          # Normal participant (roster admin, team owner/captain, or the
+          # owner of an ad-hoc/no-real-team registration): may only leave
+          # before the tournament locks. Once registration closes the
+          # bracket exists, so a captain can no longer unilaterally pull the
+          # team -- narrowed from the previous _nin-terminal-statuses-only
+          # window, which also permitted RegistrationClosed/Live/Paused.
+          - _and:
+              - _or:
+                  - team:
+                      roster:
+                        _and:
+                          - role:
+                              _eq: Admin
+                          - player_steam_id:
+                              _eq: X-Hasura-User-Id
+                  - team:
+                      owner_steam_id:
+                        _eq: X-Hasura-User-Id
+                  - team:
+                      captain_steam_id:
+                        _eq: X-Hasura-User-Id
+                  - _and:
+                      - team_id:
+                          _is_null: true
+                      - owner_steam_id:
+                          _eq: X-Hasura-User-Id
+              - tournament:
+                  status:
+                    _in:
+                      - Setup
+                      - RegistrationOpen
     comment: ""
