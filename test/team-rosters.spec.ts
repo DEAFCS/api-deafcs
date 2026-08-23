@@ -31,6 +31,7 @@ describe("teams, rosters and lineup membership (SQL-driven)", () => {
     await postgres.query("DELETE FROM matches");
     await postgres.query("DELETE FROM match_options");
     await postgres.query("DELETE FROM teams");
+    await postgres.query("DELETE FROM player_terms_acceptances");
     await postgres.query("DELETE FROM players");
   });
 

@@ -26,12 +26,21 @@ describe("draft game pick order (SQL-driven)", () => {
 
   const nextSteam = () => (76561190000000000n + BigInt(++seq)).toString();
 
+  // Accepts the live terms_version so seeded players (including captains,
+  // whose picks now run through the Terms-acceptance trigger check) aren't
+  // collaterally blocked by an unrelated gate this suite isn't testing.
   const seedPlayer = async (name: string) => {
     const steam = nextSteam();
     await postgres.query("INSERT INTO players (steam_id, name) VALUES ($1, $2)", [
       steam,
       name,
     ]);
+    await postgres.query(
+      `INSERT INTO player_terms_acceptances (player_steam_id, terms_version)
+       SELECT $1, value FROM settings WHERE name = 'public.terms_version'
+       ON CONFLICT (player_steam_id, terms_version) DO NOTHING`,
+      [steam],
+    );
     return steam;
   };
 

@@ -28,6 +28,9 @@ insert_permissions:
           - tournament:
               meets_min_role:
                 _eq: true
+          - player:
+              has_accepted_current_terms:
+                _eq: true
       columns:
         - tournament_id
         - player_steam_id

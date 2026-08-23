@@ -18,6 +18,7 @@ import { HasuraService } from "src/hasura/hasura.service";
 import { isRoleAbove } from "src/utilities/isRoleAbove";
 import { e_player_roles_enum } from "generated";
 import { SocketsService } from "src/sockets/sockets.service";
+import { TermsService } from "src/terms/terms.service";
 
 @WebSocketGateway({
   path: "/ws/web",
@@ -32,6 +33,7 @@ export class MatchmakingGateway {
     public readonly matchmakeService: MatchmakeService,
     public readonly matchmakingLobbyService: MatchmakingLobbyService,
     private readonly cache: CacheService,
+    private readonly terms: TermsService,
   ) {
     this.redis = this.redisManager.getConnection();
   }
@@ -223,6 +225,20 @@ export class MatchmakingGateway {
         throw new JoinQueueError("Unable to find Player Lobby");
       }
 
+      // Every party member must have accepted the current Terms, not just
+      // the caller -- otherwise an accepted leader could bring an
+      // unaccepted party member into matchmaking with them. lobby.id is
+      // passed so the catch block below broadcasts this to the whole
+      // party, not just whoever triggered the join.
+      for (const player of lobby.players) {
+        if (!(await this.terms.hasAcceptedCurrentTerms(player.steam_id))) {
+          throw new JoinQueueError(
+            "All party members must accept the current Terms of Service and DEAFCS Rules before joining queue",
+            lobby.id,
+          );
+        }
+      }
+
       try {
         await this.cache.lock(`matchmaking:verify:${lobby.id}`, async () => {
           await this.matchmakingLobbyService.verifyLobby(lobby, user, type);
@@ -310,6 +326,21 @@ export class MatchmakingGateway {
       return;
     }
     const { confirmationId } = data;
+
+    if (!(await this.terms.hasAcceptedCurrentTerms(user.steam_id))) {
+      await this.redis.publish(
+        `send-message-to-steam-id`,
+        JSON.stringify({
+          steamId: user.steam_id,
+          event: "matchmaking:error",
+          data: {
+            message:
+              "You must accept the current Terms of Service and DEAFCS Rules before confirming a match",
+          },
+        }),
+      );
+      return;
+    }
 
     await this.matchmakeService.playerConfirmMatchmaking(
       confirmationId,

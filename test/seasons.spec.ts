@@ -31,6 +31,7 @@ describe("seasons (SQL-driven)", () => {
     // player_season_stats; deleting matches cascades player_elo.
     await postgres.query("DELETE FROM seasons");
     await postgres.query("DELETE FROM matches");
+    await postgres.query("DELETE FROM player_terms_acceptances");
     await postgres.query("DELETE FROM players");
   });
 

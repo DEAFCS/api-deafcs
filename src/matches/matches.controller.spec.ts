@@ -48,6 +48,7 @@ describe("MatchesController", () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
     );
   });
 
@@ -86,6 +87,7 @@ describe("MatchesController cancellation action", () => {
       canCancel: jest.fn().mockResolvedValue(false),
       updateMatchStatus: jest.fn(),
     };
+    controller.terms = { assertAccepted: jest.fn() };
 
     await expect(
       controller.cancelMatch({
@@ -103,6 +105,7 @@ describe("MatchesController cancellation action", () => {
       canCancel: jest.fn().mockResolvedValue(true),
       updateMatchStatus: jest.fn().mockResolvedValue(undefined),
     };
+    controller.terms = { assertAccepted: jest.fn() };
 
     await expect(
       controller.cancelMatch({

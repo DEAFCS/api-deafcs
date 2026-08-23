@@ -16,6 +16,7 @@ import { ScrimsController } from "./scrims.controller";
 import { TeamCalendarController } from "./team-calendar.controller";
 import { MatchScrims } from "./jobs/MatchScrims";
 import { SuggestTeams } from "./jobs/SuggestTeams";
+import { TermsModule } from "../terms/terms.module";
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { SuggestTeams } from "./jobs/SuggestTeams";
     PostgresModule,
     ConfigModule,
     NotificationsModule,
+    TermsModule,
     forwardRef(() => MatchesModule),
     BullModule.registerQueue({
       name: ScrimQueues.ScrimMatcher,

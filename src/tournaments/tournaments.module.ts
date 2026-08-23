@@ -9,6 +9,7 @@ import { AwardsModule } from "../awards/awards.module";
 import { loggerFactory } from "../utilities/LoggerFactory";
 import { NotificationsModule } from "../notifications/notifications.module";
 import { TournamentTeamGenerationModule } from "./tournament-team-generation.module";
+import { TermsModule } from "../terms/terms.module";
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { TournamentTeamGenerationModule } from "./tournament-team-generation.mod
     ClipsModule,
     DiscordTournamentVoiceModule,
     PostgresModule,
+    TermsModule,
     AwardsModule,
     NotificationsModule,
     TournamentTeamGenerationModule,

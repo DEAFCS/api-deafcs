@@ -15,12 +15,14 @@ import { MatchmakingQueues } from "./enums/MatchmakingQueues";
 import { CancelMatchMaking } from "./jobs/CancelMatchMaking";
 import { MatchmakingController } from "./matchmaking.controller";
 import { MarkPlayerOffline } from "./jobs/MarkPlayerOffline";
+import { TermsModule } from "src/terms/terms.module";
 
 @Module({
   imports: [
     RedisModule,
     HasuraModule,
     CacheModule,
+    TermsModule,
     forwardRef(() => MatchesModule),
     BullModule.registerQueue({
       name: MatchmakingQueues.Matchmaking,

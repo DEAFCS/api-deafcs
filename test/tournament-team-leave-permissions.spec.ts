@@ -66,6 +66,7 @@ describe("tournament_teams delete permission narrowing", () => {
     await db.postgres.query("DELETE FROM matches");
     await db.postgres.query("DELETE FROM tournaments");
     await db.postgres.query("DELETE FROM teams");
+    await db.postgres.query("DELETE FROM player_terms_acceptances");
     await db.postgres.query("DELETE FROM players");
   });
 

@@ -81,6 +81,9 @@ describe("TournamentsController.deleteTournament", () => {
       {} as any, // tournamentVoice
       postgres as any,
       awards as any,
+      {} as any, // notifications
+      {} as any, // teamGeneration
+      { assertAccepted: jest.fn() } as any, // terms
     );
   });
 
@@ -377,6 +380,9 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
       tournamentVoice as any,
       postgres as any,
       {} as any, // awards
+      {} as any, // notifications
+      {} as any, // teamGeneration
+      { assertAccepted: jest.fn() } as any, // terms
     );
   });
 

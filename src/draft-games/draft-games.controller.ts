@@ -3,6 +3,7 @@ import { HasuraAction, HasuraEvent } from "../hasura/hasura.controller";
 import { User } from "../auth/types/User";
 import { DraftGameService } from "./draft-game.service";
 import { DraftService } from "./draft.service";
+import { TermsService } from "../terms/terms.service";
 
 type DraftGameEvent = {
   op: "INSERT" | "UPDATE" | "DELETE" | "MANUAL";
@@ -15,6 +16,7 @@ export class DraftGamesController {
   constructor(
     private readonly draftGameService: DraftGameService,
     private readonly draftService: DraftService,
+    private readonly terms: TermsService,
   ) {}
 
   @HasuraEvent()
@@ -51,6 +53,8 @@ export class DraftGamesController {
 
   @HasuraAction()
   public async createDraftGame(data: { user: User; settings: any }) {
+    await this.terms.assertAccepted(data.user.steam_id);
+
     const draftGameId = await this.draftGameService.createDraftGame(
       data.user,
       data.settings,
@@ -78,6 +82,8 @@ export class DraftGamesController {
     draftGameId: string;
     inviteCode?: string;
   }) {
+    await this.terms.assertAccepted(data.user.steam_id);
+
     await this.draftGameService.joinDraftGame(
       data.user,
       data.draftGameId,
@@ -92,6 +98,8 @@ export class DraftGamesController {
     draftGameId: string;
     inviteCode?: string;
   }) {
+    await this.terms.assertAccepted(data.user.steam_id);
+
     await this.draftGameService.joinDraftGameAsParty(
       data.user,
       data.draftGameId,
@@ -119,6 +127,8 @@ export class DraftGamesController {
     draftGameId: string;
     steamId: string;
   }) {
+    await this.terms.assertAccepted(data.user.steam_id);
+
     await this.draftGameService.addDraftPlayer(
       data.user,
       data.draftGameId,
@@ -133,6 +143,8 @@ export class DraftGamesController {
     draftGameId: string;
     accept: boolean;
   }) {
+    await this.terms.assertAccepted(data.user.steam_id);
+
     await this.draftGameService.respondDraftInvite(
       data.user,
       data.draftGameId,

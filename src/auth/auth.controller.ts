@@ -12,6 +12,7 @@ import { ApiKeys } from "./ApiKeys";
 import { BadRequestException } from "@nestjs/common";
 import { User } from "./types/User";
 import { SocketsService } from "src/sockets/sockets.service";
+import { TermsService } from "src/terms/terms.service";
 
 const AUTH_THROTTLE = { default: { limit: 10, ttl: 60 * 1000 } };
 
@@ -23,6 +24,7 @@ export class AuthController {
     private readonly redis: RedisManagerService,
     private readonly apiKeys: ApiKeys,
     private readonly logger: Logger,
+    private readonly terms: TermsService,
   ) {}
 
   @UseGuards(ThrottlerBehindProxyGuard, SteamGuard)
@@ -123,6 +125,15 @@ export class AuthController {
         }
       });
     }
+    return { success: true };
+  }
+
+  // Deliberately does not call TermsService.assertAccepted -- this is the
+  // one action an authenticated-but-unaccepted player must always be able
+  // to call, or they could never get past the acceptance gate.
+  @HasuraAction()
+  public async acceptTerms(@Req() request: Request) {
+    await this.terms.acceptCurrentTerms(request.user.steam_id);
     return { success: true };
   }
 

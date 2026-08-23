@@ -2,10 +2,14 @@ import { Controller } from "@nestjs/common";
 import { HasuraService } from "../hasura/hasura.service";
 import { HasuraAction } from "../hasura/hasura.controller";
 import { User } from "../auth/types/User";
+import { TermsService } from "../terms/terms.service";
 
 @Controller("invites")
 export class InvitesController {
-  constructor(private readonly hasura: HasuraService) {}
+  constructor(
+    private readonly hasura: HasuraService,
+    private readonly terms: TermsService,
+  ) {}
 
   @HasuraAction()
   public async acceptInvite(data: {
@@ -14,6 +18,8 @@ export class InvitesController {
     type: string;
   }) {
     const { invite_id, user, type } = data;
+
+    await this.terms.assertAccepted(user.steam_id);
 
     if (type === "team") {
       return await this.acceptTeamInvite(invite_id, user);

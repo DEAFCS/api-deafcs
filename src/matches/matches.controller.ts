@@ -48,6 +48,7 @@ import { DemoMetadataService } from "../demos/demo-metadata.service";
 import { ClipsService } from "./clips/clips.service";
 import { ClipSpec } from "./clips/types/ClipSpec";
 import { SYSTEM_STEAM_ID } from "./disconnect-budget/constants";
+import { TermsService } from "src/terms/terms.service";
 
 @Controller("matches")
 export class MatchesController {
@@ -99,6 +100,7 @@ export class MatchesController {
     private readonly demoMetadata: DemoMetadataService,
     private readonly clips: ClipsService,
     private readonly matchImport: MatchImportService,
+    private readonly terms: TermsService,
   ) {
     this.appConfig = this.configService.get<AppConfig>("app");
   }
@@ -929,6 +931,8 @@ export class MatchesController {
   }) {
     const { match_id, user, time } = data;
 
+    await this.terms.assertAccepted(user.steam_id);
+
     if (!(await this.matchAssistant.canSchedule(match_id, user))) {
       throw Error("cannot schedule match until teams are checked in.");
     }
@@ -1059,6 +1063,8 @@ export class MatchesController {
     user: User;
   }) {
     const { match_id, server_id, user } = data;
+
+    await this.terms.assertAccepted(user.steam_id);
 
     if (!(await this.matchAssistant.canStart(match_id, user))) {
       throw Error(
@@ -1821,6 +1827,8 @@ export class MatchesController {
   public async cancelMatch(data: { user: User; match_id: string }) {
     const { match_id, user } = data;
 
+    await this.terms.assertAccepted(user.steam_id);
+
     if (!(await this.matchAssistant.canCancel(match_id, user))) {
       throw Error("you are not authorized to cancel this match");
     }
@@ -2102,6 +2110,8 @@ export class MatchesController {
   }) {
     const { match_id, user, winning_lineup_id } = data;
 
+    await this.terms.assertAccepted(user.steam_id);
+
     if (!(await this.matchAssistant.isOrganizer(match_id, user))) {
       throw Error("you are not a match organizer");
     }
@@ -2191,6 +2201,8 @@ export class MatchesController {
    */
   @HasuraAction()
   public async checkIntoMatch(data: { user: User; match_id: string }) {
+    await this.terms.assertAccepted(data.user.steam_id);
+
     const { matches_by_pk } = await this.hasura.query({
       matches_by_pk: {
         __args: {
@@ -2402,6 +2414,8 @@ export class MatchesController {
 
   @HasuraAction()
   public async leaveLineup(data: { user: User; match_id: string }) {
+    await this.terms.assertAccepted(data.user.steam_id);
+
     const { delete_match_lineup_players } = await this.hasura.mutation({
       delete_match_lineup_players: {
         __args: {
@@ -2437,6 +2451,8 @@ export class MatchesController {
     lineup_1: { team_id?: string; steam_ids?: string[] };
     lineup_2: { team_id?: string; steam_ids?: string[] };
   }) {
+    await this.terms.assertAccepted(data.user.steam_id);
+
     if (!isRoleAbove(data.user.role, "match_organizer")) {
       throw Error("You are not allowed to schedule matches");
     }
@@ -2456,6 +2472,8 @@ export class MatchesController {
 
   @HasuraAction()
   public async switchLineup(data: { user: User; match_id: string }) {
+    await this.terms.assertAccepted(data.user.steam_id);
+
     const { matches_by_pk } = await this.hasura.query(
       {
         matches_by_pk: {
@@ -2540,6 +2558,8 @@ export class MatchesController {
 
   @HasuraAction()
   public async randomizeTeams(data: { user: User; match_id: string }) {
+    await this.terms.assertAccepted(data.user.steam_id);
+
     const { matches_by_pk } = await this.hasura.query(
       {
         matches_by_pk: {
@@ -2566,6 +2586,8 @@ export class MatchesController {
 
   @HasuraAction()
   public async swapLineups(data: { user: User; match_id: string }) {
+    await this.terms.assertAccepted(data.user.steam_id);
+
     const { matches_by_pk } = await this.hasura.query(
       {
         matches_by_pk: {

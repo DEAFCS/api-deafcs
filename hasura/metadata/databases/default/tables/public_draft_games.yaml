@@ -315,13 +315,17 @@ insert_permissions:
   - role: user
     permission:
       check:
-        type:
-          _in:
-            - Competitive
-            - Wingman
-            - Duel
-            - Premier
-            - Faceit
+        _and:
+          - type:
+              _in:
+                - Competitive
+                - Wingman
+                - Duel
+                - Premier
+                - Faceit
+          - host:
+              has_accepted_current_terms:
+                _eq: true
       set:
         host_steam_id: x-hasura-user-id
       columns:

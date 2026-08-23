@@ -26,6 +26,7 @@ describe("draft room membership (SQL-driven)", () => {
 
   beforeEach(async () => {
     await postgres.query("DELETE FROM draft_games");
+    await postgres.query("DELETE FROM player_terms_acceptances");
     await postgres.query("DELETE FROM players");
   });
 

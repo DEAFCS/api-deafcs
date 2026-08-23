@@ -127,6 +127,7 @@
 - "!include public_player_stats.yaml"
 - "!include public_player_steam_bot_friend.yaml"
 - "!include public_player_steam_match_auth.yaml"
+- "!include public_player_terms_acceptances.yaml"
 - "!include public_player_unused_utility.yaml"
 - "!include public_player_utility.yaml"
 - "!include public_players.yaml"

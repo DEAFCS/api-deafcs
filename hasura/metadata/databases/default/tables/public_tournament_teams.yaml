@@ -68,37 +68,41 @@ insert_permissions:
   - role: user
     permission:
       check:
-        _or:
-          - tournament:
-              organizer_steam_id:
-                _eq: X-Hasura-User-Id
-          - tournament:
-              organizers:
-                steam_id:
-                  _eq: X-Hasura-User-Id
-          - _and:
+        _and:
+          - creator:
+              has_accepted_current_terms:
+                _eq: true
+          - _or:
               - tournament:
-                  status:
-                    _eq: RegistrationOpen
+                  organizer_steam_id:
+                    _eq: X-Hasura-User-Id
               - tournament:
-                  meets_min_role:
-                    _eq: true
-              - _or:
-                  - team:
-                      roster:
-                        _and:
-                          - role:
-                              _eq: Admin
-                          - player_steam_id:
-                              _eq: X-Hasura-User-Id
-                  - team:
-                      owner_steam_id:
-                        _eq: X-Hasura-User-Id
-                  - team:
-                      captain_steam_id:
-                        _eq: X-Hasura-User-Id
-                  - team_id:
-                      _is_null: true
+                  organizers:
+                    steam_id:
+                      _eq: X-Hasura-User-Id
+              - _and:
+                  - tournament:
+                      status:
+                        _eq: RegistrationOpen
+                  - tournament:
+                      meets_min_role:
+                        _eq: true
+                  - _or:
+                      - team:
+                          roster:
+                            _and:
+                              - role:
+                                  _eq: Admin
+                              - player_steam_id:
+                                  _eq: X-Hasura-User-Id
+                      - team:
+                          owner_steam_id:
+                            _eq: X-Hasura-User-Id
+                      - team:
+                          captain_steam_id:
+                            _eq: X-Hasura-User-Id
+                      - team_id:
+                          _is_null: true
       set:
         owner_steam_id: x-hasura-user-id
       columns:

@@ -12,6 +12,7 @@ import { AwardsService } from "../awards/awards.service";
 import { tournaments_set_input, e_notification_types_enum } from "../../generated";
 import { NotificationsService } from "../notifications/notifications.service";
 import { TournamentTeamGenerationService } from "./tournament-team-generation.service";
+import { TermsService } from "../terms/terms.service";
 
 // These tables are newer than the generated GraphQL types; event payloads are
 // typed locally (mirrors the leagues controller).
@@ -38,6 +39,7 @@ export class TournamentsController {
     private readonly awards: AwardsService,
     private readonly notifications: NotificationsService,
     private readonly teamGeneration: TournamentTeamGenerationService,
+    private readonly terms: TermsService,
   ) {}
 
   @HasuraEvent()
@@ -265,6 +267,9 @@ export class TournamentsController {
   @HasuraAction()
   public async deleteTournament(data: { user: User; tournament_id: string }) {
     const { tournament_id } = data;
+
+    await this.terms.assertAccepted(data.user.steam_id);
+
     this.logger.log(`[${tournament_id}] deleting tournament`);
 
     // Query with user context for authorization checks
@@ -388,6 +393,8 @@ export class TournamentsController {
     tournament_id: string;
   }) {
     const { tournament_id } = data;
+
+    await this.terms.assertAccepted(data.user.steam_id);
 
     const { tournaments_by_pk: tournament } = await this.hasura.query(
       {
@@ -557,6 +564,8 @@ export class TournamentsController {
   @HasuraAction()
   public async checkIntoTournament(data: { user: User; tournament_id: string }) {
     const { tournament_id } = data;
+
+    await this.terms.assertAccepted(data.user.steam_id);
 
     const { tournaments_by_pk: tournament } = await this.hasura.query({
       tournaments_by_pk: {
@@ -730,6 +739,8 @@ export class TournamentsController {
   }) {
     const { tournament_id } = data;
     const playerSteamId = String(data.player_steam_id ?? "").trim();
+
+    await this.terms.assertAccepted(data.user.steam_id);
 
     if (!/^\d+$/.test(playerSteamId)) {
       throw Error("invalid player steam id");
@@ -916,6 +927,8 @@ export class TournamentsController {
     tournament_team_id: string;
   }) {
     const { tournament_team_id } = data;
+
+    await this.terms.assertAccepted(data.user.steam_id);
 
     const { tournament_teams_by_pk: team } = await this.hasura.query(
       {

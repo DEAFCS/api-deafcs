@@ -108,7 +108,10 @@ computed_fields:
 insert_permissions:
   - role: user
     permission:
-      check: {}
+      check:
+        owner:
+          has_accepted_current_terms:
+            _eq: true
       set:
         owner_steam_id: x-hasura-user-id
       columns:

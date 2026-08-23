@@ -2,10 +2,14 @@ import { Controller } from "@nestjs/common";
 import { HasuraAction } from "../hasura/hasura.controller";
 import { User } from "../auth/types/User";
 import { ScrimsService } from "./scrims.service";
+import { TermsService } from "../terms/terms.service";
 
 @Controller("scrims")
 export class ScrimsController {
-  constructor(private readonly scrims: ScrimsService) {}
+  constructor(
+    private readonly scrims: ScrimsService,
+    private readonly terms: TermsService,
+  ) {}
 
   @HasuraAction()
   public async sendScrimRequest(data: {
@@ -24,6 +28,8 @@ export class ScrimsController {
       region,
       best_of,
     } = data;
+
+    await this.terms.assertAccepted(user.steam_id);
 
     if (!(await this.scrims.isManager(from_team_id, user.steam_id))) {
       throw Error("you are not a manager of this team");
@@ -52,6 +58,8 @@ export class ScrimsController {
   }) {
     const { user, request_id, accept } = data;
 
+    await this.terms.assertAccepted(user.steam_id);
+
     await this.scrims.respondToScrimRequest({
       requestId: request_id,
       steamId: user.steam_id,
@@ -70,6 +78,8 @@ export class ScrimsController {
     proposed_scheduled_at: string;
   }) {
     const { user, request_id, proposed_scheduled_at } = data;
+
+    await this.terms.assertAccepted(user.steam_id);
 
     await this.scrims.counterScrimRequest({
       requestId: request_id,

@@ -31,6 +31,7 @@ describe("scrim requests and team invites (SQL-driven)", () => {
     await postgres.query("DELETE FROM team_scrim_requests");
     await postgres.query("DELETE FROM notifications");
     await postgres.query("DELETE FROM teams");
+    await postgres.query("DELETE FROM player_terms_acceptances");
     await postgres.query("DELETE FROM players");
   });
 

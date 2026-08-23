@@ -40,6 +40,7 @@ describe("match lifecycle (SQL-driven)", () => {
     // (tad_match_options prunes custom pools), then players.
     await postgres.query("DELETE FROM matches");
     await postgres.query("DELETE FROM match_options");
+    await postgres.query("DELETE FROM player_terms_acceptances");
     await postgres.query("DELETE FROM players");
   });
 

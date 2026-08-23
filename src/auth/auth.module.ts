@@ -12,6 +12,7 @@ import { ApiKeys } from "./ApiKeys";
 import { ApiKeyGuard } from "./strategies/ApiKeyGuard";
 import { BullModule } from "@nestjs/bullmq";
 import { SteamMatchHistoryQueues } from "../steam-match-history/enums/SteamMatchHistoryQueues";
+import { TermsModule } from "../terms/terms.module";
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { SteamMatchHistoryQueues } from "../steam-match-history/enums/SteamMatch
       { name: SteamMatchHistoryQueues.CheckSteamBans },
       { name: SteamMatchHistoryQueues.PollSteamMatchHistoryForUser },
     ),
+    TermsModule,
   ],
   providers: [
     ApiKeys,

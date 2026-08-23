@@ -29,6 +29,7 @@ describe("player stats triggers (SQL-driven)", () => {
   beforeEach(async () => {
     await postgres.query("DELETE FROM seasons");
     await postgres.query("DELETE FROM matches");
+    await postgres.query("DELETE FROM player_terms_acceptances");
     await postgres.query("DELETE FROM players");
     await postgres.query(
       "DELETE FROM settings WHERE name = 'public.seasons_enabled'",

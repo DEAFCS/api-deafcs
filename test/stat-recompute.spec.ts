@@ -29,6 +29,7 @@ describe("per-map stat recompute and clutch detection (SQL-driven)", () => {
   beforeEach(async () => {
     await postgres.query("DELETE FROM matches");
     await postgres.query("DELETE FROM match_options");
+    await postgres.query("DELETE FROM player_terms_acceptances");
     await postgres.query("DELETE FROM players");
   });
 

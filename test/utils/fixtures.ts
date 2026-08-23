@@ -79,13 +79,44 @@ export class Fixtures {
     return value;
   }
 
-  async player(name?: string): Promise<string> {
+  // Every fixture player accepts the current Terms by default so the
+  // dozens of unrelated suites using this builder aren't collaterally
+  // blocked by the Terms-acceptance gates added to team/tournament/draft/
+  // lobby writes. Pass { acceptTerms: false } for tests that specifically
+  // exercise the unaccepted case.
+  async player(
+    name?: string,
+    { acceptTerms = true }: { acceptTerms?: boolean } = {},
+  ): Promise<string> {
     const steam = this.nextSteam();
     await this.postgres.query(
       "INSERT INTO players (steam_id, name) VALUES ($1, $2)",
       [steam, name ?? `p${this.seq}`],
     );
+    if (acceptTerms) {
+      await this.acceptCurrentTerms(steam);
+    }
     return steam;
+  }
+
+  // Reads the live public.terms_version setting and records acceptance for
+  // it -- mirrors TermsService.acceptCurrentTerms without depending on the
+  // NestJS layer. Throws if no version is configured, same fail-closed
+  // stance as the real service.
+  async acceptCurrentTerms(steamId: string): Promise<string> {
+    const [setting] = await this.postgres.query<Array<{ value: string }>>(
+      "SELECT value FROM settings WHERE name = 'public.terms_version'",
+    );
+    if (!setting?.value) {
+      throw new Error("public.terms_version is not configured");
+    }
+    await this.postgres.query(
+      `INSERT INTO player_terms_acceptances (player_steam_id, terms_version)
+       VALUES ($1, $2)
+       ON CONFLICT (player_steam_id, terms_version) DO NOTHING`,
+      [steamId, setting.value],
+    );
+    return setting.value;
   }
 
   async players(count: number): Promise<Array<string>> {

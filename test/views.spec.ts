@@ -39,6 +39,7 @@ describe("read-side views and aggregations (SQL-driven)", () => {
     await postgres.query("DELETE FROM match_options");
     await postgres.query("DELETE FROM team_scrim_requests");
     await postgres.query("DELETE FROM teams");
+    await postgres.query("DELETE FROM player_terms_acceptances");
     await postgres.query("DELETE FROM players");
     await postgres.query("DELETE FROM seasons");
     await postgres.query(

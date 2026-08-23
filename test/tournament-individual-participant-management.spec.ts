@@ -78,6 +78,10 @@ describe("Solo Random participant management (SQL-driven)", () => {
       null as never,
       null as never,
       null as never,
+      // This suite isn't testing Terms enforcement -- fixture players
+      // accept by default (see Fixtures.player), so a stub that always
+      // passes keeps this test focused on individual check-in behavior.
+      { assertAccepted: async () => {} } as never,
     );
   };
 
@@ -97,6 +101,7 @@ describe("Solo Random participant management (SQL-driven)", () => {
     await postgres.query("DELETE FROM tournaments");
     await postgres.query("DELETE FROM match_options");
     await postgres.query("DELETE FROM teams");
+    await postgres.query("DELETE FROM player_terms_acceptances");
     await postgres.query("DELETE FROM players");
   });
 

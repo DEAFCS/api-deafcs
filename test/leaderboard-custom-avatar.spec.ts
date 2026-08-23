@@ -38,6 +38,7 @@ describe("leaderboard_entries.player_custom_avatar_url", () => {
     await db.postgres.query("DELETE FROM matches");
     await db.postgres.query("DELETE FROM match_options");
     await db.postgres.query("DELETE FROM teams");
+    await db.postgres.query("DELETE FROM player_terms_acceptances");
     await db.postgres.query("DELETE FROM players");
   });
 

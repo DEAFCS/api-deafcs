@@ -8,6 +8,7 @@ import {
 } from "@nestjs/common";
 import { MatchesController } from "./matches.controller";
 import { MatchAssistantService } from "./match-assistant/match-assistant.service";
+import { TermsModule } from "../terms/terms.module";
 import { HasuraModule } from "../hasura/hasura.module";
 import { RconModule } from "../rcon/rcon.module";
 import { PluginRuntimeModule } from "../plugin-runtime/plugin-runtime.module";
@@ -83,6 +84,7 @@ import { LobbyCallService } from "./camera/lobby-call.service";
     HasuraModule,
     forwardRef(() => RconModule),
     CacheModule,
+    TermsModule,
     RedisModule,
     S3Module,
     EncryptionModule,

@@ -129,6 +129,9 @@ insert_permissions:
                           - Cancelled
                           - CancelledMinTeams
                           - Finished
+                  - player:
+                      has_accepted_current_terms:
+                        _eq: true
       columns:
         - player_steam_id
         - tournament_id
@@ -187,6 +190,9 @@ update_permissions:
         _and:
           - target_meets_min_role:
               _eq: true
+          - player:
+              has_accepted_current_terms:
+                _eq: true
           - _or:
               - tournament_team:
                   roster:

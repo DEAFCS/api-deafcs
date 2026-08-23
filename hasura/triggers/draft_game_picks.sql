@@ -32,6 +32,10 @@ BEGIN
         RAISE EXCEPTION 'It is not your turn to pick' USING ERRCODE = '22000';
     END IF;
 
+    IF NOT public.player_has_accepted_current_terms(actor::bigint) THEN
+        RAISE EXCEPTION 'You must accept the current Terms of Service before picking' USING ERRCODE = '22000';
+    END IF;
+
     NEW.captain_steam_id := captain.steam_id;
     NEW.lineup := expected_lineup;
 

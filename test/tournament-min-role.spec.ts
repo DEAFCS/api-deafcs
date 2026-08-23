@@ -32,6 +32,7 @@ describe("meets_min_role (SQL-driven)", () => {
     await postgres.query("DELETE FROM tournaments");
     await postgres.query("DELETE FROM match_options");
     await postgres.query("DELETE FROM teams");
+    await postgres.query("DELETE FROM player_terms_acceptances");
     await postgres.query("DELETE FROM players");
   });
 
@@ -171,6 +172,7 @@ describe("player_meets_min_role (SQL-driven)", () => {
     await postgres.query("DELETE FROM tournaments");
     await postgres.query("DELETE FROM match_options");
     await postgres.query("DELETE FROM teams");
+    await postgres.query("DELETE FROM player_terms_acceptances");
     await postgres.query("DELETE FROM players");
   });
 

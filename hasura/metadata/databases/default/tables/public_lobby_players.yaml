@@ -93,6 +93,9 @@ update_permissions:
               _eq: X-Hasura-User-Id
           - status:
               _eq: Invited
+          - player:
+              has_accepted_current_terms:
+                _eq: true
       check: {}
     comment: ""
 delete_permissions:

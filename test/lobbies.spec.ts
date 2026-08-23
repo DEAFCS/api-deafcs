@@ -22,6 +22,7 @@ describe("lobbies (SQL-driven)", () => {
 
   beforeEach(async () => {
     await postgres.query("DELETE FROM lobbies");
+    await postgres.query("DELETE FROM player_terms_acceptances");
     await postgres.query("DELETE FROM players");
   });
 
