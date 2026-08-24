@@ -88,16 +88,25 @@ export class NotificationsService {
     silence: "silenced",
   };
 
-  // Automated leaver/no-show bans ("Abandoned") shouldn't notify anyone
-  // except the banned player themselves (notifyBannedPlayer, left
-  // untouched) -- not admins, not co-players. Only a real admin-issued
-  // sanction ("Sanction") broadcasts to either. This fires from the
-  // generic player_sanctions INSERT event trigger for every ban regardless
-  // of source, so the distinction has to be looked up here rather than
-  // relying on the caller to only invoke these for admin bans.
+  // Automated bans shouldn't notify anyone except the banned player
+  // themselves (notifyBannedPlayer, left untouched) -- not admins, not
+  // co-players. Only a real admin-issued sanction ("Sanction") broadcasts
+  // to either. This fires from the generic player_sanctions INSERT event
+  // trigger for every ban regardless of source, so the distinction has to
+  // be looked up here rather than relying on the caller to only invoke
+  // these for admin bans.
+  //
+  // Two different "system" markers exist for two different auto-ban
+  // sources, and this used to only check one of them: leaver/no-show
+  // auto-bans (disconnect-budget.service.ts) use SYSTEM_STEAM_ID ("0"),
+  // but SteamBansService.applyAutoBans' VAC-ban auto-bans use a plain SQL
+  // NULL instead -- so a VAC auto-ban (e.g. an opponent from an imported
+  // public matchmaking game who was never a real DEAFCS registrant) was
+  // never recognized as "system-issued" here, and admins/co-players got
+  // notified about every single one. Bug reported live, 2026-08-24.
   private async isSystemIssuedBan(sanctionId: string): Promise<boolean> {
     const [sanctionRow] = await this.postgres.query<
-      Array<{ sanctioned_by_steam_id: string }>
+      Array<{ sanctioned_by_steam_id: string | null }>
     >(
       `SELECT sanctioned_by_steam_id::text AS sanctioned_by_steam_id
          FROM public.player_sanctions
@@ -105,7 +114,8 @@ export class NotificationsService {
       [sanctionId],
     );
 
-    return sanctionRow?.sanctioned_by_steam_id === SYSTEM_STEAM_ID;
+    const sanctionedBy = sanctionRow?.sanctioned_by_steam_id;
+    return sanctionedBy === SYSTEM_STEAM_ID || sanctionedBy == null;
   }
 
   async notifyMatchPlayersOfSanction(sanction: {
