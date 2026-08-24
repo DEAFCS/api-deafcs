@@ -1,15 +1,6 @@
-import {
-  Controller,
-  Post,
-  Get,
-  Param,
-  Req,
-  Res,
-  ForbiddenException,
-} from "@nestjs/common";
+import { Controller, Post, Get, Param, Req, Res } from "@nestjs/common";
 import { Request, Response } from "express";
 import { StreamerCameraService } from "./streamer-camera.service";
-import { User } from "../../auth/types/User";
 
 // Reads the raw request body as text -- WHIP/WHEP bodies are
 // application/sdp, which Nest's default body parsers don't claim (see
@@ -27,43 +18,27 @@ function readRawBody(request: Request): Promise<string> {
 export class StreamerCameraController {
   constructor(private readonly streamerCamera: StreamerCameraService) {}
 
-  private requireUser(request: Request): User {
-    const user = request.user as User | undefined;
-    if (!user) {
-      throw new ForbiddenException("Authentication required");
-    }
-    return user;
-  }
+  // --- Player-facing: gated only by the secret token, no session ---
+  // (mirrors CameraController's player/:token routes exactly).
 
-  // --- Player-facing: publishes the logged-in player's own camera ---
-
-  @Post(":matchId/publish/whip")
-  public async publishWhip(
-    @Param("matchId") matchId: string,
+  @Post("player/:token/whip")
+  public async playerWhip(
+    @Param("token") token: string,
     @Req() request: Request,
     @Res() response: Response,
   ) {
-    const user = this.requireUser(request);
     const sdp = await readRawBody(request);
     try {
-      const answer = await this.streamerCamera.proxyPlayerWhip(
-        matchId,
-        user,
-        sdp,
-      );
+      const answer = await this.streamerCamera.proxyPlayerWhip(token, sdp);
       response.status(200).type("application/sdp").send(answer);
     } catch (error) {
       response.status(400).type("text/plain").send((error as Error).message);
     }
   }
 
-  @Get(":matchId/publish/status")
-  public async publishStatus(
-    @Param("matchId") matchId: string,
-    @Req() request: Request,
-  ) {
-    const user = this.requireUser(request);
-    return this.streamerCamera.getPublishStatus(matchId, user);
+  @Get("player/:token/status")
+  public async playerStatus(@Param("token") token: string) {
+    return this.streamerCamera.getStatusForToken(token);
   }
 
   // --- Streamer-facing: game-streamer's HUD overlay pulls from here ---

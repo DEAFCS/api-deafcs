@@ -1,7 +1,20 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { HasuraService } from "../../hasura/hasura.service";
-import { User } from "../../auth/types/User";
 import { timingSafeStringEqual } from "../../utilities/timingSafeStringEqual";
+
+// Same active-match-statuses gate as CameraService's token validation --
+// a token is only meaningful while the match is actually being played
+// or about to be.
+const STREAMER_CAMERA_ACTIVE_MATCH_STATUSES = new Set([
+  "Veto",
+  "Live",
+  "WaitingForServer",
+]);
+
+export type StreamerCameraTokenLookup = {
+  matchId: string;
+  steamId: string;
+};
 
 // Deliberately separate from CameraService (../camera/camera.service.ts).
 // That service is the admin-only anti-cheat webcam check: an admin views
@@ -48,56 +61,88 @@ export class StreamerCameraService {
     return match?.options?.streamer_camera_enabled === true;
   }
 
-  private async isLineupPlayer(
-    matchId: string,
-    steamId: string,
-  ): Promise<boolean> {
-    const { matches_by_pk: match } = await this.hasura.query({
-      matches_by_pk: {
-        __args: { id: matchId },
-        lineup_1: { lineup_players: { steam_id: true } },
-        lineup_2: { lineup_players: { steam_id: true } },
-      },
-    });
+  // --- Player-facing: gated only by the secret token, no session ---
+  // Mirrors CameraService.validateToken exactly (same shape, same
+  // active-match-status gate) -- reached either by the player's own
+  // match page (popup on the same device) or a phone that scanned a QR
+  // code, neither of which necessarily carries a Hasura user JWT, so
+  // this deliberately doesn't require one, same reasoning as the
+  // require-camera flow.
 
-    return [
-      ...(match?.lineup_1?.lineup_players ?? []),
-      ...(match?.lineup_2?.lineup_players ?? []),
-    ].some((lineupPlayer) => String(lineupPlayer.steam_id) === String(steamId));
+  public async validateToken(
+    token: string,
+  ): Promise<StreamerCameraTokenLookup | null> {
+    const UUID_RE =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!token || !UUID_RE.test(token)) return null;
+
+    let match_streamer_camera_tokens: Array<{
+      match_id: unknown;
+      steam_id: unknown;
+      match?: { status?: unknown } | null;
+    }>;
+    try {
+      ({ match_streamer_camera_tokens } = await this.hasura.query({
+        match_streamer_camera_tokens: {
+          __args: {
+            where: { token: { _eq: token } },
+            limit: 1,
+          },
+          match_id: true,
+          steam_id: true,
+          match: {
+            status: true,
+          },
+        },
+      }));
+    } catch (error) {
+      this.logger.warn(
+        `[streamer-camera] token lookup failed: ${(error as Error)?.message}`,
+      );
+      return null;
+    }
+
+    const row = match_streamer_camera_tokens?.[0];
+    if (!row) return null;
+
+    const status = row.match?.status as string | undefined;
+    if (!status || !STREAMER_CAMERA_ACTIVE_MATCH_STATUSES.has(status)) {
+      return null;
+    }
+
+    return { matchId: row.match_id as string, steamId: row.steam_id as string };
   }
 
-  // --- Player-facing: publishes the logged-in player's own camera ---
-  // No token system needed here (unlike CameraService) -- the player is
-  // already on their own authenticated deafcs.net session when they opt
-  // in from their match page, so their Hasura user is proof enough of
-  // who they are. Always publishes as their own steam_id; there's no
-  // path by which a player can publish for someone else.
-
-  public async proxyPlayerWhip(
-    matchId: string,
-    user: User,
-    sdp: string,
-  ): Promise<string> {
-    if (!(await this.isEnabledForMatch(matchId))) {
+  public async proxyPlayerWhip(token: string, sdp: string): Promise<string> {
+    const lookup = await this.validateToken(token);
+    if (!lookup) {
+      throw new Error("invalid or expired camera link");
+    }
+    if (!(await this.isEnabledForMatch(lookup.matchId))) {
       throw new Error("streamer camera is not enabled for this match");
     }
-    if (!(await this.isLineupPlayer(matchId, user.steam_id))) {
-      throw new Error("player is not on either lineup for this match");
-    }
-
-    const path = StreamerCameraService.pathForPlayer(matchId, user.steam_id);
+    const path = StreamerCameraService.pathForPlayer(
+      lookup.matchId,
+      lookup.steamId,
+    );
     return this.proxySdp(`/${path}/whip`, sdp);
   }
 
-  public async getPublishStatus(
-    matchId: string,
-    user: User,
+  public async getStatusForToken(
+    token: string,
   ): Promise<{ enabled: boolean; ready: boolean }> {
-    const enabled = await this.isEnabledForMatch(matchId);
+    const lookup = await this.validateToken(token);
+    if (!lookup) {
+      return { enabled: false, ready: false };
+    }
+    const enabled = await this.isEnabledForMatch(lookup.matchId);
     if (!enabled) {
       return { enabled: false, ready: false };
     }
-    const path = StreamerCameraService.pathForPlayer(matchId, user.steam_id);
+    const path = StreamerCameraService.pathForPlayer(
+      lookup.matchId,
+      lookup.steamId,
+    );
     const { ready } = await this.getPathStatus(path);
     return { enabled, ready };
   }
