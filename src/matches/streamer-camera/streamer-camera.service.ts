@@ -51,9 +51,15 @@ export class StreamerCameraService {
     private readonly logger: Logger,
     private readonly hasura: HasuraService,
   ) {
-    this.mediaMtxHost = process.env.STREAMER_MEDIAMTX_HOST || "mediamtx";
-    this.whipPort = process.env.STREAMER_MEDIAMTX_WHIP_PORT || "8889";
-    this.apiPort = process.env.STREAMER_MEDIAMTX_API_PORT || "9997";
+    // Reverted after live testing (see git history): routing through
+    // the main mediamtx did NOT fix the underlying connection failure
+    // either -- proving the problem was never server-side (mediamtx vs
+    // mediamtx-camera) to begin with. Kept on the dedicated instance so
+    // this doesn't compete with actual match video/audio for
+    // resources, since that separation was correct regardless.
+    this.mediaMtxHost = process.env.STREAMER_MEDIAMTX_HOST || "mediamtx-camera";
+    this.whipPort = process.env.STREAMER_MEDIAMTX_WHIP_PORT || "8891";
+    this.apiPort = process.env.STREAMER_MEDIAMTX_API_PORT || "9998";
   }
 
   public static pathForPlayer(matchId: string, steamId: string): string {
