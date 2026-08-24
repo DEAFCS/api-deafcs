@@ -76,6 +76,8 @@ import { LeaguesModule } from "../leagues/leagues.module";
 import { DisconnectBudgetService } from "./disconnect-budget/disconnect-budget.service";
 import { CameraController } from "./camera/camera.controller";
 import { CameraService } from "./camera/camera.service";
+import { StreamerCameraController } from "./streamer-camera/streamer-camera.controller";
+import { StreamerCameraService } from "./streamer-camera/streamer-camera.service";
 import { LobbyCallController } from "./camera/lobby-call.controller";
 import { LobbyCallService } from "./camera/lobby-call.service";
 
@@ -165,6 +167,7 @@ import { LobbyCallService } from "./camera/lobby-call.service";
     MatchesController,
     MatchRelayController,
     CameraController,
+    StreamerCameraController,
     LobbyCallController,
   ],
   exports: [MatchAssistantService, PlayerEloRecomputeService],
@@ -174,6 +177,7 @@ import { LobbyCallService } from "./camera/lobby-call.service";
     DisconnectBudgetService,
     MatchRelayService,
     CameraService,
+    StreamerCameraService,
     LobbyCallService,
     CheckOnDemandServerJob,
     CheckOnDemandServerJobEvents,
