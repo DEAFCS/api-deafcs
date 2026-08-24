@@ -193,22 +193,24 @@ export class TypeSenseController {
         },
       });
 
-      // "Abandoned" (system-issued, leaver/no-show) vs "Sanction"
-      // (admin-issued) -- only a real admin sanction is allowed to touch a
-      // tournament match. An automated leaver ban bars someone from
-      // matchmaking, never from tournament, so leave any tournament match
-      // they're in completely alone here.
+      // "Abandoned" (system-issued, leaver/no-show, SYSTEM_STEAM_ID "0")
+      // vs "Sanction" (admin-issued) -- only a real admin sanction is
+      // allowed to touch a tournament match. An automated leaver ban bars
+      // someone from matchmaking, never from tournament, so leave any
+      // tournament match they're in completely alone here.
       //
-      // Two different "system" markers exist for two different auto-ban
-      // sources: leaver/no-show auto-bans use SYSTEM_STEAM_ID ("0"), but
-      // SteamBansService.applyAutoBans' VAC-ban auto-bans use a plain SQL
-      // NULL instead -- this used to only check for "0", so a VAC
-      // auto-ban landing on a player mid-tournament-match would NOT have
-      // been recognized as system-issued and could have forfeited a live
-      // tournament match over an automated ban. Bug reported live,
-      // 2026-08-24 (found via the same miss in notifications.service.ts).
+      // Deliberately NOT extended to also treat a VAC-ban auto-sanction
+      // (SteamBansService.applyAutoBans, sanctioned_by_steam_id NULL) as
+      // "system-issued" here, unlike the equivalent check in
+      // notifications.service.ts -- a real VAC ban is exactly the kind of
+      // thing that SHOULD still stop a live tournament match, the same as
+      // an admin sanction would. Only the *notifications* about an
+      // automated VAC ban were the actual complaint (spam for opponents
+      // from an imported public matchmaking game who were never DEAFCS
+      // registrants), not this match-forfeit behavior. Confirmed with the
+      // user 2026-08-24 after an earlier attempt here wrongly conflated
+      // the two.
       const isSystemIssuedBan =
-        data.new.sanctioned_by_steam_id == null ||
         `${data.new.sanctioned_by_steam_id}` === SYSTEM_STEAM_ID;
 
       for (const matchLineupPlayer of match_lineup_players) {
