@@ -25,10 +25,21 @@ export type StreamerCameraTokenLookup = {
 // can run both features at once without either one touching the other's
 // MediaMTX paths, tokens, or permission checks. See deafcs-web issue #91.
 //
-// Reuses the same mediamtx-camera relay CameraService already talks to
-// -- that's shared infrastructure (a WHIP/WHEP media server), not shared
-// business logic -- just under a distinct path prefix ("stream-cam-"
-// instead of "camera-") so the two features' streams can never collide.
+// Points at the MAIN mediamtx (same one match video/audio already
+// streams through via SRT), not the separate mediamtx-camera instance
+// CameraService uses -- deliberately its own env vars, not shared with
+// CameraService's MEDIAMTX_CAMERA_*, so this can point somewhere
+// completely different without affecting that feature at all. Live
+// debugging traced a persistent WebRTC ICE/DTLS failure ("deadline
+// exceeded while waiting connection") specifically between a
+// hostNetwork game-streamer pod and mediamtx-camera, that a TURN relay
+// didn't fix either -- meanwhile the exact same kind of cross-node
+// WebRTC consumption against the MAIN mediamtx is already proven
+// working in production (real viewers watch matches through it). This
+// matches upstream 5stackgg's own architecture too: they don't run a
+// separate mediamtx-camera at all, everything (SRT + WHIP/WHEP) goes
+// through one mediamtx instance -- DEAFCS's mediamtx-camera split is
+// fork-specific, added later for the camera_required feature only.
 
 @Injectable()
 export class StreamerCameraService {
@@ -40,9 +51,9 @@ export class StreamerCameraService {
     private readonly logger: Logger,
     private readonly hasura: HasuraService,
   ) {
-    this.mediaMtxHost = process.env.MEDIAMTX_CAMERA_HOST || "mediamtx-camera";
-    this.whipPort = process.env.MEDIAMTX_CAMERA_WHIP_PORT || "8891";
-    this.apiPort = process.env.MEDIAMTX_CAMERA_API_PORT || "9998";
+    this.mediaMtxHost = process.env.STREAMER_MEDIAMTX_HOST || "mediamtx";
+    this.whipPort = process.env.STREAMER_MEDIAMTX_WHIP_PORT || "8889";
+    this.apiPort = process.env.STREAMER_MEDIAMTX_API_PORT || "9997";
   }
 
   public static pathForPlayer(matchId: string, steamId: string): string {
