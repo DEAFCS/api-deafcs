@@ -26,12 +26,24 @@ const IDLE_TIMEOUT_MS = 20_000;
 const NEVER_CONNECTED_TIMEOUT_MS = 15_000;
 const REAP_INTERVAL_MS = 5_000;
 const SCREENSHOT_TIMEOUT_MS = 3_000;
+// /stream frame cadence. Single-digit fps reads as "live video" to a
+// viewer (this is a small avatar/corner cam, not the main broadcast) --
+// no need to chase 30fps and its much heavier Playwright-screenshot
+// load. See GET /stream/:matchId/:steamId below.
+const STREAM_FRAME_INTERVAL_MS = 150;
 const VALID_STEAM_ID = /^\d{17}$/;
 const VALID_MATCH_ID = /^[0-9a-f-]{36}$/i;
 
 const app = express();
 let browser;
-/** @type {Map<string, { page: import("playwright").Page, lastAccess: number, createdAt: number }>} */
+/**
+ * @type {Map<string, {
+ *   page: import("playwright").Page,
+ *   lastAccess: number,
+ *   createdAt: number,
+ *   streamRes: Set<import("express").Response>,
+ * }>}
+ */
 const sessions = new Map();
 
 async function getSession(matchId, steamId) {
@@ -80,7 +92,7 @@ async function getSession(matchId, steamId) {
   await page.evaluate((sdp) => window.__setAnswer(sdp), answerSdp);
 
   const now = Date.now();
-  const session = { page, lastAccess: now, createdAt: now };
+  const session = { page, lastAccess: now, createdAt: now, streamRes: new Set() };
   sessions.set(key, session);
   return session;
 }
@@ -89,6 +101,12 @@ async function closeSession(key) {
   const session = sessions.get(key);
   if (!session) return;
   sessions.delete(key);
+  // Any /stream clients still attached to this session's page would
+  // otherwise be left hanging (and the next screenshot against a
+  // closed page would throw mid-loop) -- end them explicitly first.
+  for (const res of session.streamRes) {
+    try { res.end(); } catch { /* best-effort */ }
+  }
   try {
     await session.page.close();
   } catch {
@@ -137,6 +155,67 @@ app.get("/snapshot/:matchId/:steamId", async (req, res) => {
       if (err) await closeSession(key);
     }
   }
+});
+
+// Continuous MJPEG stream (multipart/x-mixed-replace), so the HUD
+// overlay window can just point a plain <img src=...> at this URL and
+// get real, continuously-updating video with zero JS of its own --
+// browsers have natively supported multipart JPEG streams in <img>
+// since forever (it's how most IP/security cameras have always worked).
+// Replaces polling GET /snapshot every couple of seconds, which read as
+// a slideshow rather than live video. Reuses the exact same session
+// (and its already-negotiated WHEP connection) as /snapshot.
+app.get("/stream/:matchId/:steamId", async (req, res) => {
+  const { matchId, steamId } = req.params;
+  if (!VALID_MATCH_ID.test(matchId) || !VALID_STEAM_ID.test(steamId)) {
+    res.status(400).send("invalid matchId/steamId");
+    return;
+  }
+
+  const key = `${matchId}:${steamId}`;
+  let session;
+  try {
+    session = await getSession(matchId, steamId);
+  } catch {
+    res.status(404).send("no frame available");
+    return;
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "multipart/x-mixed-replace; boundary=frame",
+    "Cache-Control": "no-store",
+    Connection: "keep-alive",
+  });
+
+  session.streamRes.add(res);
+  req.on("close", () => {
+    session.streamRes.delete(res);
+  });
+
+  while (!res.writableEnded && sessions.get(key) === session) {
+    session.lastAccess = Date.now();
+    try {
+      const hasFrame = await session.page.evaluate(() => window.__hasFrame === true);
+      if (hasFrame) {
+        const jpeg = await session.page
+          .locator("#v")
+          .screenshot({ type: "jpeg", quality: 70, timeout: SCREENSHOT_TIMEOUT_MS });
+        res.write(
+          `--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`,
+        );
+        res.write(jpeg);
+        res.write("\r\n");
+      }
+    } catch {
+      // Page mid-teardown, screenshot timed out, etc. -- skip this
+      // frame, the loop will either recover or exit via the while
+      // condition once the session's gone.
+    }
+    await new Promise((resolve) => setTimeout(resolve, STREAM_FRAME_INTERVAL_MS));
+  }
+
+  session.streamRes.delete(res);
+  try { res.end(); } catch { /* best-effort */ }
 });
 
 app.get("/healthz", (_req, res) => res.send("ok"));
