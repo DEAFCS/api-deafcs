@@ -34,6 +34,12 @@
     video.addEventListener("loadeddata", function onLoaded() {
       video.removeEventListener("loadeddata", onLoaded);
       window.__hasFrame = true;
+      // Exposed by server.js (page.exposeFunction) -- lets it react to
+      // "a real frame just arrived" immediately instead of polling
+      // window.__hasFrame, which matters for gating when the CDP
+      // screencast (see server.js) starts forwarding frames to
+      // /stream viewers.
+      if (window.deafcsFrameReady) window.deafcsFrameReady();
     });
   };
   pc.onconnectionstatechange = function () {

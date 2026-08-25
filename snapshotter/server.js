@@ -12,9 +12,9 @@ const PORT = process.env.PORT || 8080;
 const MEDIAMTX_CAMERA_HOST = process.env.MEDIAMTX_CAMERA_HOST || "mediamtx-camera";
 const MEDIAMTX_CAMERA_WHIP_PORT = process.env.MEDIAMTX_CAMERA_WHIP_PORT || "8891";
 // How long an (matchId, steamId) session's browser page stays alive with
-// no snapshot requests before it's torn down. Kept short -- a spectated
-// player changes constantly, and an idle headless page still holds a
-// real WebRTC connection open on mediamtx-camera's side.
+// no snapshot/stream requests before it's torn down. Kept short -- a
+// spectated player changes constantly, and an idle headless page still
+// holds a real WebRTC connection open on mediamtx-camera's side.
 const IDLE_TIMEOUT_MS = 20_000;
 // A session that's still being polled (spectated player hasn't changed)
 // but has NEVER produced a frame -- camera never published, path
@@ -26,11 +26,6 @@ const IDLE_TIMEOUT_MS = 20_000;
 const NEVER_CONNECTED_TIMEOUT_MS = 15_000;
 const REAP_INTERVAL_MS = 5_000;
 const SCREENSHOT_TIMEOUT_MS = 3_000;
-// /stream frame cadence. Single-digit fps reads as "live video" to a
-// viewer (this is a small avatar/corner cam, not the main broadcast) --
-// no need to chase 30fps and its much heavier Playwright-screenshot
-// load. See GET /stream/:matchId/:steamId below.
-const STREAM_FRAME_INTERVAL_MS = 150;
 const VALID_STEAM_ID = /^\d{17}$/;
 const VALID_MATCH_ID = /^[0-9a-f-]{36}$/i;
 
@@ -39,6 +34,9 @@ let browser;
 /**
  * @type {Map<string, {
  *   page: import("playwright").Page,
+ *   cdp: import("playwright").CDPSession | null,
+ *   screencastActive: boolean,
+ *   hasFrame: boolean,
  *   lastAccess: number,
  *   createdAt: number,
  *   streamRes: Set<import("express").Response>,
@@ -57,6 +55,18 @@ async function getSession(matchId, steamId) {
   const streamPath = `stream-cam-${matchId}-${steamId}`;
   const whepUrl = `http://${MEDIAMTX_CAMERA_HOST}:${MEDIAMTX_CAMERA_WHIP_PORT}/${streamPath}/whep`;
   const page = await browser.newPage({ viewport: { width: 640, height: 360 } });
+
+  const now = Date.now();
+  const session = {
+    page,
+    cdp: null,
+    screencastActive: false,
+    hasFrame: false,
+    lastAccess: now,
+    createdAt: now,
+    streamRes: new Set(),
+  };
+
   // Diagnostic logging, kept permanently -- forward the page's own
   // console + any uncaught error straight to this process's stdout,
   // which is what `kubectl logs` actually shows. This is how we found
@@ -66,6 +76,17 @@ async function getSession(matchId, steamId) {
   page.on("requestfailed", (req) =>
     console.log(`[page:${key}] requestfailed: ${req.url()} ${req.failure()?.errorText}`),
   );
+
+  // Called by snapshot.html the moment a real track has decoded its
+  // first frame -- cheaper and more immediate than polling
+  // window.__hasFrame from Node, and what gates both /snapshot and
+  // /stream from serving a plain black frame (a <video> with no track
+  // still renders/screenshots fine as one) before there's an actual
+  // picture.
+  await page.exposeFunction("deafcsFrameReady", () => {
+    session.hasFrame = true;
+  });
+
   await page.goto(`file://${path.join(__dirname, "snapshot.html")}`);
 
   // The page itself does NOT fetch() the WHEP endpoint -- a file://
@@ -91,22 +112,78 @@ async function getSession(matchId, steamId) {
   const answerSdp = await whepRes.text();
   await page.evaluate((sdp) => window.__setAnswer(sdp), answerSdp);
 
-  const now = Date.now();
-  const session = { page, lastAccess: now, createdAt: now, streamRes: new Set() };
   sessions.set(key, session);
   return session;
+}
+
+// Starts (if not already running) a CDP screencast for this session --
+// Chromium pushes each newly-composited frame to us directly, which is
+// far cheaper and far higher-framerate than the old approach of
+// repeatedly calling locator().screenshot() in a timed loop (each call
+// is a full round-trip; screencast is push-based). One screencast feeds
+// every attached /stream client for this session, not one per viewer.
+async function ensureScreencast(session) {
+  if (session.screencastActive) return;
+  session.screencastActive = true;
+
+  if (!session.cdp) {
+    session.cdp = await session.page.context().newCDPSession(session.page);
+    session.cdp.on("Page.screencastFrame", (frame) => {
+      void handleScreencastFrame(session, frame);
+    });
+  }
+
+  await session.cdp.send("Page.startScreencast", {
+    format: "jpeg",
+    quality: 70,
+    maxWidth: 640,
+    maxHeight: 360,
+    everyNthFrame: 1,
+  });
+}
+
+async function handleScreencastFrame(session, frame) {
+  try {
+    if (session.hasFrame && session.streamRes.size > 0) {
+      const jpeg = Buffer.from(frame.data, "base64");
+      const head = `--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`;
+      for (const res of session.streamRes) {
+        if (res.writableEnded) continue;
+        res.write(head);
+        res.write(jpeg);
+        res.write("\r\n");
+      }
+      session.lastAccess = Date.now();
+    }
+  } finally {
+    if (session.cdp) {
+      await session.cdp
+        .send("Page.screencastFrameAck", { sessionId: frame.sessionId })
+        .catch(() => {});
+    }
+  }
+}
+
+async function stopScreencastIfIdle(session) {
+  if (!session.screencastActive || session.streamRes.size > 0) return;
+  session.screencastActive = false;
+  try {
+    await session.cdp?.send("Page.stopScreencast");
+  } catch {
+    /* best-effort */
+  }
 }
 
 async function closeSession(key) {
   const session = sessions.get(key);
   if (!session) return;
   sessions.delete(key);
-  // Any /stream clients still attached to this session's page would
-  // otherwise be left hanging (and the next screenshot against a
-  // closed page would throw mid-loop) -- end them explicitly first.
+  // Any /stream clients still attached to this session would otherwise
+  // be left hanging -- end them explicitly first.
   for (const res of session.streamRes) {
     try { res.end(); } catch { /* best-effort */ }
   }
+  session.streamRes.clear();
   try {
     await session.page.close();
   } catch {
@@ -124,14 +201,7 @@ app.get("/snapshot/:matchId/:steamId", async (req, res) => {
   const key = `${matchId}:${steamId}`;
   try {
     const session = await getSession(matchId, steamId);
-    // A <video> element with no track still screenshots fine (as a
-    // plain black frame) -- __hasFrame (set by snapshot.html only once
-    // a real track has actually decoded a frame) is what distinguishes
-    // "connected and live" from "not connected yet/at all", the same
-    // distinction the old WebRTC client made via ontrack before
-    // revealing anything.
-    const hasFrame = await session.page.evaluate(() => window.__hasFrame === true);
-    if (!hasFrame) {
+    if (!session.hasFrame) {
       res.status(404).send("no frame available");
       return;
     }
@@ -162,9 +232,11 @@ app.get("/snapshot/:matchId/:steamId", async (req, res) => {
 // get real, continuously-updating video with zero JS of its own --
 // browsers have natively supported multipart JPEG streams in <img>
 // since forever (it's how most IP/security cameras have always worked).
-// Replaces polling GET /snapshot every couple of seconds, which read as
-// a slideshow rather than live video. Reuses the exact same session
-// (and its already-negotiated WHEP connection) as /snapshot.
+// Frames come from a CDP screencast (see ensureScreencast), not a
+// polling loop -- pushed as Chromium renders them, not fetched on a
+// timer, which is both simpler and gets meaningfully closer to a real
+// framerate. Reuses the exact same session (and its already-negotiated
+// WHEP connection) as /snapshot.
 app.get("/stream/:matchId/:steamId", async (req, res) => {
   const { matchId, steamId } = req.params;
   if (!VALID_MATCH_ID.test(matchId) || !VALID_STEAM_ID.test(steamId)) {
@@ -172,7 +244,6 @@ app.get("/stream/:matchId/:steamId", async (req, res) => {
     return;
   }
 
-  const key = `${matchId}:${steamId}`;
   let session;
   try {
     session = await getSession(matchId, steamId);
@@ -188,34 +259,18 @@ app.get("/stream/:matchId/:steamId", async (req, res) => {
   });
 
   session.streamRes.add(res);
+  session.lastAccess = Date.now();
   req.on("close", () => {
     session.streamRes.delete(res);
+    void stopScreencastIfIdle(session);
   });
 
-  while (!res.writableEnded && sessions.get(key) === session) {
-    session.lastAccess = Date.now();
-    try {
-      const hasFrame = await session.page.evaluate(() => window.__hasFrame === true);
-      if (hasFrame) {
-        const jpeg = await session.page
-          .locator("#v")
-          .screenshot({ type: "jpeg", quality: 70, timeout: SCREENSHOT_TIMEOUT_MS });
-        res.write(
-          `--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`,
-        );
-        res.write(jpeg);
-        res.write("\r\n");
-      }
-    } catch {
-      // Page mid-teardown, screenshot timed out, etc. -- skip this
-      // frame, the loop will either recover or exit via the while
-      // condition once the session's gone.
-    }
-    await new Promise((resolve) => setTimeout(resolve, STREAM_FRAME_INTERVAL_MS));
+  try {
+    await ensureScreencast(session);
+  } catch {
+    session.streamRes.delete(res);
+    try { res.end(); } catch { /* best-effort */ }
   }
-
-  session.streamRes.delete(res);
-  try { res.end(); } catch { /* best-effort */ }
 });
 
 app.get("/healthz", (_req, res) => res.send("ok"));
@@ -227,11 +282,8 @@ setInterval(async () => {
       void closeSession(key);
       continue;
     }
-    if (now - session.createdAt > NEVER_CONNECTED_TIMEOUT_MS) {
-      const hasFrame = await session.page
-        .evaluate(() => window.__hasFrame === true)
-        .catch(() => false);
-      if (!hasFrame) void closeSession(key);
+    if (now - session.createdAt > NEVER_CONNECTED_TIMEOUT_MS && !session.hasFrame) {
+      void closeSession(key);
     }
   }
 }, REAP_INTERVAL_MS);
