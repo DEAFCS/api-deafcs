@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<!--
+  Loaded by server.js (one Playwright page per active match_id:steam_id
+  pair) with ?whep=<url-encoded WHEP endpoint> in the query string.
+  Connects once, stays connected, and just renders the live video --
+  server.js is the one deciding when to screenshot it and how often.
+  No STUN/TURN needed: this runs in the same cluster as mediamtx-camera
+  (same node, even), so it's a plain local connection, not the
+  cross-network hop that made this whole service necessary in the first
+  place. See DEAFCS/deafcs-web#91.
+-->
+<html>
+<head><meta charset="utf-8" /></head>
+<body style="margin:0;background:#000;overflow:hidden">
+<video id="v" autoplay playsinline muted style="width:640px;height:360px;object-fit:cover;display:block"></video>
+<script>
+(function () {
+  "use strict";
+  var params = new URLSearchParams(location.search);
+  var whepUrl = params.get("whep");
+  if (!whepUrl) return;
+
+  // Polled by server.js before trusting a screenshot -- a <video>
+  // element with no track still screenshots fine (as a plain black
+  // frame), so "the screenshot call didn't throw" is not the same as
+  // "there's an actual live frame in it".
+  window.__hasFrame = false;
+
+  var pc = new RTCPeerConnection({ iceServers: [] });
+  pc.addTransceiver("video", { direction: "recvonly" });
+  pc.ontrack = function (e) {
+    var video = document.getElementById("v");
+    video.srcObject = e.streams[0];
+    video.addEventListener("loadeddata", function onLoaded() {
+      video.removeEventListener("loadeddata", onLoaded);
+      window.__hasFrame = true;
+    });
+  };
+  pc.onconnectionstatechange = function () {
+    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+      window.__hasFrame = false;
+    }
+  };
+
+  pc.createOffer().then(function (offer) {
+    return pc.setLocalDescription(offer);
+  }).then(function () {
+    return new Promise(function (resolve) {
+      if (pc.iceGatheringState === "complete") return resolve();
+      pc.addEventListener("icegatheringstatechange", function onChange() {
+        if (pc.iceGatheringState === "complete") {
+          pc.removeEventListener("icegatheringstatechange", onChange);
+          resolve();
+        }
+      });
+      setTimeout(resolve, 2000);
+    });
+  }).then(function () {
+    return fetch(whepUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/sdp" },
+      body: pc.localDescription.sdp,
+    });
+  }).then(function (res) {
+    if (!res.ok) throw new Error("whep " + res.status);
+    return res.text();
+  }).then(function (answerSdp) {
+    return pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+  }).catch(function (err) {
+    // window.__snapshotError is polled by server.js to decide whether
+    // to give up on this session early instead of waiting out the full
+    // screenshot timeout on every request.
+    window.__snapshotError = String((err && err.message) || err);
+  });
+})();
+</script>
+</body>
+</html>
