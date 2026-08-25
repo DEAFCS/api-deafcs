@@ -45,9 +45,39 @@ async function getSession(matchId, steamId) {
   const streamPath = `stream-cam-${matchId}-${steamId}`;
   const whepUrl = `http://${MEDIAMTX_CAMERA_HOST}:${MEDIAMTX_CAMERA_WHIP_PORT}/${streamPath}/whep`;
   const page = await browser.newPage({ viewport: { width: 640, height: 360 } });
-  await page.goto(
-    `file://${path.join(__dirname, "snapshot.html")}?whep=${encodeURIComponent(whepUrl)}`,
+  // Diagnostic logging, kept permanently -- forward the page's own
+  // console + any uncaught error straight to this process's stdout,
+  // which is what `kubectl logs` actually shows. This is how we found
+  // the CORS issue below in the first place.
+  page.on("console", (msg) => console.log(`[page:${key}] ${msg.type()}: ${msg.text()}`));
+  page.on("pageerror", (err) => console.log(`[page:${key}] pageerror: ${err.message}`));
+  page.on("requestfailed", (req) =>
+    console.log(`[page:${key}] requestfailed: ${req.url()} ${req.failure()?.errorText}`),
   );
+  await page.goto(`file://${path.join(__dirname, "snapshot.html")}`);
+
+  // The page itself does NOT fetch() the WHEP endpoint -- a file://
+  // page's origin is "null", and mediamtx-camera's CORS preflight
+  // response never includes Access-Control-Allow-Origin (confirmed via
+  // a direct curl OPTIONS request), so the browser rejects the POST
+  // before it's even sent. Node's fetch isn't subject to CORS at all,
+  // so the negotiation is done here instead: get the offer SDP out of
+  // the page, POST it ourselves, hand the answer back in. The actual
+  // media/ICE/DTLS still happens directly between the page and
+  // mediamtx-camera -- CORS only ever applied to this one signaling
+  // request, never to the WebRTC transport itself.
+  const offerSdp = await page.evaluate(() => window.__createOffer());
+  const whepRes = await fetch(whepUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/sdp" },
+    body: offerSdp,
+  });
+  if (!whepRes.ok) {
+    await page.close().catch(() => {});
+    throw new Error(`whep POST failed: ${whepRes.status}`);
+  }
+  const answerSdp = await whepRes.text();
+  await page.evaluate((sdp) => window.__setAnswer(sdp), answerSdp);
 
   const now = Date.now();
   const session = { page, lastAccess: now, createdAt: now };

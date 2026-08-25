@@ -1,13 +1,16 @@
 <!DOCTYPE html>
 <!--
   Loaded by server.js (one Playwright page per active match_id:steam_id
-  pair) with ?whep=<url-encoded WHEP endpoint> in the query string.
-  Connects once, stays connected, and just renders the live video --
-  server.js is the one deciding when to screenshot it and how often.
-  No STUN/TURN needed: this runs in the same cluster as mediamtx-camera
-  (same node, even), so it's a plain local connection, not the
-  cross-network hop that made this whole service necessary in the first
-  place. See DEAFCS/deafcs-web#91.
+  pair), no query params needed. Builds the RTCPeerConnection and does
+  the actual media/ICE/DTLS work here in the browser (that part has to
+  happen in-page), but does NOT fetch() the WHEP endpoint itself --
+  server.js does that over plain Node http, and hands the answer SDP
+  back in via window.__setAnswer(). See server.js for why (CORS).
+  server.js is also the one deciding when to screenshot this and how
+  often. No STUN/TURN needed: this runs in the same cluster as
+  mediamtx-camera (same node, even), so it's a plain local connection,
+  not the cross-network hop that made this whole service necessary in
+  the first place. See DEAFCS/deafcs-web#91.
 -->
 <html>
 <head><meta charset="utf-8" /></head>
@@ -16,9 +19,6 @@
 <script>
 (function () {
   "use strict";
-  var params = new URLSearchParams(location.search);
-  var whepUrl = params.get("whep");
-  if (!whepUrl) return;
 
   // Polled by server.js before trusting a screenshot -- a <video>
   // element with no track still screenshots fine (as a plain black
@@ -37,41 +37,43 @@
     });
   };
   pc.onconnectionstatechange = function () {
+    console.log("[snapshot] connectionState=" + pc.connectionState);
     if (pc.connectionState === "failed" || pc.connectionState === "closed") {
       window.__hasFrame = false;
     }
   };
 
-  pc.createOffer().then(function (offer) {
-    return pc.setLocalDescription(offer);
-  }).then(function () {
-    return new Promise(function (resolve) {
-      if (pc.iceGatheringState === "complete") return resolve();
-      pc.addEventListener("icegatheringstatechange", function onChange() {
-        if (pc.iceGatheringState === "complete") {
-          pc.removeEventListener("icegatheringstatechange", onChange);
-          resolve();
-        }
+  // Called by server.js via page.evaluate(). Returns the local offer
+  // SDP once ICE gathering has settled -- server.js is the one that
+  // actually POSTs it to mediamtx (see server.js).
+  window.__createOffer = function () {
+    return pc.createOffer().then(function (offer) {
+      return pc.setLocalDescription(offer);
+    }).then(function () {
+      return new Promise(function (resolve) {
+        if (pc.iceGatheringState === "complete") return resolve();
+        pc.addEventListener("icegatheringstatechange", function onChange() {
+          if (pc.iceGatheringState === "complete") {
+            pc.removeEventListener("icegatheringstatechange", onChange);
+            resolve();
+          }
+        });
+        setTimeout(resolve, 2000);
       });
-      setTimeout(resolve, 2000);
+    }).then(function () {
+      console.log("[snapshot] offer ready");
+      return pc.localDescription.sdp;
     });
-  }).then(function () {
-    return fetch(whepUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/sdp" },
-      body: pc.localDescription.sdp,
+  };
+
+  // Called by server.js via page.evaluate() once it has the answer SDP
+  // back from mediamtx.
+  window.__setAnswer = function (answerSdp) {
+    console.log("[snapshot] setting remote description");
+    return pc.setRemoteDescription({ type: "answer", sdp: answerSdp }).then(function () {
+      console.log("[snapshot] remote description set");
     });
-  }).then(function (res) {
-    if (!res.ok) throw new Error("whep " + res.status);
-    return res.text();
-  }).then(function (answerSdp) {
-    return pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-  }).catch(function (err) {
-    // window.__snapshotError is polled by server.js to decide whether
-    // to give up on this session early instead of waiting out the full
-    // screenshot timeout on every request.
-    window.__snapshotError = String((err && err.message) || err);
-  });
+  };
 })();
 </script>
 </body>
