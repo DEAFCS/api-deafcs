@@ -151,16 +151,18 @@ async function ensureScreencast(session) {
     quality: 70,
     maxWidth: 640,
     maxHeight: 360,
-    // Chromium's raw composited framerate here runs ~20fps -- way more
-    // than a small avatar/corner cam needs, and more than the consumer
-    // (the HUD's Electron overlay window, on a node also busy running
-    // CS2 + GPU-encoding the main broadcast) could keep up with:
-    // frames piled up faster than they rendered, then dumped in a
-    // burst once the backlog cleared -- "smooth, then a ~3s stall,
-    // repeat". Cutting the source rate directly (rather than just
-    // reacting to backpressure below) means there's no backlog to
-    // build up in the first place.
-    everyNthFrame: 3,
+    // everyNthFrame: 3 (a blanket 1/3 rate cut for every session) was
+    // tried here first, on the theory that dropping the source rate
+    // would prevent the consumer (the HUD's Electron overlay window)
+    // from ever falling behind in the first place. Live testing showed
+    // it overcorrected -- ~3fps read as choppy/slideshow-ish for every
+    // viewer, not just the one that had actually been struggling.
+    // Reverted to the real rate; the backpressure check in
+    // handleScreencastFrame below is the right tool for this -- it
+    // only drops frames for a specific client if THAT client is
+    // actually behind, rather than rate-limiting everyone regardless
+    // of whether they needed it.
+    everyNthFrame: 1,
   });
 }
 
