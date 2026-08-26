@@ -75,7 +75,6 @@ insert_permissions:
         - halftime_pausematch
         - round_restart_delay
         - camera_required
-        - streamer_camera_enabled
         - individual_registration_enabled
     comment: ""
   - role: user
@@ -133,7 +132,6 @@ select_permissions:
         - halftime_pausematch
         - round_restart_delay
         - camera_required
-        - streamer_camera_enabled
         - individual_registration_enabled
       filter: {}
     comment: ""
@@ -167,7 +165,6 @@ update_permissions:
         - halftime_pausematch
         - round_restart_delay
         - camera_required
-        - streamer_camera_enabled
         - individual_registration_enabled
       filter:
         _or:

@@ -1088,7 +1088,6 @@ export class DraftGameService {
     // just "whoever can edit this draft's settings".
     if (isRoleAbove(user.role, "match_organizer")) {
       object.camera_required = source.camera_required;
-      object.streamer_camera_enabled = source.streamer_camera_enabled;
     }
 
     if (isRoleAbove(user.role, "tournament_organizer")) {

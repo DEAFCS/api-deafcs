@@ -643,7 +643,6 @@ export class MatchesController {
       data.old.status !== "Live"
     ) {
       await this.generateCameraTokensIfRequired(matchId);
-      await this.generateStreamerCameraTokensIfRequired(matchId);
     }
 
     if (data.op === "DELETE") {
@@ -876,68 +875,6 @@ export class MatchesController {
     } catch (error) {
       this.logger.error(
         `[${matchId}] failed to generate camera tokens: ${(error as Error)?.message}`,
-        error,
-      );
-    }
-  }
-
-  // Mirrors generateCameraTokensIfRequired exactly, one column/table
-  // over -- see DEAFCS/deafcs-web#91 for why this is a fully separate
-  // table (match_streamer_camera_tokens) rather than reusing
-  // match_camera_tokens.
-  private async generateStreamerCameraTokensIfRequired(matchId: string) {
-    const { matches_by_pk: match } = await this.hasura.query({
-      matches_by_pk: {
-        __args: {
-          id: matchId,
-        },
-        options: {
-          streamer_camera_enabled: true,
-        },
-        lineup_1: {
-          lineup_players: {
-            steam_id: true,
-          },
-        },
-        lineup_2: {
-          lineup_players: {
-            steam_id: true,
-          },
-        },
-      },
-    });
-
-    if (!match?.options?.streamer_camera_enabled) {
-      return;
-    }
-
-    const steamIds = [
-      ...(match.lineup_1?.lineup_players ?? []),
-      ...(match.lineup_2?.lineup_players ?? []),
-    ]
-      .map((lineupPlayer) => lineupPlayer.steam_id)
-      .filter((steamId): steamId is string => Boolean(steamId));
-
-    if (steamIds.length === 0) {
-      this.logger.warn(
-        `[${matchId}] streamer_camera_enabled is on but no lineup players were found — skipping token generation`,
-      );
-      return;
-    }
-
-    try {
-      await this.postgres.query(
-        `insert into match_streamer_camera_tokens (match_id, steam_id)
-         select $1, unnest($2::bigint[])
-         on conflict (match_id, steam_id) do nothing`,
-        [matchId, steamIds],
-      );
-      this.logger.log(
-        `[${matchId}] generated streamer camera tokens for ${steamIds.length} player(s)`,
-      );
-    } catch (error) {
-      this.logger.error(
-        `[${matchId}] failed to generate streamer camera tokens: ${(error as Error)?.message}`,
         error,
       );
     }
