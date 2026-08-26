@@ -151,7 +151,16 @@ async function ensureScreencast(session) {
     quality: 70,
     maxWidth: 640,
     maxHeight: 360,
-    everyNthFrame: 1,
+    // Chromium's raw composited framerate here runs ~20fps -- way more
+    // than a small avatar/corner cam needs, and more than the consumer
+    // (the HUD's Electron overlay window, on a node also busy running
+    // CS2 + GPU-encoding the main broadcast) could keep up with:
+    // frames piled up faster than they rendered, then dumped in a
+    // burst once the backlog cleared -- "smooth, then a ~3s stall,
+    // repeat". Cutting the source rate directly (rather than just
+    // reacting to backpressure below) means there's no backlog to
+    // build up in the first place.
+    everyNthFrame: 3,
   });
 }
 
@@ -162,9 +171,18 @@ async function handleScreencastFrame(session, frame) {
       const head = `--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`;
       for (const res of session.streamRes) {
         if (res.writableEnded) continue;
-        res.write(head);
-        res.write(jpeg);
-        res.write("\r\n");
+        // res.write() returning false means Node's internal buffer for
+        // this response is still full from a previous frame -- writing
+        // more on top of it anyway is exactly how a backlog piles up
+        // silently in memory and then dumps all at once. Drop this
+        // frame for this client instead; the next one comes in well
+        // under a second either way.
+        if (res._deafcsBackpressured) continue;
+        const ok = res.write(head) && res.write(jpeg) && res.write("\r\n");
+        if (!ok) {
+          res._deafcsBackpressured = true;
+          res.once("drain", () => { res._deafcsBackpressured = false; });
+        }
       }
       session.lastAccess = Date.now();
     }
