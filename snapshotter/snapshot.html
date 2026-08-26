@@ -26,6 +26,21 @@
   // "there's an actual live frame in it".
   window.__hasFrame = false;
 
+  // Temporary diagnostic: Playwright's bundled Chromium is often built
+  // without H.264 decode (open-source Chromium builds commonly omit it
+  // over licensing, unlike Google Chrome) -- only VP8/VP9/AV1 guaranteed
+  // present. If a publishing player's browser happens to send H264 (very
+  // browser/hardware-dependent), this receiver may simply have no way to
+  // decode it. Logging what's actually available settles it either way
+  // instead of guessing. See DEAFCS/deafcs-web#91.
+  try {
+    var caps = RTCRtpReceiver.getCapabilities("video");
+    console.log("[snapshot] receivable video codecs: " +
+      (caps ? caps.codecs.map(function (c) { return c.mimeType; }).join(",") : "n/a"));
+  } catch (e) {
+    console.log("[snapshot] getCapabilities threw: " + e.message);
+  }
+
   var pc = new RTCPeerConnection({ iceServers: [] });
   pc.addTransceiver("video", { direction: "recvonly" });
   pc.ontrack = function (e) {

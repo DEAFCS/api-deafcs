@@ -14,6 +14,17 @@ COPY server.js snapshot.html .
 
 # Playwright's own image already has Chromium + all system deps
 # installed and matched to this exact playwright npm version -- no
-# `npx playwright install` needed.
+# `npx playwright install` needed for the default Chromium.
+#
+# Real Google Chrome is installed separately (channel: "chrome" in
+# server.js's chromium.launch()) because Playwright's bundled Chromium
+# is an open-source build without H.264 decode (licensing -- only
+# VP8/VP9/AV1 are guaranteed present). Some publishers -- iPhone Safari
+# in particular, whose hardware encoder defaults to H.264 with
+# unreliable/no VP8 support -- publish H.264, which the bundled
+# Chromium then silently can't receive at all (WHEP negotiation just
+# never completes). Real Chrome decodes both. See DEAFCS/deafcs-web#91.
+RUN npx playwright install --with-deps chrome
+
 EXPOSE 8080
 CMD ["node", "server.js"]

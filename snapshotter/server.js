@@ -100,11 +100,24 @@ async function getSession(matchId, steamId) {
   // mediamtx-camera -- CORS only ever applied to this one signaling
   // request, never to the WebRTC transport itself.
   const offerSdp = await page.evaluate(() => window.__createOffer());
-  const whepRes = await fetch(whepUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/sdp" },
-    body: offerSdp,
-  });
+  let whepRes;
+  try {
+    // A codec-mismatch offer (e.g. this receiver can't decode what's
+    // published -- see snapshot.html's getCapabilities log) sometimes
+    // gets no response from mediamtx at all rather than a prompt error,
+    // which without a timeout hung this fetch indefinitely -- the
+    // session just sat there until NEVER_CONNECTED_TIMEOUT_MS reaped it
+    // 15s later, silently, every single retry. Fail fast instead.
+    whepRes = await fetch(whepUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/sdp" },
+      body: offerSdp,
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch (err) {
+    await page.close().catch(() => {});
+    throw new Error(`whep POST failed: ${err?.message ?? err}`);
+  }
   if (!whepRes.ok) {
     await page.close().catch(() => {});
     throw new Error(`whep POST failed: ${whepRes.status}`);
@@ -247,7 +260,8 @@ app.get("/stream/:matchId/:steamId", async (req, res) => {
   let session;
   try {
     session = await getSession(matchId, steamId);
-  } catch {
+  } catch (err) {
+    console.log(`[stream:${matchId}:${steamId}] session failed: ${err?.message ?? err}`);
     res.status(404).send("no frame available");
     return;
   }
@@ -290,6 +304,12 @@ setInterval(async () => {
 
 (async () => {
   browser = await chromium.launch({
+    // Real Google Chrome, not Playwright's bundled open-source Chromium
+    // build -- the bundled one lacks H.264 decode (licensing), which
+    // silently breaks any publisher whose browser sends H.264 (iPhone
+    // Safari's hardware encoder does, by default, with unreliable/no
+    // VP8 fallback). See DEAFCS/deafcs-web#91 and this Dockerfile.
+    channel: "chrome",
     args: [
       "--no-sandbox",
       "--disable-gpu",
