@@ -156,27 +156,26 @@ async function ensureScreencast(session) {
     format: "jpeg",
     quality: 60,
     // The overlay only ever displays this at ~200px wide (see
-    // AVATAR_WIDTH_PX in camera-overlay.js) -- 640x360 was needlessly
-    // 3x that. This wasn't just wasted bandwidth: every frame gets
-    // decoded and repainted *inside* the HUD's Electron overlay
-    // window, which is itself captured for the main broadcast, so a
-    // bigger image directly means more compositor/capture work on a
-    // node that's also encoding the live stream. Live testing showed
-    // full-rate 640x360 pushed the capture pipeline's CPU from a
-    // normal ~20-30% to ~140% -- the WHOLE stream lagged, not just the
-    // camera. Smaller frames here directly reduce that cost.
-    maxWidth: 480,
-    maxHeight: 270,
-    // everyNthFrame: 3 (~7fps, both dimensions still full-size) was
-    // tried first on its own and read as choppy/slideshow-ish.
-    // everyNthFrame: 1 (~20fps) at full size then hammered the capture
-    // pipeline (see above). Splitting the cost between a smaller frame
-    // AND a moderate rate -- rather than only ever turning one dial --
-    // is the actual fix; tune here first if it still isn't smooth
-    // enough, the backpressure check in handleScreencastFrame below
-    // still catches any client that's individually behind regardless
-    // of this rate.
-    everyNthFrame: 2,
+    // AVATAR_WIDTH_PX in camera-overlay.js). Every frame gets decoded
+    // and repainted *inside* the HUD's Electron overlay window, which
+    // is itself captured for the main broadcast, so a bigger/faster
+    // stream here directly means more compositor/capture work on a
+    // node that's also encoding the live stream.
+    //
+    // Tried so far, both live-tested against the capture pipeline's
+    // own CPU% (LIVE-DIAG's capcpu in game-streamer's run-live.sh),
+    // normal baseline ~20-30%:
+    //   640x360 @ ~20fps (everyNthFrame 1) -> ~140% (whole stream lagged)
+    //   480x270 @ ~10fps (everyNthFrame 2) -> ~110-135% (still bad)
+    // This step cuts pixel area by another ~4x and frame rate by
+    // another ~2x (~8x fewer pixel-frames/sec than the previous step)
+    // -- if THIS still isn't enough, the camera may need to come off
+    // this node's captured window entirely (e.g. composited in by the
+    // capture/encode step itself, not rendered as page content) rather
+    // than tuned further; see DEAFCS/deafcs-web#91.
+    maxWidth: 240,
+    maxHeight: 135,
+    everyNthFrame: 4,
   });
 }
 
