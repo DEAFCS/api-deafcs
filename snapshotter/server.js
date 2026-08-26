@@ -12,10 +12,16 @@ const PORT = process.env.PORT || 8080;
 const MEDIAMTX_CAMERA_HOST = process.env.MEDIAMTX_CAMERA_HOST || "mediamtx-camera";
 const MEDIAMTX_CAMERA_WHIP_PORT = process.env.MEDIAMTX_CAMERA_WHIP_PORT || "8891";
 // How long an (matchId, steamId) session's browser page stays alive with
-// no snapshot/stream requests before it's torn down. Kept short -- a
-// spectated player changes constantly, and an idle headless page still
-// holds a real WebRTC connection open on mediamtx-camera's side.
-const IDLE_TIMEOUT_MS = 20_000;
+// no snapshot/stream requests before it's torn down. A spectated player
+// switching away doesn't mean they won't be back soon -- auto-director
+// and manual switching both cycle through the same handful of players
+// repeatedly, and re-negotiating WHEP from scratch (vs. just restarting
+// the screencast on an already-connected session) is exactly the kind
+// of delay that made switching feel laggy. Long enough to cover a
+// normal round's worth of cycling between players; short enough that a
+// genuinely-abandoned session (feature turned off, match over) doesn't
+// hold a WebRTC connection open indefinitely.
+const IDLE_TIMEOUT_MS = 90_000;
 // A session that's still being polled (spectated player hasn't changed)
 // but has NEVER produced a frame -- camera never published, path
 // genuinely doesn't exist, connection quietly stuck -- would otherwise
