@@ -154,21 +154,29 @@ async function ensureScreencast(session) {
 
   await session.cdp.send("Page.startScreencast", {
     format: "jpeg",
-    quality: 70,
-    maxWidth: 640,
-    maxHeight: 360,
-    // everyNthFrame: 3 (a blanket 1/3 rate cut for every session) was
-    // tried here first, on the theory that dropping the source rate
-    // would prevent the consumer (the HUD's Electron overlay window)
-    // from ever falling behind in the first place. Live testing showed
-    // it overcorrected -- ~3fps read as choppy/slideshow-ish for every
-    // viewer, not just the one that had actually been struggling.
-    // Reverted to the real rate; the backpressure check in
-    // handleScreencastFrame below is the right tool for this -- it
-    // only drops frames for a specific client if THAT client is
-    // actually behind, rather than rate-limiting everyone regardless
-    // of whether they needed it.
-    everyNthFrame: 1,
+    quality: 60,
+    // The overlay only ever displays this at ~200px wide (see
+    // AVATAR_WIDTH_PX in camera-overlay.js) -- 640x360 was needlessly
+    // 3x that. This wasn't just wasted bandwidth: every frame gets
+    // decoded and repainted *inside* the HUD's Electron overlay
+    // window, which is itself captured for the main broadcast, so a
+    // bigger image directly means more compositor/capture work on a
+    // node that's also encoding the live stream. Live testing showed
+    // full-rate 640x360 pushed the capture pipeline's CPU from a
+    // normal ~20-30% to ~140% -- the WHOLE stream lagged, not just the
+    // camera. Smaller frames here directly reduce that cost.
+    maxWidth: 480,
+    maxHeight: 270,
+    // everyNthFrame: 3 (~7fps, both dimensions still full-size) was
+    // tried first on its own and read as choppy/slideshow-ish.
+    // everyNthFrame: 1 (~20fps) at full size then hammered the capture
+    // pipeline (see above). Splitting the cost between a smaller frame
+    // AND a moderate rate -- rather than only ever turning one dial --
+    // is the actual fix; tune here first if it still isn't smooth
+    // enough, the backpressure check in handleScreencastFrame below
+    // still catches any client that's individually behind regardless
+    // of this rate.
+    everyNthFrame: 2,
   });
 }
 
