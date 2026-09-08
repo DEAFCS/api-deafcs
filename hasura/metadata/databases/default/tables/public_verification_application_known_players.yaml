@@ -1,0 +1,46 @@
+table:
+  name: verification_application_known_players
+  schema: public
+object_relationships:
+  - name: application
+    using:
+      foreign_key_constraint_on: verification_application_id
+insert_permissions:
+  - role: user
+    permission:
+      check:
+        application:
+          player_steam_id:
+            _eq: X-Hasura-User-Id
+      columns:
+        - verification_application_id
+        - nickname
+        - steam_profile_url
+        - sort_order
+    comment: A player can add community references to their own application only, via the same nested insert that creates the application itself.
+select_permissions:
+  - role: user
+    permission:
+      columns:
+        - id
+        - verification_application_id
+        - nickname
+        - steam_profile_url
+        - sort_order
+        - created_at
+      filter:
+        application:
+          player_steam_id:
+            _eq: X-Hasura-User-Id
+    comment: A player can see the references on their own application only.
+  - role: administrator
+    permission:
+      columns:
+        - id
+        - verification_application_id
+        - nickname
+        - steam_profile_url
+        - sort_order
+        - created_at
+      filter: {}
+    comment: Admins can see every application's community references.

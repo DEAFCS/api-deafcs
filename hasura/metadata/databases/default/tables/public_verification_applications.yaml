@@ -27,6 +27,13 @@ array_relationships:
         table:
           name: verification_application_messages
           schema: public
+  - name: known_players
+    using:
+      foreign_key_constraint_on:
+        column: verification_application_id
+        table:
+          name: verification_application_known_players
+          schema: public
 insert_permissions:
   - role: user
     permission:
