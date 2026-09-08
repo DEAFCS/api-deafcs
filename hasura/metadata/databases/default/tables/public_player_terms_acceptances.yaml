@@ -16,3 +16,11 @@ select_permissions:
         player_steam_id:
           _eq: X-Hasura-User-Id
     comment: ""
+  - role: administrator
+    permission:
+      columns:
+        - player_steam_id
+        - terms_version
+        - accepted_at
+      filter: {}
+    comment: Admins can see every player's Terms acceptance record (read-only audit trail).
