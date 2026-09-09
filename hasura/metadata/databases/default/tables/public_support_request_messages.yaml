@@ -1,0 +1,64 @@
+table:
+  name: support_request_messages
+  schema: public
+object_relationships:
+  - name: request
+    using:
+      foreign_key_constraint_on: request_id
+  - name: sender
+    using:
+      foreign_key_constraint_on: sender_steam_id
+insert_permissions:
+  - role: user
+    permission:
+      check:
+        _and:
+          - sender_steam_id:
+              _eq: X-Hasura-User-Id
+          - is_admin:
+              _eq: false
+          - request:
+              _and:
+                - player_steam_id:
+                    _eq: X-Hasura-User-Id
+                - status:
+                    _eq: open
+      set:
+        sender_steam_id: x-hasura-user-id
+        is_admin: "false"
+      columns:
+        - request_id
+        - message
+    comment: A player can reply only on their own open request and cannot impersonate an admin.
+  - role: administrator
+    permission:
+      check:
+        _and:
+          - sender_steam_id:
+              _eq: X-Hasura-User-Id
+          - is_admin:
+              _eq: true
+          - request:
+              status:
+                _eq: open
+      set:
+        sender_steam_id: x-hasura-user-id
+        is_admin: "true"
+      columns:
+        - request_id
+        - message
+    comment: Administrators can reply on any open support request.
+select_permissions:
+  - role: user
+    permission:
+      columns: [id, request_id, sender_steam_id, is_admin, message, created_at]
+      filter:
+        request:
+          player_steam_id:
+            _eq: X-Hasura-User-Id
+    comment: A player can see messages only for their own support requests.
+  - role: administrator
+    permission:
+      columns: [id, request_id, sender_steam_id, is_admin, message, created_at]
+      filter: {}
+    comment: Administrators can read every support conversation.

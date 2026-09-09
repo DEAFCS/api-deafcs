@@ -356,7 +356,7 @@ describe("permission functions (SQL-driven)", () => {
       const id = await runAsUser(postgres, player, "user", async (query) => {
         const [entry] = (await query(
           `INSERT INTO tournament_teams (tournament_id, name, owner_steam_id)
-           VALUES ($1, 'Free agent', $2) RETURNING id`,
+           VALUES ($1, 'Free agent ' || $2::bigint::text, $2::bigint) RETURNING id`,
           [tournamentId, player],
         )) as Array<{ id: string }>;
         await query(
@@ -372,7 +372,9 @@ describe("permission functions (SQL-driven)", () => {
 
     it("scopes free-agent management to the exact tournament entry", async () => {
       const tournaments = new TournamentFixtures(postgres, fx);
-      const tournament = await tournaments.createTournament([]);
+      const tournament = await tournaments.createTournament([
+        { type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 4 },
+      ]);
       await tournaments.setStatus(
         tournament.id,
         tournament.organizer,
@@ -391,7 +393,9 @@ describe("permission functions (SQL-driven)", () => {
 
     it("allows the registered-team owner, captain, and admin only for their entry", async () => {
       const tournaments = new TournamentFixtures(postgres, fx);
-      const tournament = await tournaments.createTournament([]);
+      const tournament = await tournaments.createTournament([
+        { type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 4 },
+      ]);
       await tournaments.setStatus(
         tournament.id,
         tournament.organizer,

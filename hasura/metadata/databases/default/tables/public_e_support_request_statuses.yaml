@@ -1,0 +1,17 @@
+table:
+  name: e_support_request_statuses
+  schema: public
+is_enum: true
+select_permissions:
+  - role: user
+    permission:
+      columns:
+        - value
+        - description
+      filter: {}
+  - role: administrator
+    permission:
+      columns:
+        - value
+        - description
+      filter: {}

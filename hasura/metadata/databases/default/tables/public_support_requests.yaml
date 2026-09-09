@@ -1,0 +1,68 @@
+table:
+  name: support_requests
+  schema: public
+object_relationships:
+  - name: player
+    using:
+      foreign_key_constraint_on: player_steam_id
+  - name: handled_by
+    using:
+      foreign_key_constraint_on: handled_by_steam_id
+array_relationships:
+  - name: messages
+    using:
+      foreign_key_constraint_on:
+        column: request_id
+        table:
+          name: support_request_messages
+          schema: public
+insert_permissions:
+  - role: user
+    permission:
+      check:
+        _and:
+          - player_steam_id:
+              _eq: X-Hasura-User-Id
+          - status:
+              _eq: open
+      set:
+        player_steam_id: x-hasura-user-id
+        status: open
+      columns:
+        - category
+        - subject
+        - initial_message
+        - reported_player_steam_id
+        - reported_player_profile_url
+        - related_match_reference
+        - report_reason
+        - report_details
+        - report_evidence
+        - organizer_motivation
+        - organizer_experience
+        - organizer_languages
+        - organizer_additional_info
+    comment: A logged-in player can create a support request only for themselves.
+select_permissions:
+  - role: user
+    permission:
+      columns: [id, player_steam_id, category, subject, initial_message, status, reported_player_steam_id, reported_player_profile_url, related_match_reference, report_reason, report_details, report_evidence, organizer_motivation, organizer_experience, organizer_languages, organizer_additional_info, handled_by_steam_id, created_at, updated_at, closed_at]
+      filter:
+        player_steam_id:
+          _eq: X-Hasura-User-Id
+    comment: A player can see only their own support requests, including private player reports.
+  - role: administrator
+    permission:
+      columns: [id, player_steam_id, category, subject, initial_message, status, reported_player_steam_id, reported_player_profile_url, related_match_reference, report_reason, report_details, report_evidence, organizer_motivation, organizer_experience, organizer_languages, organizer_additional_info, handled_by_steam_id, created_at, updated_at, closed_at]
+      filter: {}
+    comment: Administrators can review every support request.
+update_permissions:
+  - role: administrator
+    permission:
+      columns:
+        - status
+      filter: {}
+      check: {}
+      set:
+        handled_by_steam_id: x-hasura-user-id
+    comment: Administrators can close or reopen requests and are recorded as the handler.
