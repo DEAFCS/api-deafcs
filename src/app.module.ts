@@ -58,6 +58,7 @@ import { ScrimsModule } from "./scrims/scrims.module";
 import { LeaguesModule } from "./leagues/leagues.module";
 import { PluginsModule } from "./plugins/plugins.module";
 import { VerificationApplicationsModule } from "./verification-applications/verification-applications.module";
+import { SupportRequestsModule } from "./support-requests/support-requests.module";
 
 @Module({
   imports: [
@@ -156,6 +157,7 @@ import { VerificationApplicationsModule } from "./verification-applications/veri
     LeaguesModule,
     PluginsModule,
     VerificationApplicationsModule,
+    SupportRequestsModule,
   ],
   providers: [loggerFactory()],
   controllers: [AppController, QuickConnectController],
