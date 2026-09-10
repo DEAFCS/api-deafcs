@@ -80,6 +80,12 @@ export class SupportRequestsController {
     const subject = NotificationsService.escapeHtml(request.subject);
 
     if (message.is_admin) {
+      // An admin reply only ever notifies the requester -- admins are
+      // never pinged for an admin reply. Guard the one case that could
+      // still self-notify: an admin replying on their own ticket.
+      if (String(message.sender_steam_id) === request.player_steam_id) {
+        return;
+      }
       // Requester-facing -- distinct type from the player-reply one below
       // so a push-notification click can route without knowing the
       // clicking player's role.
