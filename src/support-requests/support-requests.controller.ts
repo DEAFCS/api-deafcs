@@ -30,9 +30,29 @@ export class SupportRequestsController {
   }
 
   // Fires on every INSERT into support_requests -- notifies every
-  // administrator, same pattern as verification_applications above.
+  // administrator (INSERT), and notifies the requester when their request
+  // is closed (UPDATE status -> 'closed'). The event trigger is scoped to
+  // insert + update-of-status only, so an updated_at bump from a new
+  // message never reaches here.
   @HasuraEvent()
   public async support_requests(data: HasuraEventData<any>) {
+    if (data.op === "UPDATE") {
+      if (data.old?.status !== "closed" && data.new.status === "closed") {
+        const subject = NotificationsService.escapeHtml(data.new.subject);
+        await this.notifications.notifyPlayers(
+          "SupportRequestClosed" as unknown as e_notification_types_enum,
+          {
+            title: "Support Request Closed",
+            message: `Your support request was closed: ${subject}`,
+            role: "user",
+            entity_id: data.new.id,
+            steamIds: [String(data.new.player_steam_id)],
+          },
+        );
+      }
+      return;
+    }
+
     if (data.op !== "INSERT") {
       return;
     }
