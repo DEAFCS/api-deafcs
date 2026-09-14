@@ -311,6 +311,11 @@ export class MatchmakingGateway {
     await this.matchmakeService.releaseLobbyLock(lobby.id, 0);
     await this.matchmakingLobbyService.removeLobbyFromQueue(lobby.id);
     await this.matchmakingLobbyService.removeLobbyDetails(lobby.id);
+
+    // Same reasoning as MarkPlayerOffline -- removing the lobby fixes the
+    // Redis truth, but every connected client's "N in queue" badge is
+    // stale until someone is told it changed.
+    await this.matchmakeService.sendRegionStats();
   }
 
   @SubscribeMessage("matchmaking:confirm")
