@@ -77,16 +77,26 @@ CREATE OR REPLACE FUNCTION public.joined_tournament(tournament public.tournament
     LANGUAGE plpgsql STABLE
     AS $$
 DECLARE
-    on_roster boolean;
+    is_participant boolean;
 BEGIN
     SELECT EXISTS (
+        -- Team and generated-team participants are materialized here.
         SELECT 1
         FROM tournament_team_roster ttr
         WHERE
             tournament_id = tournament.id
             AND player_steam_id = (hasura_session ->> 'x-hasura-user-id')::bigint
-    ) INTO on_roster;
+        UNION ALL
+        -- Individual-registration players live in the pending signup pool
+        -- before teams are generated. Removed no-shows are not participants.
+        SELECT 1
+        FROM tournament_individual_signups tis
+        WHERE
+            tournament_id = tournament.id
+            AND player_steam_id = (hasura_session ->> 'x-hasura-user-id')::bigint
+            AND status IN ('Registered', 'Waitlisted', 'Assigned')
+    ) INTO is_participant;
 
-    RETURN on_roster;
+    RETURN is_participant;
 END;
 $$;

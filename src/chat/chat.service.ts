@@ -117,48 +117,7 @@ export class ChatService {
 
         break;
       case ChatLobbyType.Tournament:
-        const { tournaments } = await this.hasuraService.query(
-          {
-            tournaments: {
-              __args: {
-                where: {
-                  id: {
-                    _eq: id,
-                  },
-                  _or: [
-                    {
-                      is_organizer: {
-                        _eq: true,
-                      },
-                    },
-                    {
-                      teams: {
-                        _or: [
-                          {
-                            owner_steam_id: {
-                              _eq: user.steam_id,
-                            },
-                          },
-                          {
-                            roster: {
-                              player_steam_id: {
-                                _eq: user.steam_id,
-                              },
-                            },
-                          },
-                        ],
-                      },
-                    },
-                  ],
-                },
-              },
-              id: true,
-            },
-          },
-          user.steam_id,
-        );
-
-        if (tournaments.length === 0) {
+        if (!(await this.canAccessTournamentChat(id, user.steam_id))) {
           return;
         }
         break;
@@ -403,6 +362,46 @@ export class ChatService {
     );
   }
 
+  private async canAccessTournamentChat(
+    id: string,
+    steamId: string,
+  ): Promise<boolean> {
+    const { tournaments } = await this.hasuraService.query(
+      {
+        tournaments: {
+          __args: {
+            where: {
+              id: { _eq: id },
+              _or: [
+                { is_organizer: { _eq: true } },
+                {
+                  teams: {
+                    _or: [
+                      { owner_steam_id: { _eq: steamId } },
+                      { roster: { player_steam_id: { _eq: steamId } } },
+                    ],
+                  },
+                },
+                {
+                  individual_signups: {
+                    player_steam_id: { _eq: steamId },
+                    status: {
+                      _in: ["Registered", "Waitlisted", "Assigned"],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+          id: true,
+        },
+      },
+      steamId,
+    );
+
+    return tournaments.length > 0;
+  }
+
   public async sendMessageToChat(
     type: ChatLobbyType,
     id: string,
@@ -413,6 +412,15 @@ export class ChatService {
   ) {
     // verify they are in the lobby
     if (skipCheck === false) {
+      if (
+        type === ChatLobbyType.Tournament &&
+        !(await this.canAccessTournamentChat(id, player.steam_id))
+      ) {
+        await this.removeUserData(type, id, player.steam_id);
+        await this.redis.del(this.sessionsKey(type, id, player.steam_id));
+        return;
+      }
+
       const userData = await this.getUserData(type, id, player.steam_id);
       if (!userData) {
         return;
@@ -703,22 +711,49 @@ export class ChatService {
         return (lobby_players ?? []).map((p) => String(p.steam_id));
       }
       case ChatLobbyType.Tournament: {
-        const { tournament_team_roster, tournaments_by_pk } =
-          await this.hasuraService.query({
-            tournament_team_roster: {
-              __args: { where: { tournament_id: { _eq: id } } },
-              player_steam_id: true,
+        const {
+          tournament_team_roster,
+          tournament_individual_signups,
+          tournament_teams,
+          tournaments_by_pk,
+        } = await this.hasuraService.query({
+          tournament_team_roster: {
+            __args: { where: { tournament_id: { _eq: id } } },
+            player_steam_id: true,
+          },
+          tournament_individual_signups: {
+            __args: {
+              where: {
+                tournament_id: { _eq: id },
+                status: {
+                  _in: ["Registered", "Waitlisted", "Assigned"],
+                },
+              },
             },
-            tournaments_by_pk: {
-              __args: { id },
-              organizer_steam_id: true,
-              organizers: { steam_id: true },
-            },
-          });
+            player_steam_id: true,
+          },
+          tournament_teams: {
+            __args: { where: { tournament_id: { _eq: id } } },
+            owner_steam_id: true,
+          },
+          tournaments_by_pk: {
+            __args: { id },
+            organizer_steam_id: true,
+            organizers: { steam_id: true },
+          },
+        });
 
         const ids = new Set<string>();
         for (const roster of tournament_team_roster ?? []) {
           ids.add(String(roster.player_steam_id));
+        }
+        for (const signup of tournament_individual_signups ?? []) {
+          ids.add(String(signup.player_steam_id));
+        }
+        for (const team of tournament_teams ?? []) {
+          if (team.owner_steam_id) {
+            ids.add(String(team.owner_steam_id));
+          }
         }
         if (tournaments_by_pk?.organizer_steam_id) {
           ids.add(String(tournaments_by_pk.organizer_steam_id));
@@ -784,6 +819,15 @@ export class ChatService {
     const eventName = `lobby:${type}:${id}:${event}`;
 
     for (const { steamId } of users) {
+      if (
+        type === ChatLobbyType.Tournament &&
+        !(await this.canAccessTournamentChat(id, String(steamId)))
+      ) {
+        await this.removeUserData(type, id, steamId);
+        await this.redis.del(this.sessionsKey(type, id, steamId));
+        continue;
+      }
+
       await this.redis.publish(
         "send-message-to-steam-id",
         JSON.stringify({
