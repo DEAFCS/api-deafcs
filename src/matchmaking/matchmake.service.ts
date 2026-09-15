@@ -859,10 +859,9 @@ export class MatchmakeService {
         best_of: 1,
         knife: true,
         overtime: true,
-        // Only the team captain (or coach) should be able to call
-        // .tac/.timeout -- "CoachAndPlayers" let any player on the team
-        // call it, which wasn't the intent.
-        timeout_setting: "CoachAndCaptains",
+        // Any player on the team may call .tac/.timeout, not just the
+        // captain or coach.
+        timeout_setting: "CoachAndPlayers",
         region,
       },
     );
