@@ -84,11 +84,17 @@ export class MatchmakeService {
     const types: e_match_types_enum[] = ["Duel", "Wingman", "Competitive"];
 
     const regionStats: Partial<
-      Record<string, Partial<Record<e_match_types_enum, number[]>>>
+      Record<
+        string,
+        Partial<Record<e_match_types_enum, Array<{ index: number; size: number }>>>
+      >
     > = {};
 
     for (const type of types) {
       const lobbyIndexes = new Map<string, number>();
+      // A lobby can appear in more than one region's zset (multi-region
+      // search), so its player count is only worth fetching once per type.
+      const lobbySizes = new Map<string, number>();
 
       for (const region of regions.server_regions) {
         const lobbyIds = await this.redis.zrange(
@@ -98,14 +104,25 @@ export class MatchmakeService {
         );
 
         const stats = (regionStats[region.value] ??= {});
-        stats[type] = lobbyIds.map((lobbyId) => {
-          let index = lobbyIndexes.get(lobbyId);
-          if (index === undefined) {
-            index = lobbyIndexes.size;
-            lobbyIndexes.set(lobbyId, index);
-          }
-          return index;
-        });
+        stats[type] = await Promise.all(
+          lobbyIds.map(async (lobbyId) => {
+            let index = lobbyIndexes.get(lobbyId);
+            if (index === undefined) {
+              index = lobbyIndexes.size;
+              lobbyIndexes.set(lobbyId, index);
+            }
+
+            let size = lobbySizes.get(lobbyId);
+            if (size === undefined) {
+              const lobby =
+                await this.matchmakingLobbyService.getLobbyDetails(lobbyId);
+              size = lobby?.players.length ?? 1;
+              lobbySizes.set(lobbyId, size);
+            }
+
+            return { index, size };
+          }),
+        );
       }
     }
 
