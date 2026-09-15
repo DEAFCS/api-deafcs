@@ -798,22 +798,17 @@ export class MatchImportService {
     return insert_match_options_one.id;
   }
 
-  private async getAutodetectMinOverlap(): Promise<number> {
-    const rows = await this.postgres.query<Array<{ value: string }>>(
-      `SELECT value FROM settings WHERE name = 'scrim_team_autodetect_min_overlap'`,
-    );
-    const value = Number(rows.at(0)?.value);
-    return Number.isFinite(value) && value > 0 ? value : 4;
-  }
-
   private async detectTeamForLineup(
     steamIds: Array<string>,
-    minOverlap: number,
   ): Promise<{ team_id: string; overlap: number } | null> {
     if (steamIds.length === 0) {
       return null;
     }
 
+    // Every player in the lineup must be on the team's roster -- a lineup
+    // is only "playing as" a team when the whole lineup matches, not just
+    // most of it. A 4/5 overlap used to be enough, which misattributed a
+    // solo-queue fifth player's stats to the other four's team.
     const rows = await this.postgres.query<
       Array<{ team_id: string; overlap: string }>
     >(
@@ -821,10 +816,10 @@ export class MatchImportService {
          FROM team_roster tr
         WHERE tr.player_steam_id = ANY($1::bigint[])
         GROUP BY tr.team_id
-       HAVING count(*) >= $2
-        ORDER BY count(*) DESC, tr.team_id ASC
+       HAVING count(*) = $2
+        ORDER BY tr.team_id ASC
         LIMIT 1`,
-      [steamIds, minOverlap],
+      [steamIds, steamIds.length],
     );
 
     const top = rows.at(0);
@@ -890,18 +885,11 @@ export class MatchImportService {
     lineup1: [string, string[]],
     lineup2: [string, string[]],
   ): Promise<void> {
-    const minOverlap = await this.getAutodetectMinOverlap();
     const [lineup1Id, lineup1SteamIds] = lineup1;
     const [lineup2Id, lineup2SteamIds] = lineup2;
 
-    const detected1 = await this.detectTeamForLineup(
-      lineup1SteamIds,
-      minOverlap,
-    );
-    const detected2 = await this.detectTeamForLineup(
-      lineup2SteamIds,
-      minOverlap,
-    );
+    const detected1 = await this.detectTeamForLineup(lineup1SteamIds);
+    const detected2 = await this.detectTeamForLineup(lineup2SteamIds);
 
     let team1 = detected1?.team_id ?? null;
     let team2 = detected2?.team_id ?? null;
