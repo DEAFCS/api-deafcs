@@ -839,6 +839,24 @@ export class MatchmakeService {
       return;
     }
 
+    // playerConfirmMatchmaking runs once per player confirming, so the
+    // last few players confirming near-simultaneously can each read
+    // "everyone's confirmed" before any of them has created the match --
+    // producing duplicate matches for the same lobbies (seen live: 3
+    // matches for one lobby, only one of which ever got a map). This SET
+    // NX is the single source of truth for "has this confirmation already
+    // produced a match" -- only the caller that wins it proceeds.
+    const claimed = await this.redis.set(
+      `${getMatchmakingConformationCacheKey(confirmationId)}:match-claimed`,
+      1,
+      "EX",
+      300,
+      "NX",
+    );
+    if (!claimed) {
+      return;
+    }
+
     await this.createMatch(confirmationId);
   }
 
