@@ -8,6 +8,9 @@ import {
 import { TournamentFixtures } from "./utils/tournament-fixtures";
 
 describe("tournament chat participant access", () => {
+  const CHAT_STAGE = [
+    { type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 },
+  ];
   let db: SqlTestDb;
   let postgres: PostgresService;
   let fx: Fixtures;
@@ -95,7 +98,7 @@ describe("tournament chat participant access", () => {
   it.each(["Registered", "Waitlisted", "Assigned"] as const)(
     "allows an individual signup in %s state while registration is open",
     async (status) => {
-      const tournament = await tournaments.createTournament([]);
+      const tournament = await tournaments.createTournament(CHAT_STAGE);
       await tournaments.setStatus(
         tournament.id,
         tournament.organizer,
@@ -120,7 +123,7 @@ describe("tournament chat participant access", () => {
   );
 
   it("revokes access after withdrawal and for a no-show Removed signup", async () => {
-    const tournament = await tournaments.createTournament([]);
+    const tournament = await tournaments.createTournament(CHAT_STAGE);
     await tournaments.setStatus(
       tournament.id,
       tournament.organizer,
@@ -142,7 +145,7 @@ describe("tournament chat participant access", () => {
   });
 
   it("allows every registered team roster member, including the captain", async () => {
-    const tournament = await tournaments.createTournament([]);
+    const tournament = await tournaments.createTournament(CHAT_STAGE);
     await tournaments.setStatus(
       tournament.id,
       tournament.organizer,
