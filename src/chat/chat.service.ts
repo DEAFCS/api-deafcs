@@ -3,12 +3,22 @@ import { User } from "../auth/types/User";
 import Redis from "ioredis";
 import { RedisManagerService } from "../redis/redis-manager/redis-manager.service";
 import { HasuraService } from "../hasura/hasura.service";
+import { PostgresService } from "../postgres/postgres.service";
 import { RconService } from "../rcon/rcon.service";
 import { FiveStackWebSocketClient } from "src/sockets/types/FiveStackWebSocketClient";
 import { ChatLobbyType } from "./enums/ChatLobbyTypes";
 import { e_player_roles_enum, e_notification_types_enum } from "generated/schema";
 import { isRoleAbove } from "src/utilities/isRoleAbove";
 import { NotificationsService } from "../notifications/notifications.service";
+
+// Fixed id for the single, site-wide Announcements channel -- same
+// shape as Global's fixed "global" id, see joinMatchLobby. Deliberately
+// identical to ChatLobbyType.Announcement's own string value ("announcement"),
+// matching the Global/Organizer convention of type-string === id-string --
+// entity_id (`${type}:${id}`, see notifyLobbyMembers) and the frontend's
+// notification-click routing both rely on that equality.
+export const ANNOUNCEMENTS_LOBBY_ID = "announcement";
+
 @Injectable()
 export class ChatService {
   private redis: Redis;
@@ -19,6 +29,7 @@ export class ChatService {
     private readonly logger: Logger,
     private readonly rcon: RconService,
     private readonly hasuraService: HasuraService,
+    private readonly postgres: PostgresService,
     private readonly redisManager: RedisManagerService,
     private readonly notifications: NotificationsService,
   ) {
@@ -160,6 +171,15 @@ export class ChatService {
         }
 
         break;
+      case ChatLobbyType.Announcement:
+        // Read access is the same as Global -- every verified_user+ can
+        // see announcements. Posting is gated separately, in
+        // sendMessageToChat, to administrator only.
+        if (!isRoleAbove(user.role, "verified_user")) {
+          return;
+        }
+
+        break;
       case ChatLobbyType.Direct: {
         const parties = id.split(":");
         if (
@@ -242,11 +262,15 @@ export class ChatService {
       }),
     );
 
-    const messagesObject = await this.redis.hgetall(`chat_${type}_${id}`);
-
-    const messages = Object.entries(messagesObject).map(([, value]) =>
-      JSON.parse(value),
-    );
+    // Announcements are persisted in Postgres, not the Redis 24h-TTL
+    // hash every other chat type uses -- see ANNOUNCEMENTS_LOBBY_ID's
+    // comment for why.
+    const messages =
+      type === ChatLobbyType.Announcement
+        ? await this.getAnnouncementMessages()
+        : Object.entries(await this.redis.hgetall(`chat_${type}_${id}`)).map(
+            ([, value]) => JSON.parse(value),
+          );
 
     client.send(
       JSON.stringify({
@@ -432,6 +456,16 @@ export class ChatService {
       ) {
         return;
       }
+
+      // Only admins can post an announcement -- everyone else can read
+      // (checked in joinMatchLobby) but silently can't send, same
+      // "silently ignored" convention as the checks above.
+      if (
+        type === ChatLobbyType.Announcement &&
+        !isRoleAbove(player.role, "administrator")
+      ) {
+        return;
+      }
     }
 
     const name = await this.redis.get(
@@ -443,7 +477,7 @@ export class ChatService {
     )) as unknown as e_player_roles_enum;
 
     const timestamp = new Date();
-    const message = {
+    const message: Record<string, unknown> = {
       message: _message,
       timestamp: timestamp.toISOString(),
       from: {
@@ -459,19 +493,32 @@ export class ChatService {
       clientId,
     };
 
-    const messageKey = `chat_${type}_${id}`;
-    const messageField = `${player.steam_id}:${Date.now().toString()}`;
-    await this.redis.hset(messageKey, messageField, JSON.stringify(message));
+    if (type === ChatLobbyType.Announcement) {
+      // Persisted in Postgres instead of the Redis 24h-TTL hash below --
+      // see ANNOUNCEMENTS_LOBBY_ID. `id` is the row's own uuid, the
+      // stable handle editAnnouncement/deleteAnnouncement target.
+      const rows = await this.postgres.query<Array<{ id: string }>>(
+        `INSERT INTO public.announcements (author_steam_id, message)
+         VALUES ($1, $2)
+         RETURNING id`,
+        [player.steam_id, _message],
+      );
+      message.id = rows[0].id;
+    } else {
+      const messageKey = `chat_${type}_${id}`;
+      const messageField = `${player.steam_id}:${Date.now().toString()}`;
+      await this.redis.hset(messageKey, messageField, JSON.stringify(message));
 
-    await this.redis.sendCommand(
-      new Redis.Command("HEXPIRE", [
-        messageKey,
-        this.expiresIn,
-        "FIELDS",
-        1,
-        messageField,
-      ]),
-    );
+      await this.redis.sendCommand(
+        new Redis.Command("HEXPIRE", [
+          messageKey,
+          this.expiresIn,
+          "FIELDS",
+          1,
+          messageField,
+        ]),
+      );
+    }
 
     void this.to(type, id, "chat", message);
 
@@ -486,6 +533,108 @@ export class ChatService {
           `[chat] push notify failed for ${type}:${id}: ${(error as Error)?.message}`,
         ),
     );
+  }
+
+  private formatAnnouncementRow(row: {
+    id: string;
+    message: string;
+    created_at: string;
+    author_steam_id: string;
+    author_name: string | null;
+    author_role: e_player_roles_enum;
+    author_avatar_url: string | null;
+    author_profile_url: string | null;
+  }) {
+    return {
+      id: row.id,
+      message: row.message,
+      timestamp: new Date(row.created_at).toISOString(),
+      from: {
+        role: row.author_role,
+        name: row.author_name,
+        steam_id: row.author_steam_id,
+        avatar_url: row.author_avatar_url,
+        profile_url: row.author_profile_url,
+      },
+    };
+  }
+
+  private async getAnnouncementMessages() {
+    const rows = await this.postgres.query<
+      Array<{
+        id: string;
+        message: string;
+        created_at: string;
+        author_steam_id: string;
+        author_name: string | null;
+        author_role: e_player_roles_enum;
+        author_avatar_url: string | null;
+        author_profile_url: string | null;
+      }>
+    >(
+      `SELECT a.id, a.message, a.created_at,
+              p.steam_id::text AS author_steam_id,
+              p.name AS author_name,
+              p.role AS author_role,
+              COALESCE(p.custom_avatar_url, p.avatar_url) AS author_avatar_url,
+              p.profile_url AS author_profile_url
+         FROM public.announcements a
+         JOIN public.players p ON p.steam_id = a.author_steam_id
+        ORDER BY a.created_at DESC
+        LIMIT 100`,
+    );
+
+    return rows.reverse().map((row) => this.formatAnnouncementRow(row));
+  }
+
+  // Admin-only (re-checked here, not just trusted from the caller) --
+  // edits an announcement in place and pushes the new text to everyone
+  // currently viewing the channel. Announcements are the only chat type
+  // with persistence, so this has no equivalent for any other lobby type.
+  public async editAnnouncement(admin: User, id: string, _message: string) {
+    if (!isRoleAbove(admin.role, "administrator")) {
+      return;
+    }
+
+    const message = _message.trim();
+    if (!message) {
+      return;
+    }
+
+    const rows = await this.postgres.query<Array<{ id: string }>>(
+      `UPDATE public.announcements
+          SET message = $2, updated_at = now()
+        WHERE id = $1
+        RETURNING id`,
+      [id, message],
+    );
+
+    if (!rows[0]) {
+      return;
+    }
+
+    void this.to(ChatLobbyType.Announcement, ANNOUNCEMENTS_LOBBY_ID, "edited", {
+      id,
+      message,
+    });
+  }
+
+  // Admin-only (re-checked here, not just trusted from the caller) --
+  // removes an announcement entirely; everyone currently viewing the
+  // channel has it disappear from their list, same as it never existed.
+  public async deleteAnnouncement(admin: User, id: string) {
+    if (!isRoleAbove(admin.role, "administrator")) {
+      return;
+    }
+
+    await this.postgres.query(
+      `DELETE FROM public.announcements WHERE id = $1`,
+      [id],
+    );
+
+    void this.to(ChatLobbyType.Announcement, ANNOUNCEMENTS_LOBBY_ID, "deleted", {
+      id,
+    });
   }
 
   // Deliberately does NOT try to exclude members who are "present" --
@@ -510,6 +659,7 @@ export class ChatService {
     [ChatLobbyType.Tournament]: "TOURNAMENT",
     [ChatLobbyType.Match]: "MATCH",
     [ChatLobbyType.MatchTeam]: "TEAM",
+    [ChatLobbyType.Announcement]: "ANNOUNCEMENT",
   };
 
   private notificationTitle(
@@ -536,6 +686,24 @@ export class ChatService {
     if (type === ChatLobbyType.Global) {
       await this.notifications.sendSilent(
         "GlobalChatMessage" as unknown as e_notification_types_enum,
+        {
+          title: this.notificationTitle(type, sender.name),
+          message:
+            message.length > 200 ? `${message.slice(0, 200)}…` : message,
+          role: "verified_user" as e_player_roles_enum,
+          entity_id: `${type}:${id}`,
+          excludeSteamId: sender.steam_id,
+        },
+      );
+      return;
+    }
+
+    // Announcements have the same "no fixed roster" shape as Global --
+    // every verified_user+ player can read them (see joinMatchLobby's
+    // Announcement case), so notify by role rather than a fixed roster.
+    if (type === ChatLobbyType.Announcement) {
+      await this.notifications.sendSilent(
+        "AnnouncementChatMessage" as unknown as e_notification_types_enum,
         {
           title: this.notificationTitle(type, sender.name),
           message:
@@ -812,7 +980,12 @@ export class ChatService {
       // placeholder instead of nothing.
       | "call-joined"
       | "call-left"
-      | "call-joining",
+      | "call-joining"
+      // Announcement-only: an admin edited/removed a persisted message
+      // (see editAnnouncement/deleteAnnouncement) -- every other chat
+      // type has no equivalent since nothing else persists messages.
+      | "edited"
+      | "deleted",
     data: Record<string, any>,
   ) {
     const users = await this.getAllUsersInLobby(type, id);

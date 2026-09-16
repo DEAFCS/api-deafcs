@@ -20,4 +20,11 @@ export enum ChatLobbyType {
   // without a lookup, and joinMatchLobby's Direct case parses it back out
   // to check the requesting user is actually one of the two.
   Direct = "direct",
+  // Site-wide, read-only-for-everyone-but-admins channel. Fixed id
+  // "announcements" -- there's only ever one, same as Global. Unlike
+  // every other type here, messages are persisted in Postgres (see the
+  // `announcements` table) instead of Redis's 24h-TTL hash, since the
+  // whole point is that they stay readable for anyone who wasn't online
+  // when one was posted.
+  Announcement = "announcement",
 }
