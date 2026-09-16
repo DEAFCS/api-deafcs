@@ -33,6 +33,7 @@ describe("ChatService tournament access", () => {
       { warn: jest.fn() } as any,
       {} as any,
       hasura as any,
+      { query: jest.fn() } as any,
       { getConnection: () => redis } as any,
       {} as any,
     );
