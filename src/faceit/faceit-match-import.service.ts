@@ -93,6 +93,8 @@ export class FaceitMatchImportService {
       resourceUrl,
       startedAt,
       matchId,
+      undefined,
+      "faceit_api",
     );
   }
 

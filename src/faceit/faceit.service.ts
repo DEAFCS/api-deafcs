@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { CacheService } from "../cache/cache.service";
 import { HasuraService } from "../hasura/hasura.service";
+import { PostgresService } from "../postgres/postgres.service";
 
 export type FaceitPlayerData = {
   faceit_player_id: string;
@@ -11,17 +12,61 @@ export type FaceitPlayerData = {
   faceit_elo: number | null;
 };
 
+type FaceitPlayerLookup =
+  | { status: "ok"; data: FaceitPlayerData }
+  | { status: "not_found" }
+  | { status: "unavailable" };
+
+type FaceitHistoryItem = {
+  match_id?: string;
+  finished_at?: number;
+  status?: string;
+};
+
+export function latestCompletedFaceitMatchAt(
+  items: FaceitHistoryItem[],
+): string | null {
+  const latestSeconds = items.reduce<number | null>((latest, item) => {
+    if (
+      !item.finished_at ||
+      (item.status && item.status.toUpperCase() !== "FINISHED")
+    ) {
+      return latest;
+    }
+    return latest == null || item.finished_at > latest
+      ? item.finished_at
+      : latest;
+  }, null);
+
+  return latestSeconds == null
+    ? null
+    : new Date(latestSeconds * 1000).toISOString();
+}
+
 @Injectable()
 export class FaceitService {
   private static readonly BASE_URL = "https://open.faceit.com/data/v4";
   private static readonly REFRESH_INTERVAL_SECONDS = 60 * 60;
   private static readonly NO_ACCOUNT_TTL_SECONDS = 12 * 60 * 60;
+  private static readonly LEADERBOARD_STALE_HOURS = 6;
+  private static readonly LEADERBOARD_FAILED_RETRY_MINUTES = 45;
+  private static readonly LEADERBOARD_REFRESH_LIMIT = 100;
+  private static readonly LEADERBOARD_REFRESH_CONCURRENCY = 2;
+  private static readonly VERIFIED_ROLES = [
+    "verified_user",
+    "streamer",
+    "moderator",
+    "match_organizer",
+    "tournament_organizer",
+    "administrator",
+  ];
   private readonly apiKey: string;
 
   constructor(
     private readonly config: ConfigService,
     private readonly cache: CacheService,
     private readonly hasura: HasuraService,
+    private readonly postgres: PostgresService,
     private readonly logger: Logger,
   ) {
     this.apiKey = this.config.get("faceit.apiKey");
@@ -196,8 +241,18 @@ export class FaceitService {
       return null;
     }
 
-    const data = await this.fetchPlayer(steamId);
-    if (!data?.faceit_player_id) {
+    const lookup = await this.fetchPlayer(steamId);
+    if (lookup.status !== "ok") {
+      if (lookup.status === "not_found") {
+        await this.cache.put(
+          noAccountKey,
+          true,
+          FaceitService.NO_ACCOUNT_TTL_SECONDS,
+        );
+      }
+      return null;
+    }
+    if (!lookup.data.faceit_player_id) {
       await this.cache.put(
         noAccountKey,
         true,
@@ -205,7 +260,7 @@ export class FaceitService {
       );
       return null;
     }
-    return data.faceit_player_id;
+    return lookup.data.faceit_player_id;
   }
 
   public async getRecentMatches(
@@ -225,6 +280,42 @@ export class FaceitService {
         matchId: item.match_id,
         finishedAt: item.finished_at ?? null,
       }));
+  }
+
+  public async getLatestCompletedMatchAt(
+    playerId: string,
+  ): Promise<{ ok: boolean; finishedAt: string | null }> {
+    const path = `/players/${encodeURIComponent(playerId)}/history?game=cs2&offset=0&limit=20`;
+    const url = `${FaceitService.BASE_URL}${path}`;
+    this.logger.debug(`faceit GET ${url}`);
+
+    try {
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!response.ok) {
+        this.logger.error(
+          `faceit responded with ${response.status} for latest match of ${playerId}`,
+        );
+        return { ok: false, finishedAt: null };
+      }
+
+      const data = (await response.json()) as { items?: FaceitHistoryItem[] };
+      return {
+        ok: true,
+        finishedAt: latestCompletedFaceitMatchAt(data.items ?? []),
+      };
+    } catch (error) {
+      this.logger.error(
+        `faceit latest-match request failed for ${playerId}`,
+        error,
+      );
+      return { ok: false, finishedAt: null };
+    }
   }
 
   // Best-effort per-match elo from the match page (keyed by steam id). Returns
@@ -301,6 +392,10 @@ export class FaceitService {
     }
 
     const cacheKey = FaceitService.cacheKey(steamId);
+    const noAccountKey = FaceitService.noAccountKey(steamId);
+    if (!force && (await this.cache.has(noAccountKey))) {
+      return false;
+    }
     if (!force && (await this.cache.has(cacheKey))) {
       return false;
     }
@@ -313,19 +408,28 @@ export class FaceitService {
 
     this.logger.debug(`faceit refresh start for ${steamId}`);
     const startedAt = Date.now();
-    const data = await this.fetchPlayer(steamId);
+    const lookup = await this.fetchPlayer(steamId);
     const elapsedMs = Date.now() - startedAt;
 
-    if (!data) {
-      // No faceit profile linked to this steam id. The redis lock will
-      // keep us from re-querying for an hour; we deliberately do NOT
-      // touch the players row so the columns stay NULL and the UI keeps
-      // the chip hidden.
+    if (lookup.status !== "ok") {
+      if (lookup.status === "not_found") {
+        await this.cache.put(
+          noAccountKey,
+          true,
+          FaceitService.NO_ACCOUNT_TTL_SECONDS,
+        );
+      }
+      // A missing profile or an unavailable API never clears cached ratings.
       this.logger.debug(
-        `faceit fetched for ${steamId} in ${elapsedMs}ms: no profile, skipping db write`,
+        `faceit fetched for ${steamId} in ${elapsedMs}ms: ${lookup.status}, skipping db write`,
       );
       return false;
     }
+
+    const data = lookup.data;
+    const latestMatch = await this.getLatestCompletedMatchAt(
+      data.faceit_player_id,
+    );
 
     this.logger.debug(
       `faceit fetched for ${steamId} in ${elapsedMs}ms: ` +
@@ -334,29 +438,123 @@ export class FaceitService {
         `elo=${data.faceit_elo}`,
     );
 
-    await this.hasura.mutation({
-      update_players_by_pk: {
-        __args: {
-          pk_columns: { steam_id: steamId },
-          _set: {
-            faceit_player_id: data.faceit_player_id,
-            faceit_nickname: data.faceit_nickname,
-            faceit_skill_level: data.faceit_skill_level,
-            faceit_elo: data.faceit_elo,
-            faceit_url: data.faceit_url,
-            faceit_updated_at: new Date(),
-          },
-        },
-        __typename: true,
-      },
-    });
+    await this.postgres.query(
+      `UPDATE public.players
+          SET faceit_player_id = $2,
+              faceit_nickname = $3,
+              faceit_skill_level = $4,
+              faceit_elo = $5,
+              faceit_url = $6,
+              faceit_updated_at = now(),
+              faceit_last_match_at = CASE
+                WHEN $8::boolean THEN $7::timestamptz
+                ELSE faceit_last_match_at
+              END
+        WHERE steam_id = $1::bigint`,
+      [
+        steamId,
+        data.faceit_player_id,
+        data.faceit_nickname,
+        data.faceit_skill_level,
+        data.faceit_elo,
+        data.faceit_url,
+        latestMatch.finishedAt,
+        latestMatch.ok,
+      ],
+    );
 
     this.logger.debug(`faceit row written for ${steamId}`);
 
     return true;
   }
 
-  private async fetchPlayer(steamId: string): Promise<FaceitPlayerData | null> {
+  public async refreshVerifiedPlayers(): Promise<{
+    eligible: number;
+    refreshed: number;
+    skipped: number;
+    failed: number;
+  }> {
+    if (!this.isEnabled()) {
+      return { eligible: 0, refreshed: 0, skipped: 0, failed: 0 };
+    }
+
+    const selectedPlayers = await this.postgres.query<
+      Array<{ steam_id: string }>
+    >(
+      `SELECT steam_id::text
+         FROM public.players
+        WHERE role = ANY($1::text[])
+          AND (
+            faceit_updated_at IS NULL
+            OR faceit_updated_at < now() - ($2::text || ' hours')::interval
+          )
+          AND (
+            faceit_refresh_attempted_at IS NULL
+            OR faceit_refresh_attempted_at < now() - ($3::text || ' minutes')::interval
+          )
+        ORDER BY faceit_refresh_attempted_at ASC NULLS FIRST,
+                 faceit_updated_at ASC NULLS FIRST,
+                 steam_id ASC
+        LIMIT $4`,
+      [
+        FaceitService.VERIFIED_ROLES,
+        FaceitService.LEADERBOARD_STALE_HOURS,
+        FaceitService.LEADERBOARD_FAILED_RETRY_MINUTES,
+        FaceitService.LEADERBOARD_REFRESH_LIMIT,
+      ],
+    );
+    const players = selectedPlayers.slice(
+      0,
+      FaceitService.LEADERBOARD_REFRESH_LIMIT,
+    );
+
+    let next = 0;
+    let refreshed = 0;
+    let skipped = 0;
+    let failed = 0;
+    const worker = async () => {
+      while (next < players.length) {
+        const player = players[next++];
+        try {
+          // Record scheduling attempts before any cache/API work. This also
+          // advances cached no-account rows, so they cannot monopolize the
+          // front of every batch while valid cached ratings remain untouched.
+          await this.postgres.query(
+            `UPDATE public.players
+                SET faceit_refresh_attempted_at = now()
+              WHERE steam_id = $1::bigint`,
+            [player.steam_id],
+          );
+          if (await this.refreshPlayer(player.steam_id)) {
+            refreshed++;
+          } else {
+            skipped++;
+          }
+        } catch (error) {
+          failed++;
+          this.logger.warn(
+            `faceit verified-player refresh failed for ${player.steam_id}: ${(error as Error)?.message ?? String(error)}`,
+          );
+        }
+      }
+    };
+
+    await Promise.all(
+      Array.from(
+        {
+          length: Math.min(
+            FaceitService.LEADERBOARD_REFRESH_CONCURRENCY,
+            players.length,
+          ),
+        },
+        worker,
+      ),
+    );
+
+    return { eligible: players.length, refreshed, skipped, failed };
+  }
+
+  private async fetchPlayer(steamId: string): Promise<FaceitPlayerLookup> {
     const url = `${FaceitService.BASE_URL}/players?game=cs2&game_player_id=${encodeURIComponent(
       steamId,
     )}`;
@@ -369,20 +567,21 @@ export class FaceitService {
           Authorization: `Bearer ${this.apiKey}`,
           Accept: "application/json",
         },
+        signal: AbortSignal.timeout(15_000),
       });
 
       if (response.status === 404) {
         this.logger.debug(
           `faceit 404 for steam_id ${steamId} — no faceit account linked`,
         );
-        return null;
+        return { status: "not_found" };
       }
 
       if (!response.ok) {
         this.logger.error(
           `faceit responded with ${response.status} for steam_id ${steamId}`,
         );
-        return null;
+        return { status: "unavailable" };
       }
 
       const data = (await response.json()) as {
@@ -400,20 +599,23 @@ export class FaceitService {
       const cs2 = data.games?.cs2;
 
       return {
-        faceit_player_id: data.player_id,
-        faceit_nickname: data.nickname,
-        faceit_url: data.faceit_url
-          ? data.faceit_url.replace("{lang}", "en")
-          : null,
-        faceit_skill_level: cs2?.skill_level ?? null,
-        faceit_elo: cs2?.faceit_elo ?? null,
+        status: "ok",
+        data: {
+          faceit_player_id: data.player_id,
+          faceit_nickname: data.nickname,
+          faceit_url: data.faceit_url
+            ? data.faceit_url.replace("{lang}", "en")
+            : null,
+          faceit_skill_level: cs2?.skill_level ?? null,
+          faceit_elo: cs2?.faceit_elo ?? null,
+        },
       };
     } catch (error) {
       this.logger.error(
         `unable to fetch faceit profile for steam_id ${steamId}`,
         error,
       );
-      return null;
+      return { status: "unavailable" };
     }
   }
 

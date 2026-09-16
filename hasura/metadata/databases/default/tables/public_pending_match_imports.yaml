@@ -18,6 +18,7 @@ select_permissions:
         - error
         - map_name
         - match_start_time
+        - match_timestamp_source
         - created_at
         - updated_at
       filter:

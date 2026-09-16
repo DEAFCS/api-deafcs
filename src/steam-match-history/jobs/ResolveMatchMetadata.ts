@@ -37,9 +37,10 @@ export class ResolveMatchMetadata extends WorkerHost {
         share_code: string;
         demo_url: string | null;
         match_start_time: string | null;
+        match_timestamp_source: "steam_gc" | "demo_cdn_last_modified" | null;
       }>
     >(
-      `SELECT share_code, demo_url, match_start_time
+      `SELECT share_code, demo_url, match_start_time, match_timestamp_source
          FROM public.pending_match_imports
         WHERE valve_match_id = $1::numeric`,
       [valve_match_id],
@@ -55,6 +56,7 @@ export class ResolveMatchMetadata extends WorkerHost {
         share_code: row.share_code,
         demo_url: row.demo_url,
         match_start_time: row.match_start_time,
+        match_timestamp_source: row.match_timestamp_source,
       });
       return;
     }
@@ -83,24 +85,37 @@ export class ResolveMatchMetadata extends WorkerHost {
     const matchStartTime =
       resolved.matchStartTime ??
       (await this.matchImport.resolveDemoStartTime(resolved.demoUrl));
+    const matchTimestampSource = resolved.matchStartTime
+      ? "steam_gc"
+      : matchStartTime
+        ? "demo_cdn_last_modified"
+        : null;
 
     this.logger.log(
-      `resolved valve_match_id=${valve_match_id} map=${resolved.mapName ?? "<none>"} matchStartTime=${matchStartTime ?? "<none>"} [source=${resolved.matchStartTime ? "gc-matchtime" : matchStartTime ? "demo-cdn-last-modified" : "none"}] demoUrl=${resolved.demoUrl}`,
+      `resolved valve_match_id=${valve_match_id} map=${resolved.mapName ?? "<none>"} matchStartTime=${matchStartTime ?? "<none>"} [source=${matchTimestampSource ?? "none"}] demoUrl=${resolved.demoUrl}`,
     );
 
     await this.postgres.query(
       `UPDATE public.pending_match_imports
          SET map_name = $2,
              match_start_time = $3,
-             demo_url = $4
+             demo_url = $4,
+             match_timestamp_source = $5
        WHERE valve_match_id = $1::numeric`,
-      [valve_match_id, resolved.mapName, matchStartTime, resolved.demoUrl],
+      [
+        valve_match_id,
+        resolved.mapName,
+        matchStartTime,
+        resolved.demoUrl,
+        matchTimestampSource,
+      ],
     );
 
     await this.enqueueParse(valve_match_id, {
       share_code: row.share_code,
       demo_url: resolved.demoUrl,
       match_start_time: matchStartTime,
+      match_timestamp_source: matchTimestampSource,
     });
   }
 
@@ -110,6 +125,7 @@ export class ResolveMatchMetadata extends WorkerHost {
       share_code: string;
       demo_url: string | null;
       match_start_time: string | null;
+      match_timestamp_source: "steam_gc" | "demo_cdn_last_modified" | null;
     },
   ): Promise<void> {
     const jobId = `parse-${valveMatchId}`;
