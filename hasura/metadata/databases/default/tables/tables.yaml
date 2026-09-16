@@ -7,6 +7,7 @@
 - "!include migration_hashes_hashes.yaml"
 - "!include public__map_pool.yaml"
 - "!include public_abandoned_matches.yaml"
+- "!include public_admin_call_tokens.yaml"
 - "!include public_api_keys.yaml"
 - "!include public_clip_render_jobs.yaml"
 - "!include public_custom_pages.yaml"

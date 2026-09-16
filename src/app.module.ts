@@ -59,6 +59,7 @@ import { LeaguesModule } from "./leagues/leagues.module";
 import { PluginsModule } from "./plugins/plugins.module";
 import { VerificationApplicationsModule } from "./verification-applications/verification-applications.module";
 import { SupportRequestsModule } from "./support-requests/support-requests.module";
+import { AdminCallsModule } from "./admin-calls/admin-calls.module";
 
 @Module({
   imports: [
@@ -158,6 +159,7 @@ import { SupportRequestsModule } from "./support-requests/support-requests.modul
     PluginsModule,
     VerificationApplicationsModule,
     SupportRequestsModule,
+    AdminCallsModule,
   ],
   providers: [loggerFactory()],
   controllers: [AppController, QuickConnectController],
