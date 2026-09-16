@@ -155,10 +155,17 @@ export class DraftGameService {
         ? "TopEloTwo"
         : settings.captain_selection;
 
+    // Only match-organizer+ can turn ELO ON for a draft game (the web
+    // toggle is hidden from everyone else, see CreateDraftGame.vue's
+    // canManageElo) -- this was previously inverted, forcing
+    // elo_enabled=true for any non-privileged user regardless of what
+    // they sent, since regular users always submit elo_enabled=false
+    // (they have no UI to change it) and the old condition only
+    // honored `false` from a privileged caller.
     const eloEnabled =
-      settings.elo_enabled === false && isRoleAbove(user.role, "match_organizer")
-        ? false
-        : true;
+      settings.elo_enabled === true && isRoleAbove(user.role, "match_organizer")
+        ? true
+        : false;
 
     const draftGameId = await this.playerLock(user.steam_id, async () => {
       if (hostJoins) {
