@@ -104,24 +104,54 @@ export class MatchmakeService {
         );
 
         const stats = (regionStats[region.value] ??= {});
-        stats[type] = await Promise.all(
+        const entries = await Promise.all(
           lobbyIds.map(async (lobbyId) => {
+            let size = lobbySizes.get(lobbyId);
+            if (size === undefined) {
+              const lobby =
+                await this.matchmakingLobbyService.getLobbyDetails(lobbyId);
+
+              if (!lobby) {
+                // Orphaned queue entry: still zadd'd into this region/type's
+                // zset, but its details hash is gone -- getLobbyDetails can
+                // never resolve regions to clean it up via the normal
+                // removeLobbyFromQueue path (that needs the very details
+                // that are missing), so it would otherwise sit in the queue
+                // forever, inflating "N in queue" by a phantom player with
+                // no way to ever leave. Self-heal it here instead, since
+                // this loop already has the exact (type, region) pair that
+                // needs the zrem.
+                await this.redis.zrem(
+                  getMatchmakingQueueCacheKey(type, region.value),
+                  lobbyId,
+                );
+                await this.redis.zrem(
+                  getMatchmakingRankCacheKey(type, region.value),
+                  lobbyId,
+                );
+                lobbySizes.set(lobbyId, 0);
+                return null;
+              }
+
+              size = lobby.players.length;
+              lobbySizes.set(lobbyId, size);
+            }
+
+            if (size === 0) {
+              return null;
+            }
+
             let index = lobbyIndexes.get(lobbyId);
             if (index === undefined) {
               index = lobbyIndexes.size;
               lobbyIndexes.set(lobbyId, index);
             }
 
-            let size = lobbySizes.get(lobbyId);
-            if (size === undefined) {
-              const lobby =
-                await this.matchmakingLobbyService.getLobbyDetails(lobbyId);
-              size = lobby?.players.length ?? 1;
-              lobbySizes.set(lobbyId, size);
-            }
-
             return { index, size };
           }),
+        );
+        stats[type] = entries.filter(
+          (entry): entry is { index: number; size: number } => entry !== null,
         );
       }
     }
