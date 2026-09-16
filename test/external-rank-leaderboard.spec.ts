@@ -1,4 +1,5 @@
 import { PostgresService } from "../src/postgres/postgres.service";
+import { FaceitService } from "../src/faceit/faceit.service";
 import { Fixtures } from "./utils/fixtures";
 import {
   bootMigratedDb,
@@ -170,5 +171,92 @@ describe("external rank leaderboard", () => {
       [player],
     );
     expect(withoutProvenance.premier_last_match_at).toBeNull();
+  });
+
+  it("fairly advances past 100 persistent FACEIT failures while respecting successful-data staleness", async () => {
+    const stalePlayers = Array.from({ length: 105 }, () => fx.nextSteam());
+    const freshPlayer = fx.nextSteam();
+    await postgres.query(
+      `INSERT INTO players
+         (steam_id, name, role, faceit_elo, faceit_updated_at, faceit_last_match_at)
+       SELECT ids.steam_id::bigint,
+              'fair-' || ids.ordinality,
+              'verified_user',
+              2000,
+              CASE
+                WHEN ids.steam_id = $2 THEN now() - interval '5 hours'
+                ELSE now() - interval '7 hours'
+              END,
+              now() - interval '1 day'
+         FROM unnest($1::text[]) WITH ORDINALITY AS ids(steam_id, ordinality)`,
+      [[...stalePlayers, freshPlayer], freshPlayer],
+    );
+
+    const service = new FaceitService(
+      { get: jest.fn().mockReturnValue("server-side-key") } as never,
+      {} as never,
+      {} as never,
+      postgres,
+      {
+        debug: jest.fn(),
+        error: jest.fn(),
+        warn: jest.fn(),
+        log: jest.fn(),
+      } as never,
+    );
+    const refresh = jest
+      .spyOn(service, "refreshPlayer")
+      .mockResolvedValue(false);
+
+    await expect(service.refreshVerifiedPlayers()).resolves.toEqual({
+      eligible: 100,
+      refreshed: 0,
+      skipped: 100,
+      failed: 0,
+    });
+    expect(refresh).toHaveBeenCalledTimes(100);
+
+    await expect(service.refreshVerifiedPlayers()).resolves.toEqual({
+      eligible: 5,
+      refreshed: 0,
+      skipped: 5,
+      failed: 0,
+    });
+
+    const attemptedIds = new Set(
+      refresh.mock.calls.map(([attemptedSteamId]) => attemptedSteamId),
+    );
+    expect(attemptedIds).toEqual(new Set(stalePlayers));
+    expect(attemptedIds.has(freshPlayer)).toBe(false);
+
+    const [coverage] = await postgres.query<
+      Array<{
+        attempted: string;
+        fresh_attempted: string;
+        cached_values_preserved: boolean;
+      }>
+    >(
+      `SELECT count(*) FILTER (
+                WHERE steam_id = ANY($1::bigint[])
+                  AND faceit_refresh_attempted_at IS NOT NULL
+              )::text AS attempted,
+              count(*) FILTER (
+                WHERE steam_id = $2::bigint
+                  AND faceit_refresh_attempted_at IS NOT NULL
+              )::text AS fresh_attempted,
+              bool_and(
+                faceit_elo = 2000
+                AND faceit_updated_at IS NOT NULL
+                AND faceit_last_match_at IS NOT NULL
+              ) AS cached_values_preserved
+         FROM players
+        WHERE steam_id = ANY($3::bigint[])`,
+      [stalePlayers, freshPlayer, [...stalePlayers, freshPlayer]],
+    );
+    expect(coverage).toEqual({
+      attempted: "105",
+      fresh_attempted: "0",
+      cached_values_preserved: true,
+    });
   });
 });

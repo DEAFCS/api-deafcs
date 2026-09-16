@@ -4,6 +4,7 @@ import { ChatGateway } from "./chat.gateway";
 import { HasuraModule } from "src/hasura/hasura.module";
 import { RconModule } from "src/rcon/rcon.module";
 import { RedisModule } from "src/redis/redis.module";
+import { PostgresModule } from "src/postgres/postgres.module";
 import { loggerFactory } from "src/utilities/LoggerFactory";
 import { ChatController } from "./chat.controller";
 import { NotificationsModule } from "../notifications/notifications.module";
@@ -12,6 +13,7 @@ import { NotificationsModule } from "../notifications/notifications.module";
   imports: [
     HasuraModule,
     RedisModule,
+    PostgresModule,
     forwardRef(() => RconModule),
     NotificationsModule,
   ],

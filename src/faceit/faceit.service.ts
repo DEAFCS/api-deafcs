@@ -49,6 +49,7 @@ export class FaceitService {
   private static readonly REFRESH_INTERVAL_SECONDS = 60 * 60;
   private static readonly NO_ACCOUNT_TTL_SECONDS = 12 * 60 * 60;
   private static readonly LEADERBOARD_STALE_HOURS = 6;
+  private static readonly LEADERBOARD_FAILED_RETRY_MINUTES = 45;
   private static readonly LEADERBOARD_REFRESH_LIMIT = 100;
   private static readonly LEADERBOARD_REFRESH_CONCURRENCY = 2;
   private static readonly VERIFIED_ROLES = [
@@ -477,7 +478,9 @@ export class FaceitService {
       return { eligible: 0, refreshed: 0, skipped: 0, failed: 0 };
     }
 
-    const players = await this.postgres.query<Array<{ steam_id: string }>>(
+    const selectedPlayers = await this.postgres.query<
+      Array<{ steam_id: string }>
+    >(
       `SELECT steam_id::text
          FROM public.players
         WHERE role = ANY($1::text[])
@@ -485,13 +488,24 @@ export class FaceitService {
             faceit_updated_at IS NULL
             OR faceit_updated_at < now() - ($2::text || ' hours')::interval
           )
-        ORDER BY faceit_updated_at ASC NULLS FIRST, steam_id ASC
-        LIMIT $3`,
+          AND (
+            faceit_refresh_attempted_at IS NULL
+            OR faceit_refresh_attempted_at < now() - ($3::text || ' minutes')::interval
+          )
+        ORDER BY faceit_refresh_attempted_at ASC NULLS FIRST,
+                 faceit_updated_at ASC NULLS FIRST,
+                 steam_id ASC
+        LIMIT $4`,
       [
         FaceitService.VERIFIED_ROLES,
         FaceitService.LEADERBOARD_STALE_HOURS,
+        FaceitService.LEADERBOARD_FAILED_RETRY_MINUTES,
         FaceitService.LEADERBOARD_REFRESH_LIMIT,
       ],
+    );
+    const players = selectedPlayers.slice(
+      0,
+      FaceitService.LEADERBOARD_REFRESH_LIMIT,
     );
 
     let next = 0;
@@ -502,6 +516,15 @@ export class FaceitService {
       while (next < players.length) {
         const player = players[next++];
         try {
+          // Record scheduling attempts before any cache/API work. This also
+          // advances cached no-account rows, so they cannot monopolize the
+          // front of every batch while valid cached ratings remain untouched.
+          await this.postgres.query(
+            `UPDATE public.players
+                SET faceit_refresh_attempted_at = now()
+              WHERE steam_id = $1::bigint`,
+            [player.steam_id],
+          );
           if (await this.refreshPlayer(player.steam_id)) {
             refreshed++;
           } else {

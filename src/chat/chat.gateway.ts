@@ -95,4 +95,31 @@ export class ChatGateway {
       ),
     );
   }
+
+  // Admin-only announcement editing -- ChatService re-checks the role
+  // itself rather than trusting this handler, same as every other
+  // permission check in chat living in the service, not the gateway.
+  @SubscribeMessage("lobby:chat:edit")
+  async editMessage(
+    @MessageBody() data: { id: string; message: string },
+    @ConnectedSocket() client: FiveStackWebSocketClient,
+  ) {
+    if (!client.user || !data.id || !data.message) {
+      return;
+    }
+
+    await this.chat.editAnnouncement(client.user, data.id, data.message);
+  }
+
+  @SubscribeMessage("lobby:chat:delete")
+  async deleteMessage(
+    @MessageBody() data: { id: string },
+    @ConnectedSocket() client: FiveStackWebSocketClient,
+  ) {
+    if (!client.user || !data.id) {
+      return;
+    }
+
+    await this.chat.deleteAnnouncement(client.user, data.id);
+  }
 }

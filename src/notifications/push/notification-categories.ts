@@ -20,6 +20,10 @@ export const NOTIFICATION_CATEGORIES: Record<string, string[]> = {
   // request. Role-gated (match_organizer+), not a fixed roster, so it's
   // also its own early-return branch in ChatService.notifyLobbyMembers.
   organizer_chat: ["OrganizerChatMessage"],
+  // Sidebar Announcements channel (admin-only posting) -- defaults to
+  // enabled like every other category except global_chat/match_chat, see
+  // OPT_IN_CATEGORIES below.
+  announcement_chat: ["AnnouncementChatMessage"],
   news: ["NewsPublished"],
   tournaments: ["TournamentCreated", "TournamentReminder"],
   matches: ["MatchStatusChange", "MatchImported", "MatchSupport"],
