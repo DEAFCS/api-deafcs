@@ -712,6 +712,40 @@ export class ChatService {
           excludeSteamId: sender.steam_id,
         },
       );
+
+      // Same "chicken-and-egg" fix as the generic path below: the live
+      // to() broadcast above only reaches sockets that have a listener
+      // registered for this lobby, which (unlike joining, which happens
+      // automatically for every logged-in player -- see useChatTabSetup)
+      // requires <ChatLobby> to have actually mounted at least once this
+      // session, i.e. the chat hub panel having been opened. Without
+      // this, the unread badge silently never appeared for anyone who
+      // hadn't opened chat yet. No fixed roster to pull "everyone" from
+      // here, so this pings literally every registered player.
+      const senderId = String(sender.steam_id);
+      const { players: allPlayers } = await this.hasuraService.query({
+        players: { steam_id: true },
+      });
+      for (const player of allPlayers ?? []) {
+        const steamId = String(player.steam_id);
+        if (steamId === senderId) continue;
+        await this.redis.publish(
+          "send-message-to-steam-id",
+          JSON.stringify({
+            steamId,
+            event: "chat:new-message",
+            data: {
+              type,
+              id,
+              senderSteamId: sender.steam_id,
+              senderName: sender.name,
+              senderAvatarUrl: sender.avatar_url,
+              message:
+                message.length > 200 ? `${message.slice(0, 200)}…` : message,
+            },
+          }),
+        );
+      }
       return;
     }
 
