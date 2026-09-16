@@ -172,13 +172,10 @@ export class ChatService {
 
         break;
       case ChatLobbyType.Announcement:
-        // Read access is the same as Global -- every verified_user+ can
-        // see announcements. Posting is gated separately, in
-        // sendMessageToChat, to administrator only.
-        if (!isRoleAbove(user.role, "verified_user")) {
-          return;
-        }
-
+        // Read access is open to every logged-in player, including the
+        // base "user" role -- narrower than Global (verified_user+) on
+        // purpose, per explicit request. Posting is gated separately,
+        // in sendMessageToChat, to administrator only.
         break;
       case ChatLobbyType.Direct: {
         const parties = id.split(":");
@@ -699,8 +696,10 @@ export class ChatService {
     }
 
     // Announcements have the same "no fixed roster" shape as Global --
-    // every verified_user+ player can read them (see joinMatchLobby's
-    // Announcement case), so notify by role rather than a fixed roster.
+    // every logged-in player, including the base "user" role, can read
+    // them (see joinMatchLobby's Announcement case), so notify by role
+    // rather than a fixed roster. "user" is the lowest role in
+    // roleOrder (see isRoleAbove), so this reaches literally everyone.
     if (type === ChatLobbyType.Announcement) {
       await this.notifications.sendSilent(
         "AnnouncementChatMessage" as unknown as e_notification_types_enum,
@@ -708,7 +707,7 @@ export class ChatService {
           title: this.notificationTitle(type, sender.name),
           message:
             message.length > 200 ? `${message.slice(0, 200)}…` : message,
-          role: "verified_user" as e_player_roles_enum,
+          role: "user" as e_player_roles_enum,
           entity_id: `${type}:${id}`,
           excludeSteamId: sender.steam_id,
         },
