@@ -16,6 +16,11 @@ import { e_match_types_enum } from "../../generated";
 type MatchType = e_match_types_enum;
 type Side = "T" | "CT";
 
+export type ExternalTimestampSource =
+  | "steam_gc"
+  | "demo_cdn_last_modified"
+  | "faceit_api";
+
 type SteamPlayerSummary = {
   steamid: string;
   personaname?: string;
@@ -52,6 +57,7 @@ export class MatchImportService {
     matchStartTime?: string | null,
     externalId?: string | null,
     sourceObjectKey?: string,
+    externalTimestampSource?: ExternalTimestampSource | null,
   ): Promise<{ matchId: string | null; skipped?: string }> {
     if (MatchImportService.isFaceitServer(parsed.server_name)) {
       source = "faceit";
@@ -134,11 +140,11 @@ export class MatchImportService {
     await this.insertLineupPlayers(lineup2Id, lineup2Players);
 
     let startedAt = matchStartTime ?? null;
-    let startSource = startedAt ? "gc-matchtime" : "none";
+    let timestampSource = startedAt ? (externalTimestampSource ?? null) : null;
     if (!startedAt) {
       startedAt = await this.resolveDemoStartTime(demoUrl);
       if (startedAt) {
-        startSource = "demo-cdn-last-modified";
+        timestampSource = "demo_cdn_last_modified";
       }
     }
     if (!startedAt && source === "faceit") {
@@ -149,12 +155,12 @@ export class MatchImportService {
         startedAt =
           await this.demoMetadata.fetchFaceitMatchStartTime(faceitMatchId);
         if (startedAt) {
-          startSource = "faceit-api";
+          timestampSource = "faceit_api";
         }
       }
     }
     this.logger.log(
-      `match date for ${source}/${sourceKey}: ${startedAt ?? "<none — will stamp import time>"} [source=${startSource}]`,
+      `match date for ${source}/${sourceKey}: ${startedAt ?? "<none — will stamp import time>"} [source=${timestampSource ?? "unverified"}]`,
     );
 
     const matchId = await this.insertMatch({
@@ -163,6 +169,7 @@ export class MatchImportService {
       lineup2Id,
       matchOptionsId,
       startedAt,
+      externalTimestampSource: timestampSource,
     });
 
     if (externalId) {
@@ -988,6 +995,7 @@ export class MatchImportService {
     lineup2Id: string;
     matchOptionsId: string;
     startedAt: string | null;
+    externalTimestampSource: ExternalTimestampSource | null;
   }): Promise<string> {
     const stamp = args.startedAt ?? new Date().toISOString();
     const { insert_matches_one } = await this.hasura.mutation({
@@ -1001,7 +1009,8 @@ export class MatchImportService {
             match_options_id: args.matchOptionsId,
             started_at: stamp,
             ended_at: stamp,
-          },
+            external_timestamp_source: args.externalTimestampSource,
+          } as never,
         },
         id: true,
       },

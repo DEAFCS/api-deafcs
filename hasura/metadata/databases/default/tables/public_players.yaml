@@ -437,6 +437,7 @@ select_permissions:
         - country
         - custom_avatar_url
         - faceit_elo
+        - faceit_last_match_at
         - faceit_nickname
         - faceit_player_id
         - faceit_skill_level
@@ -486,6 +487,7 @@ select_permissions:
         - country
         - custom_avatar_url
         - faceit_elo
+        - faceit_last_match_at
         - faceit_nickname
         - faceit_player_id
         - faceit_skill_level
@@ -541,6 +543,7 @@ select_permissions:
         - last_read_news_at
         - custom_avatar_url
         - faceit_elo
+        - faceit_last_match_at
         - faceit_nickname
         - faceit_player_id
         - faceit_skill_level

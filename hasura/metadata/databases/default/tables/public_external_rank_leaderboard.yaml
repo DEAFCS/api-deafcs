@@ -1,0 +1,40 @@
+table:
+  name: external_rank_leaderboard
+  schema: public
+select_permissions:
+  - role: guest
+    permission:
+      columns:
+        - player_steam_id
+        - player_name
+        - player_avatar_url
+        - player_custom_avatar_url
+        - player_country
+        - faceit_elo
+        - faceit_skill_level
+        - faceit_nickname
+        - faceit_url
+        - faceit_last_match_at
+        - premier_rank
+        - premier_last_match_at
+      filter: {}
+      allow_aggregations: true
+    comment: ""
+  - role: user
+    permission:
+      columns:
+        - player_steam_id
+        - player_name
+        - player_avatar_url
+        - player_custom_avatar_url
+        - player_country
+        - faceit_elo
+        - faceit_skill_level
+        - faceit_nickname
+        - faceit_url
+        - faceit_last_match_at
+        - premier_rank
+        - premier_last_match_at
+      filter: {}
+      allow_aggregations: true
+    comment: ""

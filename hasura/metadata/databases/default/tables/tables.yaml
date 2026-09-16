@@ -69,6 +69,7 @@
 - "!include public_event_teams.yaml"
 - "!include public_event_tournaments.yaml"
 - "!include public_events.yaml"
+- "!include public_external_rank_leaderboard.yaml"
 - "!include public_friends.yaml"
 - "!include public_game_server_nodes.yaml"
 - "!include public_game_versions.yaml"

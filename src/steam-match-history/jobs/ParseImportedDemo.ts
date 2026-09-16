@@ -15,6 +15,7 @@ export type ParseImportedDemoPayload = {
   share_code?: string;
   demo_url?: string | null;
   match_start_time?: string | null;
+  match_timestamp_source?: "steam_gc" | "demo_cdn_last_modified" | null;
 };
 
 @UseQueue("SteamMatchHistory", SteamMatchHistoryQueues.ParseImportedDemo, {
@@ -55,9 +56,10 @@ export class ParseImportedDemo extends WorkerHost {
         share_code: string;
         demo_url: string | null;
         match_start_time: string | null;
+        match_timestamp_source: "steam_gc" | "demo_cdn_last_modified" | null;
       }>
     >(
-      `SELECT share_code, demo_url, match_start_time
+      `SELECT share_code, demo_url, match_start_time, match_timestamp_source
          FROM public.pending_match_imports
         WHERE valve_match_id = $1::numeric`,
       [valve_match_id],
@@ -71,6 +73,8 @@ export class ParseImportedDemo extends WorkerHost {
     const shareCode = row?.share_code ?? job.data.share_code ?? null;
     const matchStartTime =
       row?.match_start_time ?? job.data.match_start_time ?? null;
+    const matchTimestampSource =
+      row?.match_timestamp_source ?? job.data.match_timestamp_source ?? null;
 
     const demoUrl = row?.demo_url ?? job.data.demo_url ?? null;
 
@@ -87,7 +91,13 @@ export class ParseImportedDemo extends WorkerHost {
         [valve_match_id],
       );
 
-      await this.runImport(valve_match_id, shareCode, demoUrl, matchStartTime);
+      await this.runImport(
+        valve_match_id,
+        shareCode,
+        demoUrl,
+        matchStartTime,
+        matchTimestampSource,
+      );
     } catch (err) {
       const lastAttempt =
         (job.attemptsMade ?? 0) >= (job.opts.attempts ?? 1) - 1;
@@ -106,6 +116,7 @@ export class ParseImportedDemo extends WorkerHost {
     shareCode: string | null,
     demoUrl: string,
     matchStartTime: string | null,
+    matchTimestampSource: "steam_gc" | "demo_cdn_last_modified" | null,
   ): Promise<void> {
     const parsed = await this.demoParser.parseFromUrl(demoUrl);
     if (!parsed) {
@@ -119,6 +130,8 @@ export class ParseImportedDemo extends WorkerHost {
       demoUrl,
       matchStartTime,
       valveMatchId,
+      undefined,
+      matchTimestampSource,
     );
     if (!result.matchId) {
       throw new Error(result.skipped ?? "import failed");
