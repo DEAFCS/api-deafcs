@@ -111,6 +111,47 @@ export class AdminCallService {
         },
       }),
     );
+
+    // Safety net for the admin's own "Calling..." screen: it previously
+    // relied entirely on the player's browser running its own 60s
+    // auto-decline timer and calling respondToRing, so if that tab was
+    // closed or never loaded, the admin waited forever with no answer.
+    // This fires independently of the player's client and reaches the
+    // same result whenever nobody has actually responded by then.
+    setTimeout(() => {
+      void this.timeoutRingIfUnanswered(targetSteamId);
+    }, AdminCallService.RINGING_TTL_SECONDS * 1000);
+  }
+
+  private async timeoutRingIfUnanswered(targetSteamId: string): Promise<void> {
+    const key = AdminCallService.ringingKey(targetSteamId);
+    const raw = await this.redis.get(key);
+    if (!raw) {
+      // Already answered (or the key expired/was cleared some other way).
+      return;
+    }
+    const { adminSteamId } = JSON.parse(raw) as { adminSteamId: string };
+    await this.redis.del(key);
+    await this.notifyRingResolved(targetSteamId, adminSteamId, {
+      accepted: false,
+      playerName: null,
+      timedOut: true,
+    });
+  }
+
+  private async notifyRingResolved(
+    targetSteamId: string,
+    adminSteamId: string,
+    data: { accepted: boolean; playerName: string | null; timedOut?: boolean },
+  ): Promise<void> {
+    await this.redis.publish(
+      "send-message-to-steam-id",
+      JSON.stringify({
+        steamId: adminSteamId,
+        event: "admin-call:response",
+        data: { targetSteamId, ...data },
+      }),
+    );
   }
 
   // The player answering the ring above -- routes the accept/decline
@@ -135,21 +176,14 @@ export class AdminCallService {
     const { adminSteamId } = JSON.parse(raw) as { adminSteamId: string };
 
     // One answer per ring, whichever way it goes -- clears the slot so
-    // a stray retry can't re-deliver a second response for the same ring.
+    // a stray retry (or the timeout above) can't re-deliver a second
+    // response for the same ring.
     await this.redis.del(AdminCallService.ringingKey(targetSteamId));
 
-    await this.redis.publish(
-      "send-message-to-steam-id",
-      JSON.stringify({
-        steamId: adminSteamId,
-        event: "admin-call:response",
-        data: {
-          targetSteamId,
-          accepted,
-          playerName: user.name ?? null,
-        },
-      }),
-    );
+    await this.notifyRingResolved(targetSteamId, adminSteamId, {
+      accepted,
+      playerName: user.name ?? null,
+    });
   }
 
   public async join(

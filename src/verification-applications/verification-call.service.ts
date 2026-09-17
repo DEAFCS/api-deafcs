@@ -116,6 +116,47 @@ export class VerificationCallService {
         },
       }),
     );
+
+    // Safety net for the admin's own "Calling..." screen: it previously
+    // relied entirely on the applicant's browser running its own 60s
+    // auto-decline timer and calling respondToRing, so if that tab was
+    // closed or never loaded, the admin waited forever with no answer.
+    // This fires independently of the applicant's client and reaches the
+    // same result whenever nobody has actually responded by then.
+    setTimeout(() => {
+      void this.timeoutRingIfUnanswered(applicationId);
+    }, VerificationCallService.RINGING_TTL_SECONDS * 1000);
+  }
+
+  private async timeoutRingIfUnanswered(applicationId: string): Promise<void> {
+    const key = VerificationCallService.ringingKey(applicationId);
+    const raw = await this.redis.get(key);
+    if (!raw) {
+      // Already answered (or the key expired/was cleared some other way).
+      return;
+    }
+    const { adminSteamId } = JSON.parse(raw) as { adminSteamId: string };
+    await this.redis.del(key);
+    await this.notifyRingResolved(applicationId, adminSteamId, {
+      accepted: false,
+      applicantName: null,
+      timedOut: true,
+    });
+  }
+
+  private async notifyRingResolved(
+    applicationId: string,
+    adminSteamId: string,
+    data: { accepted: boolean; applicantName: string | null; timedOut?: boolean },
+  ): Promise<void> {
+    await this.redis.publish(
+      "send-message-to-steam-id",
+      JSON.stringify({
+        steamId: adminSteamId,
+        event: "verification-call:response",
+        data: { applicationId, ...data },
+      }),
+    );
   }
 
   // The applicant answering the ring above -- routes the accept/decline
@@ -143,21 +184,14 @@ export class VerificationCallService {
     const { adminSteamId } = JSON.parse(raw) as { adminSteamId: string };
 
     // One answer per ring, whichever way it goes -- clears the slot so
-    // a stray retry can't re-deliver a second response for the same ring.
+    // a stray retry (or the timeout above) can't re-deliver a second
+    // response for the same ring.
     await this.redis.del(VerificationCallService.ringingKey(applicationId));
 
-    await this.redis.publish(
-      "send-message-to-steam-id",
-      JSON.stringify({
-        steamId: adminSteamId,
-        event: "verification-call:response",
-        data: {
-          applicationId,
-          accepted,
-          applicantName: user.name ?? null,
-        },
-      }),
-    );
+    await this.notifyRingResolved(applicationId, adminSteamId, {
+      accepted,
+      applicantName: user.name ?? null,
+    });
   }
 
   // Mints (or reuses) a join token for the caller, matching the
