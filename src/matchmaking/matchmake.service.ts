@@ -205,67 +205,24 @@ export class MatchmakeService {
       return;
     }
 
-    // sort lobbies by average rank so lobbies with similar skill end up
-    // adjacent to each other — the grouping step below relies on that
-    // adjacency, and already expands its own rank tolerance the longer a
-    // group has waited, so wait time doesn't need factoring in twice here.
-    // (The previous version tried to blend rank and wait time in one
-    // comparator, but the wait term wasn't antisymmetric between a/b, which
-    // made the sort order effectively arbitrary.)
-    lobbies = lobbies.sort((a, b) => a.avgRank - b.avgRank);
+    // Queue order decides who gets into the next match, not rank -- a
+    // rank-similarity gate meant someone in a thin ELO bracket could wait
+    // indefinitely while more common brackets kept matching quickly, even
+    // though they'd been queuing far longer. Whoever's been waiting longest
+    // gets pulled in first; createMatches already finds the best-possible
+    // ELO-balanced split (splitIntoBalancedTeams) across whichever lobbies
+    // end up selected, so balance is still the goal, just not a queue gate.
+    lobbies = lobbies.sort(
+      (a, b) => a.joinedAt.getTime() - b.joinedAt.getTime(),
+    );
 
-    // group lobbies based on rank differences that expand with wait time
-    const groupedLobbies = [];
-    let currentGroup = [lobbies.at(0)];
-
-    for (const currentLobby of lobbies.slice(1)) {
-      const firstLobbyInGroup = currentGroup.at(0);
-
-      // calculate wait time in seconds
-      const waitTimeSeconds = Math.max(
-        10,
-        Math.floor((Date.now() - firstLobbyInGroup.joinedAt.getTime()) / 1000),
-      );
-
-      // maximum allowed rank difference increases proportionally with wait time (100 per minute)
-      const maxRankDiff = 25 * waitTimeSeconds;
-
-      // check if current lobby's rank is within acceptable range
-      if (
-        Math.abs(currentLobby.avgRank - firstLobbyInGroup.avgRank) <=
-        maxRankDiff
-      ) {
-        currentGroup.push(currentLobby);
-        continue;
-      }
-
-      // start new group if rank difference is too high
-      if (currentGroup.length > 0) {
-        groupedLobbies.push([...currentGroup]);
-      }
-      currentGroup = [currentLobby];
-    }
-
-    // add final group
-    if (currentGroup.length > 0) {
-      groupedLobbies.push(currentGroup);
-    }
-
-    const createMatchesPromises = [];
-
-    for (const group of groupedLobbies) {
-      createMatchesPromises.push(this.createMatches(region, type, group));
-    }
-
-    // once all results are returned as false we no longer need to matchmake
-    const results = await Promise.all(createMatchesPromises).finally(() => {
+    const totalPlayerNotQueued = await this.createMatches(
+      region,
+      type,
+      lobbies,
+    ).finally(() => {
       void this.releaseMatchmakeRegionLock(region);
     });
-
-    const totalPlayerNotQueued = results.reduce(
-      (acc, result) => acc + result,
-      0,
-    );
 
     if (totalPlayerNotQueued < ExpectedPlayers[type]) {
       await this.releaseMatchmakeRegionLock(region);
