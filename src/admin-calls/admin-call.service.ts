@@ -128,7 +128,10 @@ export class AdminCallService {
       { targetSteamId },
       {
         delay: AdminCallService.RINGING_TTL_SECONDS * 1000,
-        jobId: `admin-call-ring-timeout:${targetSteamId}`,
+        // BullMQ rejects a custom jobId containing ":" (reserved as its
+        // own Redis key separator) -- this call itself would throw
+        // "Custom Id cannot contain :" if left in.
+        jobId: `admin-call-ring-timeout-${targetSteamId}`,
       },
     );
   }
@@ -189,7 +192,7 @@ export class AdminCallService {
     // a stray retry (or the timeout job below) can't re-deliver a
     // second response for the same ring.
     await this.redis.del(AdminCallService.ringingKey(targetSteamId));
-    await this.queue.remove(`admin-call-ring-timeout:${targetSteamId}`);
+    await this.queue.remove(`admin-call-ring-timeout-${targetSteamId}`);
 
     await this.notifyRingResolved(targetSteamId, adminSteamId, {
       accepted,

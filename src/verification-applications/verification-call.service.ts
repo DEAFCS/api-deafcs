@@ -134,7 +134,10 @@ export class VerificationCallService {
       { applicationId },
       {
         delay: VerificationCallService.RINGING_TTL_SECONDS * 1000,
-        jobId: `verification-call-ring-timeout:${applicationId}`,
+        // BullMQ rejects a custom jobId containing ":" (reserved as its
+        // own Redis key separator) -- this call itself would throw
+        // "Custom Id cannot contain :" if left in.
+        jobId: `verification-call-ring-timeout-${applicationId}`,
       },
     );
   }
@@ -198,7 +201,7 @@ export class VerificationCallService {
     // a stray retry (or the timeout job below) can't re-deliver a
     // second response for the same ring.
     await this.redis.del(VerificationCallService.ringingKey(applicationId));
-    await this.queue.remove(`verification-call-ring-timeout:${applicationId}`);
+    await this.queue.remove(`verification-call-ring-timeout-${applicationId}`);
 
     await this.notifyRingResolved(applicationId, adminSteamId, {
       accepted,
