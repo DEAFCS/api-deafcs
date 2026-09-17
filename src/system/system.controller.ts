@@ -28,6 +28,19 @@ export class SystemController {
     private readonly chatService: ChatService,
   ) {}
 
+  // Letters, numbers, "-" and "_" only (same restriction as most
+  // FACEIT-style platforms) -- blocks lookalike/fullwidth unicode and
+  // special-character names copied from "fancy text" generators.
+  private static readonly PLAYER_NAME_REGEX = /^[A-Za-z0-9_-]+$/;
+
+  private static assertValidPlayerName(name: string) {
+    if (!SystemController.PLAYER_NAME_REGEX.test(name)) {
+      throw new Error(
+        "Name can only contain letters, numbers, - and _",
+      );
+    }
+  }
+
   @Get("healthz")
   public async status() {
     return;
@@ -166,6 +179,8 @@ export class SystemController {
 
   @HasuraAction()
   public async registerName(data: { user: User; name: string }) {
+    SystemController.assertValidPlayerName(data.name);
+
     await this.hasura.mutation({
       update_players_by_pk: {
         __args: {
@@ -237,6 +252,8 @@ export class SystemController {
 
   @HasuraAction()
   public async requestNameChange(data: { name: string; steam_id: string }) {
+    SystemController.assertValidPlayerName(data.name);
+
     const { notifications } = await this.hasura.query({
       notifications: {
         __args: {
