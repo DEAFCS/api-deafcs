@@ -100,8 +100,34 @@ export class DisconnectBudgetService {
     // uses it to flag the per-player ELO penalty from stage 1 onward, since
     // they touched the server.
     matchId?: string | null;
-  }): Promise<LeaverBanResult> {
+  }): Promise<LeaverBanResult | null> {
     const { steamId, serverId, violation, matchId } = params;
+
+    // Idempotency guard: a player who's already exhausted their budget in
+    // this match can trigger further leaver-timeout events on every
+    // subsequent disconnect (e.g. repeatedly reconnecting and immediately
+    // dropping again) -- each one landing here would otherwise stack
+    // another escalating ban on top of the one already applied for this
+    // exact match. One violation per player per match, full stop. (The
+    // game-server plugin now also guards this at the source, but this stays
+    // as a second, independent backstop.)
+    if (matchId) {
+      const [existing] = await this.postgres.query<Array<{ id: string }>>(
+        `SELECT id
+           FROM public.abandoned_matches
+          WHERE steam_id = $1
+            AND match_id = $2
+          LIMIT 1`,
+        [steamId, matchId],
+      );
+
+      if (existing) {
+        this.logger.log(
+          `Skipping duplicate leaver ban steam_id=${steamId} match_id=${matchId} violation=${violation} -- already applied once for this match`,
+        );
+        return null;
+      }
+    }
 
     const [player] = await this.postgres.query<
       Array<{
