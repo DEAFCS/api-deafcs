@@ -26,7 +26,13 @@ export default class MatchMapStatusEvent extends MatchEventProcessor<{
     let resolvedWinningLineupId: string | undefined =
       this.data.winning_lineup_id;
 
-    if (isFinished) {
+    // Cross-check any reported winner against the actual round score
+    // regardless of status, not only when status is "Finished". A map stuck
+    // in an earlier status (e.g. WaitingForTV, if its demo never finishes
+    // processing) can otherwise carry a wrong winning_lineup_id forever,
+    // since the score-derived override below was previously the only thing
+    // that ever corrected it.
+    if (isFinished || this.data.winning_lineup_id) {
       const { match_map_rounds } = await this.hasura.query({
         match_map_rounds: {
           __args: {
