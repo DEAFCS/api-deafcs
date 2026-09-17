@@ -1,10 +1,13 @@
 import { Injectable, Logger } from "@nestjs/common";
+import { InjectQueue } from "@nestjs/bullmq";
+import { Queue } from "bullmq";
 import type Redis from "ioredis";
 import { HasuraService } from "../hasura/hasura.service";
 import { PostgresService } from "../postgres/postgres.service";
 import { RedisManagerService } from "../redis/redis-manager/redis-manager.service";
 import { User } from "../auth/types/User";
 import { isRoleAbove } from "../utilities/isRoleAbove";
+import { VerificationCallQueues } from "./enums/VerificationCallQueues";
 
 // Admin <-> applicant webcam call for a verification application, for
 // when an admin wants to ask something live before approving or
@@ -36,6 +39,8 @@ export class VerificationCallService {
     private readonly hasura: HasuraService,
     private readonly postgres: PostgresService,
     private readonly redisManager: RedisManagerService,
+    @InjectQueue(VerificationCallQueues.RingTimeout)
+    private readonly queue: Queue,
   ) {
     this.mediaMtxHost = process.env.MEDIAMTX_CAMERA_HOST || "mediamtx-camera";
     this.whipPort = process.env.MEDIAMTX_CAMERA_WHIP_PORT || "8891";
@@ -121,14 +126,20 @@ export class VerificationCallService {
     // relied entirely on the applicant's browser running its own 60s
     // auto-decline timer and calling respondToRing, so if that tab was
     // closed or never loaded, the admin waited forever with no answer.
-    // This fires independently of the applicant's client and reaches the
-    // same result whenever nobody has actually responded by then.
-    setTimeout(() => {
-      void this.timeoutRingIfUnanswered(applicationId);
-    }, VerificationCallService.RINGING_TTL_SECONDS * 1000);
+    // A delayed BullMQ job (rather than a plain setTimeout) fires
+    // independently of the applicant's client AND survives this API pod
+    // restarting mid-ring, which an in-memory timer would silently lose.
+    await this.queue.add(
+      "TimeoutVerificationCallRing",
+      { applicationId },
+      {
+        delay: VerificationCallService.RINGING_TTL_SECONDS * 1000,
+        jobId: `verification-call-ring-timeout:${applicationId}`,
+      },
+    );
   }
 
-  private async timeoutRingIfUnanswered(applicationId: string): Promise<void> {
+  public async timeoutRingIfUnanswered(applicationId: string): Promise<void> {
     const key = VerificationCallService.ringingKey(applicationId);
     const raw = await this.redis.get(key);
     if (!raw) {
@@ -184,9 +195,10 @@ export class VerificationCallService {
     const { adminSteamId } = JSON.parse(raw) as { adminSteamId: string };
 
     // One answer per ring, whichever way it goes -- clears the slot so
-    // a stray retry (or the timeout above) can't re-deliver a second
-    // response for the same ring.
+    // a stray retry (or the timeout job below) can't re-deliver a
+    // second response for the same ring.
     await this.redis.del(VerificationCallService.ringingKey(applicationId));
+    await this.queue.remove(`verification-call-ring-timeout:${applicationId}`);
 
     await this.notifyRingResolved(applicationId, adminSteamId, {
       accepted,

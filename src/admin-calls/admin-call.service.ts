@@ -1,10 +1,13 @@
 import { Injectable, Logger } from "@nestjs/common";
+import { InjectQueue } from "@nestjs/bullmq";
+import { Queue } from "bullmq";
 import type Redis from "ioredis";
 import { HasuraService } from "../hasura/hasura.service";
 import { PostgresService } from "../postgres/postgres.service";
 import { RedisManagerService } from "../redis/redis-manager/redis-manager.service";
 import { User } from "../auth/types/User";
 import { isRoleAbove } from "../utilities/isRoleAbove";
+import { AdminCallQueues } from "./enums/AdminCallQueues";
 
 // General-purpose admin<->player webcam call, reachable from the
 // camera icon on every player profile page -- for anything an admin
@@ -34,6 +37,7 @@ export class AdminCallService {
     private readonly hasura: HasuraService,
     private readonly postgres: PostgresService,
     private readonly redisManager: RedisManagerService,
+    @InjectQueue(AdminCallQueues.RingTimeout) private readonly queue: Queue,
   ) {
     this.mediaMtxHost = process.env.MEDIAMTX_CAMERA_HOST || "mediamtx-camera";
     this.whipPort = process.env.MEDIAMTX_CAMERA_WHIP_PORT || "8891";
@@ -116,14 +120,20 @@ export class AdminCallService {
     // relied entirely on the player's browser running its own 60s
     // auto-decline timer and calling respondToRing, so if that tab was
     // closed or never loaded, the admin waited forever with no answer.
-    // This fires independently of the player's client and reaches the
-    // same result whenever nobody has actually responded by then.
-    setTimeout(() => {
-      void this.timeoutRingIfUnanswered(targetSteamId);
-    }, AdminCallService.RINGING_TTL_SECONDS * 1000);
+    // A delayed BullMQ job (rather than a plain setTimeout) fires
+    // independently of the player's client AND survives this API pod
+    // restarting mid-ring, which an in-memory timer would silently lose.
+    await this.queue.add(
+      "TimeoutAdminCallRing",
+      { targetSteamId },
+      {
+        delay: AdminCallService.RINGING_TTL_SECONDS * 1000,
+        jobId: `admin-call-ring-timeout:${targetSteamId}`,
+      },
+    );
   }
 
-  private async timeoutRingIfUnanswered(targetSteamId: string): Promise<void> {
+  public async timeoutRingIfUnanswered(targetSteamId: string): Promise<void> {
     const key = AdminCallService.ringingKey(targetSteamId);
     const raw = await this.redis.get(key);
     if (!raw) {
@@ -176,9 +186,10 @@ export class AdminCallService {
     const { adminSteamId } = JSON.parse(raw) as { adminSteamId: string };
 
     // One answer per ring, whichever way it goes -- clears the slot so
-    // a stray retry (or the timeout above) can't re-deliver a second
-    // response for the same ring.
+    // a stray retry (or the timeout job below) can't re-deliver a
+    // second response for the same ring.
     await this.redis.del(AdminCallService.ringingKey(targetSteamId));
+    await this.queue.remove(`admin-call-ring-timeout:${targetSteamId}`);
 
     await this.notifyRingResolved(targetSteamId, adminSteamId, {
       accepted,
