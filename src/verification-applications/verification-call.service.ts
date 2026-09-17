@@ -75,16 +75,34 @@ export class VerificationCallService {
     throw new Error("not authorized for this verification call");
   }
 
-  // Admin rings the applicant -- a live "Admin is calling..." popup on
-  // whatever page the applicant is currently on (see
+  // Which admin is currently ringing a given application -- kept just
+  // long enough for the applicant to actually answer (see ring/respond
+  // below), so the answer can be routed back to that specific admin's
+  // own popup instead of leaving it silently guessing.
+  private static ringingKey(applicationId: string): string {
+    return `verify-call-ringing:${applicationId}`;
+  }
+  private static readonly RINGING_TTL_SECONDS = 60;
+
+  // Admin rings the applicant -- a full-screen "Admin is calling..."
+  // overlay on whatever page the applicant is currently on (see
   // GlobalVerificationCallNotifier.vue), not itself part of the WebRTC
-  // signaling. The actual call only starts once the applicant answers
-  // and both sides open the call page and join().
+  // signaling. The admin's own call page now waits on this ring instead
+  // of jumping straight to the device picker (see respond below) --
+  // previously it had no way to know whether the applicant had even
+  // seen the popup, let alone answered it.
   public async ring(applicationId: string, user: User): Promise<void> {
     if (!isRoleAbove(user.role, "administrator")) {
       throw new Error("admin only");
     }
     const application = await this.getApplication(applicationId);
+
+    await this.redis.set(
+      VerificationCallService.ringingKey(applicationId),
+      JSON.stringify({ adminSteamId: String(user.steam_id) }),
+      "EX",
+      VerificationCallService.RINGING_TTL_SECONDS,
+    );
 
     await this.redis.publish(
       "send-message-to-steam-id",
@@ -95,6 +113,48 @@ export class VerificationCallService {
           applicationId,
           adminName: user.name ?? null,
           adminAvatarUrl: user.avatar_url ?? null,
+        },
+      }),
+    );
+  }
+
+  // The applicant answering the ring above -- routes the accept/decline
+  // back to whichever admin is actually waiting on it (not a broadcast,
+  // since only that one admin's popup cares). Silently no-ops if the
+  // ring already expired (admin gave up / popup closed) or nobody ever
+  // rang this application, same "fail quiet" convention as everything
+  // else here.
+  public async respondToRing(
+    applicationId: string,
+    user: User,
+    accepted: boolean,
+  ): Promise<void> {
+    const application = await this.getApplication(applicationId);
+    if (String(user.steam_id) !== application.player_steam_id) {
+      throw new Error("not authorized to respond to this call");
+    }
+
+    const raw = await this.redis.get(
+      VerificationCallService.ringingKey(applicationId),
+    );
+    if (!raw) {
+      return;
+    }
+    const { adminSteamId } = JSON.parse(raw) as { adminSteamId: string };
+
+    // One answer per ring, whichever way it goes -- clears the slot so
+    // a stray retry can't re-deliver a second response for the same ring.
+    await this.redis.del(VerificationCallService.ringingKey(applicationId));
+
+    await this.redis.publish(
+      "send-message-to-steam-id",
+      JSON.stringify({
+        steamId: adminSteamId,
+        event: "verification-call:response",
+        data: {
+          applicationId,
+          accepted,
+          applicantName: user.name ?? null,
         },
       }),
     );

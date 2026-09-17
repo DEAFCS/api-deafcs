@@ -3,6 +3,7 @@ import {
   Post,
   Get,
   Param,
+  Body,
   Req,
   Res,
   ForbiddenException,
@@ -43,6 +44,27 @@ export class VerificationCallController {
     const user = this.requireUser(request);
     try {
       await this.verificationCall.ring(applicationId, user);
+      return { ok: true };
+    } catch (error) {
+      return { error: (error as Error).message };
+    }
+  }
+
+  // Applicant-only: answers a ring, routed back to whichever admin is
+  // waiting on it (see VerificationCallService.respondToRing).
+  @Post(":applicationId/respond")
+  public async respond(
+    @Param("applicationId") applicationId: string,
+    @Body() body: { accepted?: boolean },
+    @Req() request: Request,
+  ) {
+    const user = this.requireUser(request);
+    try {
+      await this.verificationCall.respondToRing(
+        applicationId,
+        user,
+        body?.accepted === true,
+      );
       return { ok: true };
     } catch (error) {
       return { error: (error as Error).message };
