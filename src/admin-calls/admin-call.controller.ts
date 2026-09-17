@@ -3,6 +3,7 @@ import {
   Post,
   Get,
   Param,
+  Body,
   Req,
   Res,
   ForbiddenException,
@@ -43,6 +44,27 @@ export class AdminCallController {
     const user = this.requireUser(request);
     try {
       await this.adminCall.ring(targetSteamId, user);
+      return { ok: true };
+    } catch (error) {
+      return { error: (error as Error).message };
+    }
+  }
+
+  // Target-only: answers a ring, routed back to whichever admin is
+  // waiting on it (see AdminCallService.respondToRing).
+  @Post(":targetSteamId/respond")
+  public async respond(
+    @Param("targetSteamId") targetSteamId: string,
+    @Body() body: { accepted?: boolean },
+    @Req() request: Request,
+  ) {
+    const user = this.requireUser(request);
+    try {
+      await this.adminCall.respondToRing(
+        targetSteamId,
+        user,
+        body?.accepted === true,
+      );
       return { ok: true };
     } catch (error) {
       return { error: (error as Error).message };

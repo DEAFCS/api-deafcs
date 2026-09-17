@@ -72,16 +72,32 @@ export class AdminCallService {
     throw new Error("not authorized for this call");
   }
 
-  // Admin rings the player -- a live "Admin is calling..." popup on
-  // whatever page the player is currently on (see
+  // Which admin is currently ringing a given target -- kept just long
+  // enough for the player to actually answer (see ring/respondToRing
+  // below), so the answer can be routed back to that specific admin's
+  // own popup instead of leaving it silently guessing.
+  private static ringingKey(targetSteamId: string): string {
+    return `admin-call-ringing:${targetSteamId}`;
+  }
+  private static readonly RINGING_TTL_SECONDS = 60;
+
+  // Admin rings the player -- a full-screen "Admin is calling..."
+  // overlay on whatever page the player is currently on (see
   // GlobalAdminCallNotifier.vue), not itself part of the WebRTC
-  // signaling. The actual call only starts once the player answers and
-  // both sides open the call page and join().
+  // signaling. The admin's own call page now waits on this ring instead
+  // of jumping straight to the device picker (see respondToRing below).
   public async ring(targetSteamId: string, user: User): Promise<void> {
     if (!isRoleAbove(user.role, "administrator")) {
       throw new Error("admin only");
     }
     const player = await this.getPlayer(targetSteamId);
+
+    await this.redis.set(
+      AdminCallService.ringingKey(targetSteamId),
+      JSON.stringify({ adminSteamId: String(user.steam_id) }),
+      "EX",
+      AdminCallService.RINGING_TTL_SECONDS,
+    );
 
     await this.redis.publish(
       "send-message-to-steam-id",
@@ -92,6 +108,45 @@ export class AdminCallService {
           targetSteamId,
           adminName: user.name ?? null,
           adminAvatarUrl: user.avatar_url ?? null,
+        },
+      }),
+    );
+  }
+
+  // The player answering the ring above -- routes the accept/decline
+  // back to whichever admin is actually waiting on it, same "fail
+  // quiet" convention as the rest of this service if the ring already
+  // expired or nobody ever rang this target.
+  public async respondToRing(
+    targetSteamId: string,
+    user: User,
+    accepted: boolean,
+  ): Promise<void> {
+    if (String(user.steam_id) !== targetSteamId) {
+      throw new Error("not authorized to respond to this call");
+    }
+
+    const raw = await this.redis.get(
+      AdminCallService.ringingKey(targetSteamId),
+    );
+    if (!raw) {
+      return;
+    }
+    const { adminSteamId } = JSON.parse(raw) as { adminSteamId: string };
+
+    // One answer per ring, whichever way it goes -- clears the slot so
+    // a stray retry can't re-deliver a second response for the same ring.
+    await this.redis.del(AdminCallService.ringingKey(targetSteamId));
+
+    await this.redis.publish(
+      "send-message-to-steam-id",
+      JSON.stringify({
+        steamId: adminSteamId,
+        event: "admin-call:response",
+        data: {
+          targetSteamId,
+          accepted,
+          playerName: user.name ?? null,
         },
       }),
     );
