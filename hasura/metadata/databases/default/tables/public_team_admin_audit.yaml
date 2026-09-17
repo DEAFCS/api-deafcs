@@ -1,0 +1,19 @@
+table:
+  name: team_admin_audit
+  schema: public
+select_permissions:
+  - role: administrator
+    permission:
+      columns:
+        - action
+        - actor_role
+        - actor_steam_id
+        - created_at
+        - id
+        - new_role
+        - player_steam_id
+        - previous_role
+        - reason
+        - team_id
+      filter: {}
+    comment: Site administrators can review the immutable team Admin audit trail.

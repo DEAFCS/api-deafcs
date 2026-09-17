@@ -148,6 +148,7 @@
 - "!include public_support_request_messages.yaml"
 - "!include public_support_requests.yaml"
 - "!include public_team_invites.yaml"
+- "!include public_team_admin_audit.yaml"
 - "!include public_team_roster.yaml"
 - "!include public_team_scrim_alerts.yaml"
 - "!include public_team_scrim_availability.yaml"

@@ -1,0 +1,9 @@
+function:
+  name: recover_team_admin
+  schema: public
+configuration:
+  custom_root_fields: {}
+  exposed_as: mutation
+  session_argument: hasura_session
+permissions:
+  - role: administrator
