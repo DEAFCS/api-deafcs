@@ -167,6 +167,192 @@ describe("teams, rosters and lineup membership (SQL-driven)", () => {
     });
   });
 
+  describe("roster status caps and coach slots (tbiu_team_roster_status)", () => {
+    const setStatus = (teamId: string, steam: string, status: string) =>
+      postgres.query(
+        "UPDATE team_roster SET status = $3 WHERE team_id = $1 AND player_steam_id = $2",
+        [teamId, steam, status],
+      );
+
+    const setCoach = (teamId: string, steam: string, coach: boolean) =>
+      postgres.query(
+        "UPDATE team_roster SET coach = $3 WHERE team_id = $1 AND player_steam_id = $2",
+        [teamId, steam, coach],
+      );
+
+    const rosterStatusAndCoach = async (teamId: string, steam: string) => {
+      const [row] = await postgres.query<
+        Array<{ status: string; coach: boolean }>
+      >(
+        "SELECT status, coach FROM team_roster WHERE team_id = $1 AND player_steam_id = $2",
+        [teamId, steam],
+      );
+      return row;
+    };
+
+    const addMember = async (teamId: string, owner: string) => {
+      const player = await seedPlayer();
+      await asUser(owner, "admin", (query) =>
+        query(
+          "INSERT INTO team_roster (team_id, player_steam_id) VALUES ($1, $2)",
+          [teamId, player],
+        ),
+      );
+      return player;
+    };
+
+    it("a coach promoted to Starter atomically clears coach and enforces the 5-starter cap", async () => {
+      const owner = await seedPlayer();
+      const teamId = await createTeam(owner);
+      const coach = await addMember(teamId, owner);
+      await setCoach(teamId, coach, true);
+
+      // Fill all 5 real starter slots (owner + 4 more).
+      await setStatus(teamId, owner, "Starter");
+      for (let i = 0; i < 4; i++) {
+        const starter = await addMember(teamId, owner);
+        await setStatus(teamId, starter, "Starter");
+      }
+
+      // A coach's own stale status never counted, so promoting them once the
+      // team already has 5 real starters must fail with a clear error, not
+      // silently succeed or silently fail.
+      await expect(
+        postgres.query(
+          "UPDATE team_roster SET status = 'Starter', coach = false WHERE team_id = $1 AND player_steam_id = $2",
+          [teamId, coach],
+        ),
+      ).rejects.toThrow(/Only 5 starters are allowed/);
+
+      // Bench a real starter to free a slot, then the same atomic update succeeds.
+      await setStatus(teamId, owner, "Benched");
+      await postgres.query(
+        "UPDATE team_roster SET status = 'Starter', coach = false WHERE team_id = $1 AND player_steam_id = $2",
+        [teamId, coach],
+      );
+      expect(await rosterStatusAndCoach(teamId, coach)).toEqual({
+        status: "Starter",
+        coach: false,
+      });
+    });
+
+    it("a coach's leftover status is excluded from the starter count even before promotion", async () => {
+      const owner = await seedPlayer();
+      const teamId = await createTeam(owner);
+      // owner was a Starter before becoming a coach; toggling coach alone
+      // (the existing, preserved behavior) never clears status.
+      await setStatus(teamId, owner, "Starter");
+      await setCoach(teamId, owner, true);
+
+      // 5 other real players can still all become Starters -- the coach's
+      // leftover 'Starter' status must not occupy a slot.
+      for (let i = 0; i < 5; i++) {
+        const starter = await addMember(teamId, owner);
+        await setStatus(teamId, starter, "Starter");
+      }
+
+      const [{ count }] = await postgres.query<Array<{ count: string }>>(
+        "SELECT count(*)::text FROM team_roster WHERE team_id = $1 AND status = 'Starter' AND NOT coach",
+        [teamId],
+      );
+      expect(count).toBe("5");
+    });
+
+    it("Coach to Substitute and Coach to Benched atomically clear coach", async () => {
+      const owner = await seedPlayer();
+      const teamId = await createTeam(owner);
+      const coach = await addMember(teamId, owner);
+      await setCoach(teamId, coach, true);
+
+      await postgres.query(
+        "UPDATE team_roster SET status = 'Substitute', coach = false WHERE team_id = $1 AND player_steam_id = $2",
+        [teamId, coach],
+      );
+      expect(await rosterStatusAndCoach(teamId, coach)).toEqual({
+        status: "Substitute",
+        coach: false,
+      });
+
+      await postgres.query(
+        "UPDATE team_roster SET status = 'Benched', coach = false WHERE team_id = $1 AND player_steam_id = $2",
+        [teamId, coach],
+      );
+      expect(await rosterStatusAndCoach(teamId, coach)).toEqual({
+        status: "Benched",
+        coach: false,
+      });
+    });
+
+    it("rejects promoting a real Starter beyond the 5-starter cap with a clear error", async () => {
+      const owner = await seedPlayer();
+      const teamId = await createTeam(owner);
+      await setStatus(teamId, owner, "Starter");
+      for (let i = 0; i < 4; i++) {
+        const starter = await addMember(teamId, owner);
+        await setStatus(teamId, starter, "Starter");
+      }
+      const sixth = await addMember(teamId, owner);
+
+      await expect(setStatus(teamId, sixth, "Starter")).rejects.toThrow(
+        /Only 5 starters are allowed/,
+      );
+    });
+
+    it("rejects promoting beyond the substitute cap with a clear error", async () => {
+      const owner = await seedPlayer();
+      const teamId = await createTeam(owner);
+      const sub1 = await addMember(teamId, owner);
+      const sub2 = await addMember(teamId, owner);
+      await setStatus(teamId, sub1, "Substitute");
+      await setStatus(teamId, sub2, "Substitute");
+      const third = await addMember(teamId, owner);
+
+      await expect(setStatus(teamId, third, "Substitute")).rejects.toThrow(
+        /Only 2 substitutes are allowed/,
+      );
+    });
+
+    it("a new invite cascades Starter -> Substitute -> Benched once each tier is full, never failing on insert", async () => {
+      const owner = await seedPlayer();
+      const teamId = await createTeam(owner);
+      await setStatus(teamId, owner, "Starter");
+      for (let i = 0; i < 4; i++) {
+        const starter = await addMember(teamId, owner);
+        await setStatus(teamId, starter, "Starter");
+      }
+      for (let i = 0; i < 2; i++) {
+        const sub = await addMember(teamId, owner);
+        await setStatus(teamId, sub, "Substitute");
+      }
+
+      const player = await seedPlayer();
+      await asUser(owner, "admin", (query) =>
+        query(
+          "INSERT INTO team_roster (team_id, player_steam_id, status) VALUES ($1, $2, 'Starter')",
+          [teamId, player],
+        ),
+      );
+
+      expect((await rosterStatusAndCoach(teamId, player))?.status).toBe(
+        "Benched",
+      );
+    });
+
+    it("normal player to Coach preserves existing behavior: coach flips without touching status", async () => {
+      const owner = await seedPlayer();
+      const teamId = await createTeam(owner);
+      const member = await addMember(teamId, owner);
+      await setStatus(teamId, member, "Substitute");
+
+      await setCoach(teamId, member, true);
+
+      expect(await rosterStatusAndCoach(teamId, member)).toEqual({
+        status: "Substitute",
+        coach: true,
+      });
+    });
+  });
+
   describe("match lineup membership", () => {
     // Wingman keeps lineups at two slots, enough for captain-handover tests.
     const createMatch = () => fx.match({ type: "Wingman", mr: 8, mapVeto: true });

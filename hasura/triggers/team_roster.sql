@@ -284,8 +284,12 @@ CREATE TRIGGER tad_team_roster AFTER DELETE ON public.team_roster FOR EACH ROW E
 -- Roster status caps: always 5 starters and team_max_subs() substitutes per
 -- team. On insert a would-be starter cascades down to the next open slot
 -- (Starter -> Substitute -> Benched) so adding a player never fails; an
--- explicit promotion once a tier is full is rejected. Coaches are ranked like
--- anyone. The bulk rebalance sets fivestack.rebalancing so this stands aside.
+-- explicit promotion once a tier is full is rejected. A coach does not
+-- occupy a playing slot: NEW.coach rows are exempt from the cap check, and
+-- existing coach rows (which may carry a leftover status from before they
+-- became a coach) are excluded from the count so they never consume
+-- capacity that a real Starter/Substitute needs. The bulk rebalance sets
+-- fivestack.rebalancing so this stands aside.
 CREATE OR REPLACE FUNCTION public.tbiu_team_roster_status() RETURNS TRIGGER
     LANGUAGE plpgsql
     AS $$
@@ -297,10 +301,10 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    IF NEW.status = 'Starter' THEN
+    IF NEW.status = 'Starter' AND NOT NEW.coach THEN
         _max := 5;
         SELECT COUNT(*) INTO _count FROM public.team_roster
-        WHERE team_id = NEW.team_id AND status = 'Starter'
+        WHERE team_id = NEW.team_id AND status = 'Starter' AND NOT coach
           AND player_steam_id <> NEW.player_steam_id;
         IF _count >= _max THEN
             IF TG_OP = 'INSERT' THEN
@@ -312,10 +316,10 @@ BEGIN
         END IF;
     END IF;
 
-    IF NEW.status = 'Substitute' THEN
+    IF NEW.status = 'Substitute' AND NOT NEW.coach THEN
         _max := public.team_max_subs();
         SELECT COUNT(*) INTO _count FROM public.team_roster
-        WHERE team_id = NEW.team_id AND status = 'Substitute'
+        WHERE team_id = NEW.team_id AND status = 'Substitute' AND NOT coach
           AND player_steam_id <> NEW.player_steam_id;
         IF _count >= _max THEN
             IF TG_OP = 'INSERT' THEN
