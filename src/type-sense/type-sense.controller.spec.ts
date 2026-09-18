@@ -33,7 +33,14 @@ describe("TypeSenseController player_sanctions event -> co-player notification d
     );
   });
 
-  it.each(["ban", "website_chat_mute", "mute", "gag", "silence"])(
+  it.each([
+    "ban",
+    "website_chat_mute",
+    "website_restriction",
+    "mute",
+    "gag",
+    "silence",
+  ])(
     "queues the co-player notification job on INSERT for a %s sanction (type filtering happens inside NotificationsService)",
     async (type) => {
       await controller.player_sanctions({
@@ -53,7 +60,14 @@ describe("TypeSenseController player_sanctions event -> co-player notification d
     },
   );
 
-  it.each(["ban", "website_chat_mute", "mute", "gag", "silence"])(
+  it.each([
+    "ban",
+    "website_chat_mute",
+    "website_restriction",
+    "mute",
+    "gag",
+    "silence",
+  ])(
     "does NOT queue a notification job on early unmute/unsanction (UPDATE soft-delete) for a %s sanction",
     async (type) => {
       await controller.player_sanctions({

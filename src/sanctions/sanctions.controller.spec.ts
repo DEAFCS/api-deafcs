@@ -5,7 +5,11 @@ describe("SanctionsController website chat authorization", () => {
     sanctionServerPlayer: jest.fn().mockResolvedValue({ id: "id" }),
     unsanctionServerPlayer: jest.fn().mockResolvedValue({ id: "id" }),
   };
-  const controller = new SanctionsController(service as any);
+  const websiteRestrictions = { getStatus: jest.fn() };
+  const controller = new SanctionsController(
+    service as any,
+    websiteRestrictions as any,
+  );
 
   beforeEach(() => jest.clearAllMocks());
 
@@ -66,6 +70,65 @@ describe("SanctionsController website chat authorization", () => {
         type: "gag",
         reason: "game chat",
         user: { steam_id: "1", role: "moderator" } as any,
+      }),
+    ).resolves.toEqual({ id: "id" });
+  });
+
+  it("allows only site administrators to issue or combine website restrictions", async () => {
+    for (const role of ["user", "moderator", "match_organizer"] as const) {
+      await expect(
+        controller.sanctionServerPlayer({
+          steam_id: "2",
+          type: "website_restriction",
+          reason: "abuse",
+          user: { steam_id: "1", role } as any,
+        }),
+      ).rejects.toThrow("not allowed");
+
+      await expect(
+        controller.sanctionServerPlayer({
+          steam_id: "2",
+          type: "ban",
+          reason: "abuse",
+          also_restrict_website: true,
+          user: { steam_id: "1", role } as any,
+        }),
+      ).rejects.toThrow("not allowed");
+    }
+
+    await expect(
+      controller.sanctionServerPlayer({
+        steam_id: "2",
+        type: "ban",
+        reason: "abuse",
+        also_restrict_website: true,
+        user: { steam_id: "1", role: "administrator" } as any,
+      }),
+    ).resolves.toEqual({ id: "id" });
+
+    expect(service.sanctionServerPlayer).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        type: "ban",
+        alsoRestrictWebsite: true,
+        sanctionedBySteamId: "1",
+      }),
+    );
+  });
+
+  it("requires an administrator to revoke a website restriction", async () => {
+    await expect(
+      controller.unsanctionServerPlayer({
+        steam_id: "2",
+        type: "website_restriction",
+        user: { steam_id: "1", role: "match_organizer" } as any,
+      }),
+    ).rejects.toThrow("not allowed");
+
+    await expect(
+      controller.unsanctionServerPlayer({
+        steam_id: "2",
+        type: "website_restriction",
+        user: { steam_id: "1", role: "administrator" } as any,
       }),
     ).resolves.toEqual({ id: "id" });
   });

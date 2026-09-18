@@ -674,6 +674,7 @@ type Mutation {
     reason: String
     duration: Float
     evidence_message_id: String
+    also_restrict_website: Boolean
   ): SanctionResult!
 }
 
@@ -842,6 +843,10 @@ type Mutation {
 
 type Query {
   telemetryStats: TelemetryStats!
+}
+
+type Query {
+  websiteRestrictionStatus: WebsiteRestrictionStatus!
 }
 
 type Mutation {
@@ -1332,6 +1337,13 @@ type SanctionResult {
   id: String
   enforced: Boolean!
   message: String
+}
+
+type WebsiteRestrictionStatus {
+  active: Boolean!
+  reason: String
+  expiresAt: String
+  permanent: Boolean!
 }
 
 type KickResult {

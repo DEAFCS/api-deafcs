@@ -19,6 +19,7 @@ import { isRoleAbove } from "src/utilities/isRoleAbove";
 import { e_player_roles_enum } from "generated";
 import { SocketsService } from "src/sockets/sockets.service";
 import { TermsService } from "src/terms/terms.service";
+import { WebsiteRestrictionsService } from "src/website-restrictions/website-restrictions.service";
 
 @WebSocketGateway({
   path: "/ws/web",
@@ -34,6 +35,7 @@ export class MatchmakingGateway {
     public readonly matchmakingLobbyService: MatchmakingLobbyService,
     private readonly cache: CacheService,
     private readonly terms: TermsService,
+    private readonly websiteRestrictions: WebsiteRestrictionsService,
   ) {
     this.redis = this.redisManager.getConnection();
   }
@@ -134,6 +136,19 @@ export class MatchmakingGateway {
       return;
     }
 
+    const restriction = await this.websiteRestrictions.getStatus(user.steam_id);
+    if (restriction.active) {
+      await this.redis.publish(
+        "send-message-to-steam-id",
+        JSON.stringify({
+          steamId: user.steam_id,
+          event: "matchmaking:error",
+          data: { message: "Your account is restricted to read-only access" },
+        }),
+      );
+      return;
+    }
+
     const { server_regions } = await this.hasura.query({
       server_regions: {
         __args: {
@@ -231,6 +246,12 @@ export class MatchmakingGateway {
       // passed so the catch block below broadcasts this to the whole
       // party, not just whoever triggered the join.
       for (const player of lobby.players) {
+        if ((await this.websiteRestrictions.getStatus(player.steam_id)).active) {
+          throw new JoinQueueError(
+            "A party member's account is restricted to read-only access",
+            lobby.id,
+          );
+        }
         if (!(await this.terms.hasAcceptedCurrentTerms(player.steam_id))) {
           throw new JoinQueueError(
             "All party members must accept the current Terms of Service and DEAFCS Rules before joining queue",
@@ -331,6 +352,20 @@ export class MatchmakingGateway {
       return;
     }
     const { confirmationId } = data;
+
+    try {
+      await this.websiteRestrictions.assertCanParticipate(user.steam_id);
+    } catch {
+      await this.redis.publish(
+        "send-message-to-steam-id",
+        JSON.stringify({
+          steamId: user.steam_id,
+          event: "matchmaking:error",
+          data: { message: "Your account is restricted to read-only access" },
+        }),
+      );
+      return;
+    }
 
     if (!(await this.terms.hasAcceptedCurrentTerms(user.steam_id))) {
       await this.redis.publish(

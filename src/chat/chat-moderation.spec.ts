@@ -18,6 +18,7 @@ describe("ChatService website moderation", () => {
   let hasura: { query: jest.Mock };
   let postgres: { query: jest.Mock };
   let redis: Record<string, jest.Mock>;
+  let websiteRestrictions: { getStatus: jest.Mock };
 
   beforeEach(() => {
     hasura = { query: jest.fn() };
@@ -34,6 +35,9 @@ describe("ChatService website moderation", () => {
       publish: jest.fn().mockResolvedValue(1),
       sendCommand: jest.fn().mockResolvedValue(1),
     };
+    websiteRestrictions = {
+      getStatus: jest.fn().mockResolvedValue({ active: false }),
+    };
     service = new ChatService(
       { warn: jest.fn() } as any,
       {} as any,
@@ -47,6 +51,7 @@ describe("ChatService website moderation", () => {
         getMyBlockedSteamIds: jest.fn().mockResolvedValue(new Set()),
         getViewersBlocking: jest.fn().mockResolvedValue(new Set()),
       } as any,
+      websiteRestrictions as any,
     );
   });
 
@@ -109,6 +114,35 @@ describe("ChatService website moderation", () => {
     ).resolves.toBe(false);
 
     expect(redis.hget).not.toHaveBeenCalled();
+    expect(postgres.query).not.toHaveBeenCalled();
+    expect(service.to).not.toHaveBeenCalled();
+  });
+
+  it("does not let a restricted administrator delete another player's message", async () => {
+    hasura.query.mockResolvedValue({ players_by_pk: administrator });
+    websiteRestrictions.getStatus.mockResolvedValue({ active: true });
+    jest.spyOn(service, "to").mockResolvedValue(undefined);
+
+    await expect(
+      service.deleteMessage(
+        administrator,
+        ChatLobbyType.Global,
+        "global",
+        "message-1",
+      ),
+    ).resolves.toBe(false);
+
+    expect(redis.hget).not.toHaveBeenCalled();
+    expect(postgres.query).not.toHaveBeenCalled();
+    expect(service.to).not.toHaveBeenCalled();
+  });
+
+  it("does not let a restricted administrator edit an announcement", async () => {
+    websiteRestrictions.getStatus.mockResolvedValue({ active: true });
+    jest.spyOn(service, "to").mockResolvedValue(undefined);
+
+    await service.editAnnouncement(administrator, "announcement-1", "edited text");
+
     expect(postgres.query).not.toHaveBeenCalled();
     expect(service.to).not.toHaveBeenCalled();
   });

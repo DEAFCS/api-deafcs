@@ -2,11 +2,15 @@ import { Controller, Get, Param } from "@nestjs/common";
 import { HasuraAction } from "src/hasura/hasura.controller";
 import { User } from "src/auth/types/User";
 import { isRoleAbove } from "src/utilities/isRoleAbove";
+import { WebsiteRestrictionsService } from "src/website-restrictions/website-restrictions.service";
 import { SanctionsService, SanctionType } from "./sanctions.service";
 
 @Controller("sanctions")
 export class SanctionsController {
-  constructor(private readonly sanctionsService: SanctionsService) {}
+  constructor(
+    private readonly sanctionsService: SanctionsService,
+    private readonly websiteRestrictions: WebsiteRestrictionsService,
+  ) {}
 
   @Get("server/:serverId")
   public async serverSanctions(@Param("serverId") serverId: string) {
@@ -23,6 +27,7 @@ export class SanctionsController {
     reason?: string | null;
     duration?: number | null;
     evidence_message_id?: string | null;
+    also_restrict_website?: boolean;
     user: User;
   }) {
     const {
@@ -32,13 +37,22 @@ export class SanctionsController {
       reason,
       duration,
       evidence_message_id,
+      also_restrict_website,
       user,
     } = data;
 
     const requiredRole =
-      type === "website_chat_mute" ? "administrator" : "moderator";
+      type === "website_chat_mute" ||
+      type === "website_restriction" ||
+      also_restrict_website
+        ? "administrator"
+        : "moderator";
     if (!user || !isRoleAbove(user.role, requiredRole)) {
       throw Error("you are not allowed to sanction players");
+    }
+
+    if (also_restrict_website && type !== "ban") {
+      throw Error("website restriction can only be combined with a ban");
     }
 
     return await this.sanctionsService.sanctionServerPlayer({
@@ -49,6 +63,7 @@ export class SanctionsController {
       duration,
       sanctionedBySteamId: user.steam_id,
       evidenceMessageId: evidence_message_id,
+      alsoRestrictWebsite: also_restrict_website,
     });
   }
 
@@ -62,7 +77,9 @@ export class SanctionsController {
     const { serverId, steam_id, type, user } = data;
 
     const requiredRole =
-      type === "website_chat_mute" ? "administrator" : "moderator";
+      type === "website_chat_mute" || type === "website_restriction"
+        ? "administrator"
+        : "moderator";
     if (!user || !isRoleAbove(user.role, requiredRole)) {
       throw Error("you are not allowed to remove sanctions");
     }
@@ -73,6 +90,14 @@ export class SanctionsController {
       type,
       revokedBySteamId: user.steam_id,
     });
+  }
+
+  @HasuraAction()
+  public async websiteRestrictionStatus(data: { user: User }) {
+    if (!data.user?.steam_id) {
+      throw Error("authentication required");
+    }
+    return this.websiteRestrictions.getStatus(data.user.steam_id);
   }
 
   @HasuraAction()

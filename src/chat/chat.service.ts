@@ -12,6 +12,10 @@ import { isRoleAbove } from "src/utilities/isRoleAbove";
 import { NotificationsService } from "../notifications/notifications.service";
 import { BlocksService } from "src/blocks/blocks.service";
 import { v4 as uuidv4 } from "uuid";
+import {
+  WebsiteRestrictionsService,
+  WebsiteRestrictionStatus,
+} from "src/website-restrictions/website-restrictions.service";
 
 type WebsiteChatMuteStatus = {
   active: boolean;
@@ -41,6 +45,7 @@ export class ChatService {
     private readonly redisManager: RedisManagerService,
     private readonly notifications: NotificationsService,
     private readonly blocks: BlocksService,
+    private readonly websiteRestrictions: WebsiteRestrictionsService,
   ) {
     this.redis = this.redisManager.getConnection();
   }
@@ -337,6 +342,13 @@ export class ChatService {
       }),
     );
 
+    client.send(
+      JSON.stringify({
+        event: "account:restriction-status",
+        data: await this.websiteRestrictions.getStatus(user.steam_id),
+      }),
+    );
+
     client.on("close", () => {
       void this.removeFromLobby(type, id, client);
     });
@@ -487,9 +499,17 @@ export class ChatService {
   ): Promise<{
     accepted: boolean;
     muteStatus?: WebsiteChatMuteStatus;
+    restrictionStatus?: WebsiteRestrictionStatus;
   }> {
     // verify they are in the lobby
     if (skipCheck === false) {
+      const restrictionStatus = await this.websiteRestrictions.getStatus(
+        player.steam_id,
+      );
+      if (restrictionStatus.active) {
+        return { accepted: false, restrictionStatus };
+      }
+
       const muteStatus = await this.getWebsiteChatMuteStatus(player.steam_id);
       if (muteStatus.active) {
         return { accepted: false, muteStatus };
@@ -753,6 +773,10 @@ export class ChatService {
       return;
     }
 
+    if ((await this.websiteRestrictions.getStatus(admin.steam_id)).active) {
+      return;
+    }
+
     const message = _message.trim();
     if (!message) {
       return;
@@ -784,6 +808,10 @@ export class ChatService {
   ): Promise<boolean> {
     const currentActor = await this.getCurrentUser(actor.steam_id);
     if (!currentActor || !isRoleAbove(currentActor.role, "administrator")) {
+      return false;
+    }
+
+    if ((await this.websiteRestrictions.getStatus(actor.steam_id)).active) {
       return false;
     }
 

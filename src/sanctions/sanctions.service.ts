@@ -5,13 +5,15 @@ import { RconService } from "src/rcon/rcon.service";
 import { DedicatedServersService } from "src/dedicated-servers/dedicated-servers.service";
 import { SYSTEM_STEAM_ID } from "src/matches/disconnect-budget/constants";
 import { RedisManagerService } from "src/redis/redis-manager/redis-manager.service";
+import { WebsiteRestrictionStatus } from "src/website-restrictions/website-restrictions.service";
 
 export type SanctionType =
   | "ban"
   | "mute"
   | "gag"
   | "silence"
-  | "website_chat_mute";
+  | "website_chat_mute"
+  | "website_restriction";
 
 export type WebsiteChatMuteStatus = {
   active: boolean;
@@ -36,6 +38,7 @@ export class SanctionsService {
     "gag",
     "silence",
     "website_chat_mute",
+    "website_restriction",
   ];
 
   public async getWebsiteChatMuteStatus(
@@ -119,6 +122,7 @@ export class SanctionsService {
     duration?: number | null;
     sanctionedBySteamId: string;
     evidenceMessageId?: string | null;
+    alsoRestrictWebsite?: boolean;
   }): Promise<{ id: string | null; enforced: boolean; message: string }> {
     const {
       serverId,
@@ -128,6 +132,7 @@ export class SanctionsService {
       duration,
       sanctionedBySteamId,
       evidenceMessageId,
+      alsoRestrictWebsite,
     } = params;
 
     if (!SanctionsService.SANCTION_TYPES.includes(type)) {
@@ -195,6 +200,66 @@ export class SanctionsService {
       };
     }
 
+    if (type === "website_restriction") {
+      const trimmedReason = reason?.trim();
+      if (!trimmedReason) {
+        throw Error("a reason is required for a website restriction");
+      }
+      if (duration != null && (!Number.isFinite(duration) || duration < 0)) {
+        throw Error("invalid website restriction duration");
+      }
+
+      // Website-only sanctions never inspect or sync a CS2 server, even if
+      // a crafted request includes serverId.
+      await this.ensurePlayer(steamId);
+      const rows = await this.postgres.query<
+        Array<{ id: string; remove_sanction_date: string | null }>
+      >(
+        `INSERT INTO public.player_sanctions (
+           type,
+           player_steam_id,
+           sanctioned_by_steam_id,
+           reason,
+           remove_sanction_date,
+           evidence_message_id
+         ) VALUES (
+           'website_restriction',
+           $1::bigint,
+           $2::bigint,
+           $3,
+           CASE
+             WHEN $4::double precision > 0
+               THEN now() + ($4::double precision * interval '1 millisecond')
+             ELSE NULL
+           END,
+           $5
+         )
+         RETURNING id, remove_sanction_date`,
+        [
+          steamId,
+          sanctionedBySteamId,
+          trimmedReason,
+          duration ?? 0,
+          evidenceMessageId ?? null,
+        ],
+      );
+
+      await this.publishWebsiteRestrictionStatus(steamId, {
+        active: true,
+        reason: trimmedReason,
+        expiresAt: rows[0]?.remove_sanction_date
+          ? new Date(rows[0].remove_sanction_date).toISOString()
+          : null,
+        permanent: !rows[0]?.remove_sanction_date,
+      });
+
+      return {
+        id: rows[0]?.id ?? null,
+        enforced: true,
+        message: "website restriction saved and enforced",
+      };
+    }
+
     let onServer:
       | { steam_id: string; name: string; userid: string | null }
       | undefined;
@@ -207,25 +272,84 @@ export class SanctionsService {
 
     await this.ensurePlayer(steamId, onServer?.name);
 
-    let removeSanctionDate: string | null = null;
-    if (duration && duration > 0) {
-      removeSanctionDate = new Date(Date.now() + duration).toISOString();
-    }
+    let insertedId: string | null = null;
+    if (type === "ban" && alsoRestrictWebsite) {
+      const trimmedReason = reason?.trim();
+      if (!trimmedReason) {
+        throw Error("a reason is required for a website restriction");
+      }
+      if (duration != null && (!Number.isFinite(duration) || duration < 0)) {
+        throw Error("invalid website restriction duration");
+      }
 
-    const { insert_player_sanctions_one } = await this.hasura.mutation({
-      insert_player_sanctions_one: {
-        __args: {
-          object: {
-            type,
-            player_steam_id: steamId,
-            sanctioned_by_steam_id: sanctionedBySteamId,
-            reason: reason ?? null,
-            remove_sanction_date: removeSanctionDate,
+      // Both rows are created in one database transaction. The restriction
+      // duplicate guard aborts the entire transaction, so an administrator
+      // can never accidentally get only the ban half of the requested pair.
+      const inserted = await this.postgres.transaction(async (client) => {
+        const result = await client.query<{
+          id: string;
+          type: SanctionType;
+          remove_sanction_date: string | null;
+        }>(
+          `INSERT INTO public.player_sanctions (
+             type, player_steam_id, sanctioned_by_steam_id, reason,
+             remove_sanction_date, evidence_message_id
+           )
+           VALUES
+             ('ban', $1::bigint, $2::bigint, $3,
+              CASE WHEN $4::double precision > 0
+                THEN now() + ($4::double precision * interval '1 millisecond')
+                ELSE NULL END, $5),
+             ('website_restriction', $1::bigint, $2::bigint, $3,
+              CASE WHEN $4::double precision > 0
+                THEN now() + ($4::double precision * interval '1 millisecond')
+                ELSE NULL END, $5)
+           RETURNING id, type, remove_sanction_date`,
+          [
+            steamId,
+            sanctionedBySteamId,
+            trimmedReason,
+            duration ?? 0,
+            evidenceMessageId ?? null,
+          ],
+        );
+        return result.rows;
+      });
+      const ban = inserted.find((row) => row.type === "ban");
+      const restriction = inserted.find(
+        (row) => row.type === "website_restriction",
+      );
+      insertedId = ban?.id ?? null;
+      await this.publishWebsiteRestrictionStatus(steamId, {
+        active: true,
+        reason: trimmedReason,
+        expiresAt: restriction?.remove_sanction_date
+          ? new Date(restriction.remove_sanction_date).toISOString()
+          : null,
+        permanent: !restriction?.remove_sanction_date,
+      });
+    } else {
+      let removeSanctionDate: string | null = null;
+      if (duration && duration > 0) {
+        removeSanctionDate = new Date(Date.now() + duration).toISOString();
+      }
+
+      const { insert_player_sanctions_one } = await this.hasura.mutation({
+        insert_player_sanctions_one: {
+          __args: {
+            object: {
+              type,
+              player_steam_id: steamId,
+              sanctioned_by_steam_id: sanctionedBySteamId,
+              reason: reason ?? null,
+              remove_sanction_date: removeSanctionDate,
+            },
           },
+          id: true,
         },
-        id: true,
-      },
-    });
+      });
+      insertedId = insert_player_sanctions_one?.id ?? null;
+    }
 
     let enforced = false;
     let message = "sanction saved";
@@ -240,7 +364,7 @@ export class SanctionsService {
     }
 
     return {
-      id: insert_player_sanctions_one?.id ?? null,
+      id: insertedId,
       enforced,
       message,
     };
@@ -258,7 +382,7 @@ export class SanctionsService {
       throw Error(`invalid sanction type ${type}`);
     }
 
-    if (type === "website_chat_mute") {
+    if (type === "website_chat_mute" || type === "website_restriction") {
       const rows = await this.postgres.query<Array<{ id: string }>>(
         `UPDATE public.player_sanctions
             SET deleted_at = now(), revoked_by_steam_id = $3::bigint
@@ -271,11 +395,20 @@ export class SanctionsService {
       );
 
       if (rows.length > 0) {
-        await this.publishWebsiteChatMuteStatus(steamId, {
-          active: false,
-          expiresAt: null,
-          permanent: false,
-        });
+        if (type === "website_chat_mute") {
+          await this.publishWebsiteChatMuteStatus(steamId, {
+            active: false,
+            expiresAt: null,
+            permanent: false,
+          });
+        } else {
+          await this.publishWebsiteRestrictionStatus(steamId, {
+            active: false,
+            reason: null,
+            expiresAt: null,
+            permanent: false,
+          });
+        }
       }
 
       return {
@@ -283,8 +416,12 @@ export class SanctionsService {
         enforced: rows.length > 0,
         message:
           rows.length > 0
-            ? "website chat mute removed"
-            : "no active website chat mute found",
+            ? type === "website_chat_mute"
+              ? "website chat mute removed"
+              : "website restriction removed"
+            : type === "website_chat_mute"
+              ? "no active website chat mute found"
+              : "no active website restriction found",
       };
     }
 
@@ -325,6 +462,30 @@ export class SanctionsService {
         data: status,
       }),
     );
+  }
+
+  private async publishWebsiteRestrictionStatus(
+    steamId: string,
+    status: WebsiteRestrictionStatus,
+  ) {
+    try {
+      await this.redisManager.getConnection().publish(
+        "send-message-to-steam-id",
+        JSON.stringify({
+          steamId,
+          event: "account:restriction-status",
+          data: status,
+        }),
+      );
+    } catch (error) {
+      // The database is authoritative. A transient Redis failure must not make
+      // a committed sanction look as though it failed; refresh/reconnect will
+      // resolve the current status from PostgreSQL.
+      this.logger.warn(
+        `website restriction status publish failed for ${steamId}`,
+        error,
+      );
+    }
   }
 
   // Plain delete_abandoned_matches_by_pk only removed the history row --

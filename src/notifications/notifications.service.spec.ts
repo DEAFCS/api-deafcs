@@ -71,7 +71,13 @@ describe("NotificationsService sanction notifications", () => {
       );
     });
 
-    it.each(["website_chat_mute", "mute", "gag", "silence"])(
+    it.each([
+      "website_chat_mute",
+      "website_restriction",
+      "mute",
+      "gag",
+      "silence",
+    ])(
       "sends zero third-party notifications for a %s sanction",
       async (type) => {
         // Not consulted at all once the type guard returns first -- if this
@@ -144,7 +150,13 @@ describe("NotificationsService sanction notifications", () => {
       );
     });
 
-    it.each(["website_chat_mute", "mute", "gag", "silence"])(
+    it.each([
+      "website_chat_mute",
+      "website_restriction",
+      "mute",
+      "gag",
+      "silence",
+    ])(
       "does not notify admins for a %s sanction",
       async (type) => {
         await service.notifyAdminsOfBan({
@@ -188,7 +200,13 @@ describe("NotificationsService sanction notifications", () => {
       );
     });
 
-    it.each(["website_chat_mute", "mute", "gag", "silence"])(
+    it.each([
+      "website_chat_mute",
+      "website_restriction",
+      "mute",
+      "gag",
+      "silence",
+    ])(
       "does not send this bell notification for a %s sanction (mute status has its own live push)",
       async (type) => {
         await service.notifyBannedPlayer({

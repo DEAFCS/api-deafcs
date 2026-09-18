@@ -54,6 +54,9 @@ describe("ChatService block enforcement", () => {
       { getConnection: () => redis } as any,
       { notifyPlayers: jest.fn(), sendSilent: jest.fn() } as any,
       blocks as any,
+      {
+        getStatus: jest.fn().mockResolvedValue({ active: false }),
+      } as any,
     );
   });
 
@@ -266,6 +269,9 @@ describe("ChatService block enforcement", () => {
         { getConnection: () => redis } as any,
         { notifyPlayers, sendSilent: jest.fn() } as any,
         blocks as any,
+        {
+          getStatus: jest.fn().mockResolvedValue({ active: false }),
+        } as any,
       );
 
       jest
@@ -297,6 +303,9 @@ describe("ChatService block enforcement", () => {
         { getConnection: () => redis } as any,
         { notifyPlayers, sendSilent: jest.fn() } as any,
         blocks as any,
+        {
+          getStatus: jest.fn().mockResolvedValue({ active: false }),
+        } as any,
       );
 
       jest

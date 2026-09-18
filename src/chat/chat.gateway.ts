@@ -84,6 +84,20 @@ export class ChatGateway {
     );
 
     if (!result.accepted) {
+      if (result.restrictionStatus) {
+        client.send(
+          JSON.stringify({
+            event: "account:restriction-status",
+            data: result.restrictionStatus,
+          }),
+        );
+        client.send(
+          JSON.stringify({
+            event: "chat:send:error",
+            data: { message: "Your account is restricted." },
+          }),
+        );
+      }
       if (result.muteStatus) {
         client.send(
           JSON.stringify({

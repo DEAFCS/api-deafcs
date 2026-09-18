@@ -989,6 +989,14 @@ actions:
     permissions:
       - role: moderator
       - role: administrator
+  - name: websiteRestrictionStatus
+    definition:
+      kind: ""
+      handler: '{{HASURA_GRAPHQL_ACTIONS_HOOK}}'
+      forward_client_headers: true
+    permissions:
+      - role: user
+    comment: Returns only the current actor's active website restriction status.
   - name: scheduleMatch
     definition:
       kind: synchronous

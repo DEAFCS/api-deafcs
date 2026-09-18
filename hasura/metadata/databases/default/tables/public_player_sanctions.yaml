@@ -31,7 +31,9 @@ select_permissions:
           - deleted_at:
               _is_null: true
           - type:
-              _neq: website_chat_mute
+              _nin:
+                - website_chat_mute
+                - website_restriction
     comment: ""
   - role: administrator
     permission:
@@ -49,6 +51,24 @@ select_permissions:
       filter: {}
     comment: Administrators can review active, expired, and revoked website moderation sanctions.
 update_permissions:
+  - role: administrator
+    permission:
+      columns:
+        - remove_sanction_date
+      filter:
+        _and:
+          - deleted_at:
+              _is_null: true
+          - type:
+              _in:
+                - website_chat_mute
+                - website_restriction
+      check:
+        type:
+          _in:
+            - website_chat_mute
+            - website_restriction
+    comment: Administrators can adjust the expiry of active website moderation sanctions.
   - role: match_organizer
     permission:
       columns:
@@ -58,10 +78,14 @@ update_permissions:
           - deleted_at:
               _is_null: true
           - type:
-              _neq: website_chat_mute
+              _nin:
+                - website_chat_mute
+                - website_restriction
       check:
         type:
-          _neq: website_chat_mute
+          _nin:
+            - website_chat_mute
+            - website_restriction
     comment: ""
   - role: moderator
     permission:
@@ -72,10 +96,14 @@ update_permissions:
           - deleted_at:
               _is_null: true
           - type:
-              _neq: website_chat_mute
+              _nin:
+                - website_chat_mute
+                - website_restriction
       check:
         type:
-          _neq: website_chat_mute
+          _nin:
+            - website_chat_mute
+            - website_restriction
     comment: ""
 event_triggers:
   - name: player_sanctions

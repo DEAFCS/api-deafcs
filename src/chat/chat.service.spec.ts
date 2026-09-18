@@ -44,6 +44,9 @@ describe("ChatService tournament access", () => {
         getMyBlockedSteamIds: jest.fn().mockResolvedValue(new Set()),
         getViewersBlocking: jest.fn().mockResolvedValue(new Set()),
       } as any,
+      {
+        getStatus: jest.fn().mockResolvedValue({ active: false }),
+      } as any,
     );
   });
 
@@ -86,10 +89,11 @@ describe("ChatService tournament access", () => {
       player.steam_id,
       expect.any(String),
     );
-    expect(client.send).toHaveBeenCalledTimes(3);
+    expect(client.send).toHaveBeenCalledTimes(4);
     expect(client.send.mock.calls.map(([message]) => message)).toEqual(
       expect.arrayContaining([
         expect.stringContaining(`lobby:tournament:${tournamentId}:list`),
+        expect.stringContaining("account:restriction-status"),
         expect.stringContaining(`lobby:tournament:${tournamentId}:messages`),
       ]),
     );
@@ -187,6 +191,36 @@ describe("ChatService tournament access", () => {
 
     expect(redis.hset).not.toHaveBeenCalled();
     expect(redis.sendCommand).not.toHaveBeenCalled();
+    expect(service.to).not.toHaveBeenCalled();
+  });
+
+  it("rejects a website-restricted sender before persistence or broadcast", async () => {
+    (service as any).websiteRestrictions.getStatus.mockResolvedValue({
+      active: true,
+      reason: "abuse",
+      expiresAt: null,
+      permanent: true,
+    });
+    jest.spyOn(service, "to").mockResolvedValue(undefined);
+
+    await expect(
+      service.sendMessageToChat(
+        ChatLobbyType.Global,
+        "global",
+        player,
+        "blocked",
+      ),
+    ).resolves.toEqual({
+      accepted: false,
+      restrictionStatus: {
+        active: true,
+        reason: "abuse",
+        expiresAt: null,
+        permanent: true,
+      },
+    });
+
+    expect(redis.hset).not.toHaveBeenCalled();
     expect(service.to).not.toHaveBeenCalled();
   });
 

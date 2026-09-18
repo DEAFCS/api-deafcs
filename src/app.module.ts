@@ -61,6 +61,9 @@ import { PluginsModule } from "./plugins/plugins.module";
 import { VerificationApplicationsModule } from "./verification-applications/verification-applications.module";
 import { SupportRequestsModule } from "./support-requests/support-requests.module";
 import { AdminCallsModule } from "./admin-calls/admin-calls.module";
+import { APP_GUARD } from "@nestjs/core";
+import { WebsiteRestrictionsModule } from "./website-restrictions/website-restrictions.module";
+import { WebsiteRestrictionGuard } from "./website-restrictions/website-restrictions.guard";
 
 @Module({
   imports: [
@@ -162,8 +165,12 @@ import { AdminCallsModule } from "./admin-calls/admin-calls.module";
     VerificationApplicationsModule,
     SupportRequestsModule,
     AdminCallsModule,
+    WebsiteRestrictionsModule,
   ],
-  providers: [loggerFactory()],
+  providers: [
+    loggerFactory(),
+    { provide: APP_GUARD, useClass: WebsiteRestrictionGuard },
+  ],
   controllers: [AppController, QuickConnectController],
 })
 export class AppModule implements OnApplicationBootstrap {
