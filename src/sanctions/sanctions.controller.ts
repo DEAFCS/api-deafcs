@@ -22,11 +22,22 @@ export class SanctionsController {
     type: SanctionType;
     reason?: string | null;
     duration?: number | null;
+    evidence_message_id?: string | null;
     user: User;
   }) {
-    const { serverId, steam_id, type, reason, duration, user } = data;
+    const {
+      serverId,
+      steam_id,
+      type,
+      reason,
+      duration,
+      evidence_message_id,
+      user,
+    } = data;
 
-    if (!user || !isRoleAbove(user.role, "moderator")) {
+    const requiredRole =
+      type === "website_chat_mute" ? "administrator" : "moderator";
+    if (!user || !isRoleAbove(user.role, requiredRole)) {
       throw Error("you are not allowed to sanction players");
     }
 
@@ -37,6 +48,7 @@ export class SanctionsController {
       reason,
       duration,
       sanctionedBySteamId: user.steam_id,
+      evidenceMessageId: evidence_message_id,
     });
   }
 
@@ -49,7 +61,9 @@ export class SanctionsController {
   }) {
     const { serverId, steam_id, type, user } = data;
 
-    if (!user || !isRoleAbove(user.role, "moderator")) {
+    const requiredRole =
+      type === "website_chat_mute" ? "administrator" : "moderator";
+    if (!user || !isRoleAbove(user.role, requiredRole)) {
       throw Error("you are not allowed to remove sanctions");
     }
 
@@ -57,6 +71,7 @@ export class SanctionsController {
       serverId,
       steamId: steam_id,
       type,
+      revokedBySteamId: user.steam_id,
     });
   }
 

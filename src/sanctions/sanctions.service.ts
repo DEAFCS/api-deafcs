@@ -4,8 +4,20 @@ import { PostgresService } from "src/postgres/postgres.service";
 import { RconService } from "src/rcon/rcon.service";
 import { DedicatedServersService } from "src/dedicated-servers/dedicated-servers.service";
 import { SYSTEM_STEAM_ID } from "src/matches/disconnect-budget/constants";
+import { RedisManagerService } from "src/redis/redis-manager/redis-manager.service";
 
-export type SanctionType = "ban" | "mute" | "gag" | "silence";
+export type SanctionType =
+  | "ban"
+  | "mute"
+  | "gag"
+  | "silence"
+  | "website_chat_mute";
+
+export type WebsiteChatMuteStatus = {
+  active: boolean;
+  expiresAt: string | null;
+  permanent: boolean;
+};
 
 @Injectable()
 export class SanctionsService {
@@ -15,6 +27,7 @@ export class SanctionsService {
     private readonly postgres: PostgresService,
     private readonly rconService: RconService,
     private readonly dedicatedServersService: DedicatedServersService,
+    private readonly redisManager: RedisManagerService,
   ) {}
 
   private static readonly SANCTION_TYPES: SanctionType[] = [
@@ -22,7 +35,35 @@ export class SanctionsService {
     "mute",
     "gag",
     "silence",
+    "website_chat_mute",
   ];
+
+  public async getWebsiteChatMuteStatus(
+    steamId: string,
+  ): Promise<WebsiteChatMuteStatus> {
+    const rows = await this.postgres.query<
+      Array<{ remove_sanction_date: string | null }>
+    >(
+      `SELECT remove_sanction_date
+         FROM public.player_sanctions
+        WHERE player_steam_id = $1::bigint
+          AND type = 'website_chat_mute'
+          AND deleted_at IS NULL
+          AND (remove_sanction_date IS NULL OR remove_sanction_date > now())
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [steamId],
+    );
+
+    const sanction = rows[0];
+    return {
+      active: Boolean(sanction),
+      expiresAt: sanction?.remove_sanction_date
+        ? new Date(sanction.remove_sanction_date).toISOString()
+        : null,
+      permanent: Boolean(sanction && !sanction.remove_sanction_date),
+    };
+  }
 
   public async getActiveServerSanctions(serverId: string): Promise<
     Array<{
@@ -77,12 +118,81 @@ export class SanctionsService {
     reason?: string | null;
     duration?: number | null;
     sanctionedBySteamId: string;
+    evidenceMessageId?: string | null;
   }): Promise<{ id: string | null; enforced: boolean; message: string }> {
-    const { serverId, steamId, type, reason, duration, sanctionedBySteamId } =
-      params;
+    const {
+      serverId,
+      steamId,
+      type,
+      reason,
+      duration,
+      sanctionedBySteamId,
+      evidenceMessageId,
+    } = params;
 
     if (!SanctionsService.SANCTION_TYPES.includes(type)) {
       throw Error(`invalid sanction type ${type}`);
+    }
+
+    if (type === "website_chat_mute") {
+      const trimmedReason = reason?.trim();
+      if (!trimmedReason) {
+        throw Error("a reason is required for a website chat mute");
+      }
+
+      if (duration != null && (!Number.isFinite(duration) || duration < 0)) {
+        throw Error("invalid website chat mute duration");
+      }
+
+      // A website mute never inspects or syncs a game server, even if a
+      // crafted action request supplies serverId.
+      await this.ensurePlayer(steamId);
+      const rows = await this.postgres.query<
+        Array<{ id: string; remove_sanction_date: string | null }>
+      >(
+        `INSERT INTO public.player_sanctions (
+           type,
+           player_steam_id,
+           sanctioned_by_steam_id,
+           reason,
+           remove_sanction_date,
+           evidence_message_id
+         ) VALUES (
+           'website_chat_mute',
+           $1::bigint,
+           $2::bigint,
+           $3,
+           CASE
+             WHEN $4::double precision > 0
+               THEN now() + ($4::double precision * interval '1 millisecond')
+             ELSE NULL
+           END,
+           $5
+         )
+         RETURNING id, remove_sanction_date`,
+        [
+          steamId,
+          sanctionedBySteamId,
+          trimmedReason,
+          duration ?? 0,
+          evidenceMessageId ?? null,
+        ],
+      );
+
+      const status: WebsiteChatMuteStatus = {
+        active: true,
+        expiresAt: rows[0]?.remove_sanction_date
+          ? new Date(rows[0].remove_sanction_date).toISOString()
+          : null,
+        permanent: !rows[0]?.remove_sanction_date,
+      };
+      await this.publishWebsiteChatMuteStatus(steamId, status);
+
+      return {
+        id: rows[0]?.id ?? null,
+        enforced: true,
+        message: "website chat mute saved and enforced",
+      };
     }
 
     let onServer:
@@ -140,20 +250,51 @@ export class SanctionsService {
     serverId?: string | null;
     steamId: string;
     type: SanctionType;
+    revokedBySteamId: string;
   }): Promise<{ id: string | null; enforced: boolean; message: string }> {
-    const { serverId, steamId, type } = params;
+    const { serverId, steamId, type, revokedBySteamId } = params;
 
     if (!SanctionsService.SANCTION_TYPES.includes(type)) {
       throw Error(`invalid sanction type ${type}`);
     }
 
+    if (type === "website_chat_mute") {
+      const rows = await this.postgres.query<Array<{ id: string }>>(
+        `UPDATE public.player_sanctions
+            SET deleted_at = now(), revoked_by_steam_id = $3::bigint
+          WHERE player_steam_id = $1::bigint
+            AND type = $2
+            AND deleted_at IS NULL
+            AND (remove_sanction_date IS NULL OR remove_sanction_date > now())
+          RETURNING id`,
+        [steamId, type, revokedBySteamId],
+      );
+
+      if (rows.length > 0) {
+        await this.publishWebsiteChatMuteStatus(steamId, {
+          active: false,
+          expiresAt: null,
+          permanent: false,
+        });
+      }
+
+      return {
+        id: rows[0]?.id ?? null,
+        enforced: rows.length > 0,
+        message:
+          rows.length > 0
+            ? "website chat mute removed"
+            : "no active website chat mute found",
+      };
+    }
+
     await this.postgres.query(
       `UPDATE public.player_sanctions
-          SET deleted_at = now()
+          SET deleted_at = now(), revoked_by_steam_id = $3::bigint
         WHERE player_steam_id = $1::bigint
           AND type = $2
           AND deleted_at IS NULL`,
-      [steamId, type],
+      [steamId, type, revokedBySteamId],
     );
 
     let enforced = false;
@@ -170,6 +311,20 @@ export class SanctionsService {
       enforced,
       message,
     };
+  }
+
+  private async publishWebsiteChatMuteStatus(
+    steamId: string,
+    status: WebsiteChatMuteStatus,
+  ) {
+    await this.redisManager.getConnection().publish(
+      "send-message-to-steam-id",
+      JSON.stringify({
+        steamId,
+        event: "chat:mute-status",
+        data: status,
+      }),
+    );
   }
 
   // Plain delete_abandoned_matches_by_pk only removed the history row --

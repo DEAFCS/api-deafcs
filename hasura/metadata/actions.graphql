@@ -673,6 +673,7 @@ type Mutation {
     type: String!
     reason: String
     duration: Float
+    evidence_message_id: String
   ): SanctionResult!
 }
 

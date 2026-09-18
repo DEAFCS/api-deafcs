@@ -1,0 +1,18 @@
+table:
+  name: chat_message_deletions
+  schema: public
+select_permissions:
+  - role: administrator
+    permission:
+      columns:
+        - id
+        - message_id
+        - room_type
+        - room_id
+        - author_steam_id
+        - message
+        - message_created_at
+        - deleted_at
+        - deleted_by_steam_id
+      filter: {}
+    comment: Private website-chat moderation evidence. No non-administrator role may read this table.

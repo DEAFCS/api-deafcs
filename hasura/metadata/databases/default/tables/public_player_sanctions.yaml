@@ -11,6 +11,9 @@ object_relationships:
   - name: sanctioned_by
     using:
       foreign_key_constraint_on: sanctioned_by_steam_id
+  - name: revoked_by
+    using:
+      foreign_key_constraint_on: revoked_by_steam_id
 select_permissions:
   - role: guest
     permission:
@@ -22,28 +25,57 @@ select_permissions:
         - created_at
         - remove_sanction_date
         - id
+        - deleted_at
       filter:
-        deleted_at:
-          _is_null: true
+        _and:
+          - deleted_at:
+              _is_null: true
+          - type:
+              _neq: website_chat_mute
     comment: ""
+  - role: administrator
+    permission:
+      columns:
+        - id
+        - player_steam_id
+        - sanctioned_by_steam_id
+        - revoked_by_steam_id
+        - evidence_message_id
+        - reason
+        - type
+        - created_at
+        - remove_sanction_date
+        - deleted_at
+      filter: {}
+    comment: Administrators can review active, expired, and revoked website moderation sanctions.
 update_permissions:
   - role: match_organizer
     permission:
       columns:
         - remove_sanction_date
       filter:
-        deleted_at:
-          _is_null: true
-      check: null
+        _and:
+          - deleted_at:
+              _is_null: true
+          - type:
+              _neq: website_chat_mute
+      check:
+        type:
+          _neq: website_chat_mute
     comment: ""
   - role: moderator
     permission:
       columns:
         - remove_sanction_date
       filter:
-        deleted_at:
-          _is_null: true
-      check: null
+        _and:
+          - deleted_at:
+              _is_null: true
+          - type:
+              _neq: website_chat_mute
+      check:
+        type:
+          _neq: website_chat_mute
     comment: ""
 event_triggers:
   - name: player_sanctions

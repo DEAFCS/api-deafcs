@@ -10,6 +10,13 @@ import { ChatLobbyType } from "./enums/ChatLobbyTypes";
 import { e_player_roles_enum, e_notification_types_enum } from "generated/schema";
 import { isRoleAbove } from "src/utilities/isRoleAbove";
 import { NotificationsService } from "../notifications/notifications.service";
+import { v4 as uuidv4 } from "uuid";
+
+type WebsiteChatMuteStatus = {
+  active: boolean;
+  expiresAt: string | null;
+  permanent: boolean;
+};
 
 // Fixed id for the single, site-wide Announcements channel -- same
 // shape as Global's fixed "global" id, see joinMatchLobby. Deliberately
@@ -262,12 +269,17 @@ export class ChatService {
     // Announcements are persisted in Postgres, not the Redis 24h-TTL
     // hash every other chat type uses -- see ANNOUNCEMENTS_LOBBY_ID's
     // comment for why.
-    const messages =
-      type === ChatLobbyType.Announcement
-        ? await this.getAnnouncementMessages()
-        : Object.entries(await this.redis.hgetall(`chat_${type}_${id}`)).map(
-            ([, value]) => JSON.parse(value),
-          );
+    let messages: Array<Record<string, any>>;
+    if (type === ChatLobbyType.Announcement) {
+      messages = await this.getAnnouncementMessages();
+    } else {
+      const deletedIds = await this.getDeletedMessageIds(type, id);
+      messages = Object.entries(
+        await this.redis.hgetall(`chat_${type}_${id}`),
+      )
+        .map(([, value]) => JSON.parse(value))
+        .filter((message) => !deletedIds.has(String(message.id)));
+    }
 
     client.send(
       JSON.stringify({
@@ -280,6 +292,13 @@ export class ChatService {
             );
           }),
         },
+      }),
+    );
+
+    client.send(
+      JSON.stringify({
+        event: "chat:mute-status",
+        data: await this.getWebsiteChatMuteStatus(user.steam_id),
       }),
     );
 
@@ -430,28 +449,36 @@ export class ChatService {
     _message: string,
     skipCheck = false,
     clientId?: string,
-  ) {
+  ): Promise<{
+    accepted: boolean;
+    muteStatus?: WebsiteChatMuteStatus;
+  }> {
     // verify they are in the lobby
     if (skipCheck === false) {
+      const muteStatus = await this.getWebsiteChatMuteStatus(player.steam_id);
+      if (muteStatus.active) {
+        return { accepted: false, muteStatus };
+      }
+
       if (
         type === ChatLobbyType.Tournament &&
         !(await this.canAccessTournamentChat(id, player.steam_id))
       ) {
         await this.removeUserData(type, id, player.steam_id);
         await this.redis.del(this.sessionsKey(type, id, player.steam_id));
-        return;
+        return { accepted: false };
       }
 
       const userData = await this.getUserData(type, id, player.steam_id);
       if (!userData) {
-        return;
+        return { accepted: false };
       }
 
       if (
         type === ChatLobbyType.Draft &&
         !(await this.canSendDraftMessage(id, player))
       ) {
-        return;
+        return { accepted: false };
       }
 
       // Only admins can post an announcement -- everyone else can read
@@ -461,7 +488,7 @@ export class ChatService {
         type === ChatLobbyType.Announcement &&
         !isRoleAbove(player.role, "administrator")
       ) {
-        return;
+        return { accepted: false };
       }
     }
 
@@ -503,7 +530,8 @@ export class ChatService {
       message.id = rows[0].id;
     } else {
       const messageKey = `chat_${type}_${id}`;
-      const messageField = `${player.steam_id}:${Date.now().toString()}`;
+      const messageField = uuidv4();
+      message.id = messageField;
       await this.redis.hset(messageKey, messageField, JSON.stringify(message));
 
       await this.redis.sendCommand(
@@ -530,6 +558,44 @@ export class ChatService {
           `[chat] push notify failed for ${type}:${id}: ${(error as Error)?.message}`,
         ),
     );
+
+    return { accepted: true };
+  }
+
+  public async getWebsiteChatMuteStatus(
+    steamId: string,
+  ): Promise<WebsiteChatMuteStatus> {
+    const rows = await this.postgres.query<
+      Array<{ remove_sanction_date: string | null }>
+    >(
+      `SELECT remove_sanction_date
+         FROM public.player_sanctions
+        WHERE player_steam_id = $1::bigint
+          AND type = 'website_chat_mute'
+          AND deleted_at IS NULL
+          AND (remove_sanction_date IS NULL OR remove_sanction_date > now())
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [steamId],
+    );
+    const sanction = rows[0];
+    return {
+      active: Boolean(sanction),
+      expiresAt: sanction?.remove_sanction_date
+        ? new Date(sanction.remove_sanction_date).toISOString()
+        : null,
+      permanent: Boolean(sanction && !sanction.remove_sanction_date),
+    };
+  }
+
+  private async getDeletedMessageIds(type: ChatLobbyType, id: string) {
+    const rows = await this.postgres.query<Array<{ message_id: string }>>(
+      `SELECT message_id
+         FROM public.chat_message_deletions
+        WHERE room_type = $1 AND room_id = $2`,
+      [type, id],
+    );
+    return new Set(rows.map((row) => row.message_id));
   }
 
   private formatAnnouncementRow(row: {
@@ -577,6 +643,7 @@ export class ChatService {
               p.profile_url AS author_profile_url
          FROM public.announcements a
          JOIN public.players p ON p.steam_id = a.author_steam_id
+        WHERE a.deleted_at IS NULL
         ORDER BY a.created_at DESC
         LIMIT 100`,
     );
@@ -601,7 +668,7 @@ export class ChatService {
     const rows = await this.postgres.query<Array<{ id: string }>>(
       `UPDATE public.announcements
           SET message = $2, updated_at = now()
-        WHERE id = $1
+        WHERE id = $1 AND deleted_at IS NULL
         RETURNING id`,
       [id, message],
     );
@@ -616,22 +683,114 @@ export class ChatService {
     });
   }
 
-  // Admin-only (re-checked here, not just trusted from the caller) --
-  // removes an announcement entirely; everyone currently viewing the
-  // channel has it disappear from their list, same as it never existed.
-  public async deleteAnnouncement(admin: User, id: string) {
-    if (!isRoleAbove(admin.role, "administrator")) {
-      return;
+  public async deleteMessage(
+    actor: User,
+    type: ChatLobbyType,
+    roomId: string,
+    messageId: string,
+  ): Promise<boolean> {
+    const currentActor = await this.getCurrentUser(actor.steam_id);
+    if (!currentActor || !isRoleAbove(currentActor.role, "administrator")) {
+      return false;
     }
 
-    await this.postgres.query(
-      `DELETE FROM public.announcements WHERE id = $1`,
-      [id],
-    );
+    if (!Object.values(ChatLobbyType).includes(type)) {
+      return false;
+    }
 
-    void this.to(ChatLobbyType.Announcement, ANNOUNCEMENTS_LOBBY_ID, "deleted", {
-      id,
-    });
+    let audited = false;
+    if (type === ChatLobbyType.Announcement) {
+      if (roomId !== ANNOUNCEMENTS_LOBBY_ID) {
+        return false;
+      }
+      const rows = await this.postgres.query<Array<{ message_id: string }>>(
+        `WITH target AS (
+           UPDATE public.announcements
+              SET deleted_at = now(), deleted_by_steam_id = $2::bigint
+            WHERE id = $1::uuid AND deleted_at IS NULL
+            RETURNING id, author_steam_id, message, created_at, deleted_at
+         )
+         INSERT INTO public.chat_message_deletions (
+           message_id, room_type, room_id, author_steam_id, message,
+           message_created_at, deleted_at, deleted_by_steam_id
+         )
+         SELECT id::text, 'announcement', $3, author_steam_id, message,
+                created_at, deleted_at, $2::bigint
+           FROM target
+         ON CONFLICT (room_type, room_id, message_id) DO NOTHING
+         RETURNING message_id`,
+        [messageId, currentActor.steam_id, roomId],
+      );
+      audited = rows.length > 0;
+    } else {
+      const messageKey = `chat_${type}_${roomId}`;
+      const raw = await this.redis.hget(messageKey, messageId);
+      if (!raw) {
+        return false;
+      }
+
+      let stored: any;
+      try {
+        stored = JSON.parse(raw);
+      } catch {
+        this.logger.warn(
+          `[chat] refusing to delete malformed stored message ${type}:${roomId}:${messageId}`,
+        );
+        return false;
+      }
+
+      if (
+        !stored?.from?.steam_id ||
+        typeof stored?.message !== "string" ||
+        !stored?.timestamp ||
+        Number.isNaN(new Date(stored.timestamp).getTime())
+      ) {
+        this.logger.warn(
+          `[chat] refusing to delete incomplete stored message ${type}:${roomId}:${messageId}`,
+        );
+        return false;
+      }
+
+      const rows = await this.postgres.query<Array<{ message_id: string }>>(
+        `INSERT INTO public.chat_message_deletions (
+           message_id, room_type, room_id, author_steam_id, message,
+           message_created_at, deleted_by_steam_id
+         ) VALUES ($1, $2, $3, $4::bigint, $5, $6::timestamptz, $7::bigint)
+         ON CONFLICT (room_type, room_id, message_id) DO NOTHING
+         RETURNING message_id`,
+        [
+          messageId,
+          type,
+          roomId,
+          String(stored.from.steam_id),
+          stored.message,
+          stored.timestamp,
+          currentActor.steam_id,
+        ],
+      );
+      audited = rows.length > 0;
+
+      if (audited) {
+        try {
+          await this.redis.hdel(messageKey, messageId);
+        } catch (error) {
+          // The durable audit marker above is also consulted on history load,
+          // so the content remains hidden even if Redis deletion is transiently
+          // unavailable. Live viewers still receive the deletion broadcast.
+          this.logger.warn(
+            `[chat] unable to remove audited Redis message ${type}:${roomId}:${messageId}`,
+            error,
+          );
+        }
+      }
+    }
+
+    if (!audited) {
+      return false;
+    }
+
+    void this.to(type, roomId, "deleted", { id: messageId });
+    return true;
   }
 
   // Deliberately does NOT try to exclude members who are "present" --

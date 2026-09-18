@@ -74,7 +74,7 @@ export class ChatGateway {
       return;
     }
 
-    await this.chat.sendMessageToChat(
+    const result = await this.chat.sendMessageToChat(
       data.type,
       data.id,
       client.user,
@@ -82,6 +82,24 @@ export class ChatGateway {
       false,
       data.clientId,
     );
+
+    if (!result.accepted) {
+      if (result.muteStatus) {
+        client.send(
+          JSON.stringify({
+            event: "chat:mute-status",
+            data: result.muteStatus,
+          }),
+        );
+        client.send(
+          JSON.stringify({
+            event: "chat:send:error",
+            data: { message: "You are muted from website chat." },
+          }),
+        );
+      }
+      return;
+    }
 
     if (data.type !== ChatLobbyType.Match) {
       return;
@@ -113,13 +131,19 @@ export class ChatGateway {
 
   @SubscribeMessage("lobby:chat:delete")
   async deleteMessage(
-    @MessageBody() data: { id: string },
+    @MessageBody()
+    data: { id: string; roomId: string; type: ChatLobbyType },
     @ConnectedSocket() client: FiveStackWebSocketClient,
   ) {
-    if (!client.user || !data.id) {
+    if (!client.user || !data.id || !data.roomId || !data.type) {
       return;
     }
 
-    await this.chat.deleteAnnouncement(client.user, data.id);
+    await this.chat.deleteMessage(
+      client.user,
+      data.type,
+      data.roomId,
+      data.id,
+    );
   }
 }

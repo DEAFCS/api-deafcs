@@ -13,6 +13,7 @@ describe("ChatService tournament access", () => {
   let service: ChatService;
   let hasura: { query: jest.Mock };
   let redis: Record<string, jest.Mock>;
+  let postgres: { query: jest.Mock };
 
   beforeEach(() => {
     hasura = { query: jest.fn() };
@@ -28,12 +29,13 @@ describe("ChatService tournament access", () => {
       publish: jest.fn().mockResolvedValue(1),
       del: jest.fn().mockResolvedValue(1),
     };
+    postgres = { query: jest.fn().mockResolvedValue([]) };
 
     service = new ChatService(
       { warn: jest.fn() } as any,
       {} as any,
       hasura as any,
-      { query: jest.fn() } as any,
+      postgres as any,
       { getConnection: () => redis } as any,
       {} as any,
     );
@@ -78,7 +80,7 @@ describe("ChatService tournament access", () => {
       player.steam_id,
       expect.any(String),
     );
-    expect(client.send).toHaveBeenCalledTimes(2);
+    expect(client.send).toHaveBeenCalledTimes(3);
     expect(client.send.mock.calls.map(([message]) => message)).toEqual(
       expect.arrayContaining([
         expect.stringContaining(`lobby:tournament:${tournamentId}:list`),
@@ -156,6 +158,50 @@ describe("ChatService tournament access", () => {
       "chat",
       expect.objectContaining({ message: "hello" }),
     );
+  });
+
+  it("rejects a website-muted sender before persistence or broadcast", async () => {
+    postgres.query.mockResolvedValueOnce([
+      { remove_sanction_date: new Date(Date.now() + 60_000).toISOString() },
+    ]);
+    jest.spyOn(service, "to").mockResolvedValue(undefined);
+
+    await expect(
+      service.sendMessageToChat(
+        ChatLobbyType.Global,
+        "global",
+        player,
+        "blocked",
+      ),
+    ).resolves.toEqual({
+      accepted: false,
+      muteStatus: expect.objectContaining({ active: true, permanent: false }),
+    });
+
+    expect(redis.hset).not.toHaveBeenCalled();
+    expect(redis.sendCommand).not.toHaveBeenCalled();
+    expect(service.to).not.toHaveBeenCalled();
+  });
+
+  it("does not apply website chat mutes to CS2-originated chat", async () => {
+    jest.spyOn(service, "to").mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, "notifyLobbyMembers")
+      .mockResolvedValue(undefined);
+
+    await expect(
+      service.sendMessageToChat(
+        ChatLobbyType.Match,
+        "match-1",
+        player,
+        "from CS2",
+        true,
+      ),
+    ).resolves.toEqual({ accepted: true });
+
+    expect(postgres.query).not.toHaveBeenCalled();
+    expect(redis.hset).toHaveBeenCalledTimes(1);
+    expect(service.to).toHaveBeenCalledTimes(1);
   });
 
   it("filters withdrawn listeners while leaving Global Chat delivery unchanged", async () => {

@@ -13,6 +13,7 @@ import { loggerFactory } from "src/utilities/LoggerFactory";
 import { MatchServerMiddlewareMiddleware } from "src/matches/match-server-middleware/match-server-middleware.middleware";
 import { SanctionsService } from "./sanctions.service";
 import { SanctionsController } from "./sanctions.controller";
+import { RedisModule } from "src/redis/redis.module";
 
 // Global: DisconnectBudgetService (in MatchesModule) needs SanctionsService,
 // but MatchesModule already sits in a require cycle with RconModule (see the
@@ -23,7 +24,13 @@ import { SanctionsController } from "./sanctions.controller";
 // without adding a new module-to-module edge into that cycle.
 @Global()
 @Module({
-  imports: [HasuraModule, PostgresModule, RconModule, DedicatedServersModule],
+  imports: [
+    HasuraModule,
+    PostgresModule,
+    RconModule,
+    DedicatedServersModule,
+    RedisModule,
+  ],
   providers: [SanctionsService, loggerFactory()],
   controllers: [SanctionsController],
   exports: [SanctionsService],

@@ -988,6 +988,7 @@ actions:
       forward_client_headers: true
     permissions:
       - role: moderator
+      - role: administrator
   - name: scheduleMatch
     definition:
       kind: synchronous
@@ -1206,6 +1207,7 @@ actions:
       forward_client_headers: true
     permissions:
       - role: moderator
+      - role: administrator
   - name: removeAbandonedMatch
     definition:
       kind: synchronous
