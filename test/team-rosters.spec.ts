@@ -1,4 +1,6 @@
+import path from "path";
 import { PostgresService } from "./../src/postgres/postgres.service";
+import { HasuraService } from "./../src/hasura/hasura.service";
 import { Fixtures } from "./utils/fixtures";
 import {
   bootMigratedDb,
@@ -351,6 +353,112 @@ describe("teams, rosters and lineup membership (SQL-driven)", () => {
         coach: true,
       });
     });
+
+  // Proves the actual production upgrade path for this fix: hasura.setup()
+  // applies hasura/triggers/*.sql by comparing a SHA-256 digest of the file
+  // against migration_hashes.hashes, and only re-executes it (CREATE OR
+  // REPLACE FUNCTION, unconditionally) when the digest differs -- there is
+  // no separate "trigger version" tracking. This does NOT rely on the fix
+  // already being present from bootMigratedDb's initial setup(); it
+  // reinstalls the exact pre-fix function body, records it as already
+  // applied (simulating today's production), then calls hasura.apply() on
+  // the real on-disk (fixed) file and confirms it is detected as changed
+  // and correctly reapplied.
+  describe("production upgrade path for the tbiu_team_roster_status fix", () => {
+    const OLD_BUGGY_FUNCTION_SQL = `
+CREATE OR REPLACE FUNCTION public.tbiu_team_roster_status() RETURNS TRIGGER
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    _count int;
+    _max int;
+BEGIN
+    IF current_setting('fivestack.rebalancing', true) = 'true' THEN
+        RETURN NEW;
+    END IF;
+
+    IF NEW.status = 'Starter' THEN
+        _max := 5;
+        SELECT COUNT(*) INTO _count FROM public.team_roster
+        WHERE team_id = NEW.team_id AND status = 'Starter'
+          AND player_steam_id <> NEW.player_steam_id;
+        IF _count >= _max THEN
+            IF TG_OP = 'INSERT' THEN
+                NEW.status := 'Substitute';
+            ELSE
+                RAISE EXCEPTION USING ERRCODE = '22000',
+                    MESSAGE = 'Only ' || _max || ' starters are allowed; bench a starter first';
+            END IF;
+        END IF;
+    END IF;
+
+    IF NEW.status = 'Substitute' THEN
+        _max := public.team_max_subs();
+        SELECT COUNT(*) INTO _count FROM public.team_roster
+        WHERE team_id = NEW.team_id AND status = 'Substitute'
+          AND player_steam_id <> NEW.player_steam_id;
+        IF _count >= _max THEN
+            IF TG_OP = 'INSERT' THEN
+                NEW.status := 'Benched';
+            ELSE
+                RAISE EXCEPTION USING ERRCODE = '22000',
+                    MESSAGE = 'Only ' || _max || ' substitutes are allowed';
+            END IF;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;`;
+
+    it("hasura.setup()'s digest-gated reapplication actually replaces an already-installed buggy function", async () => {
+      const triggersFilePath = path.resolve("./hasura/triggers/team_roster.sql");
+      const settingKey = path.relative(
+        process.cwd(),
+        triggersFilePath.replace(".sql", ""),
+      );
+
+      // 1. Reinstall the exact pre-fix function body and record its digest
+      //    as already applied -- this is what today's production actually
+      //    has, byte for byte, since it was last deployed before this fix.
+      await postgres.query(OLD_BUGGY_FUNCTION_SQL);
+      const oldDigest = db.hasura.calcSqlDigest(OLD_BUGGY_FUNCTION_SQL);
+      await db.hasura.setSetting(settingKey, oldDigest);
+      expect(await db.hasura.getSetting(settingKey)).toBe(oldDigest);
+
+      // 2. Confirm the bug is really back: a coach's leftover Starter status
+      //    occupies a real slot again. team_roster.status defaults to
+      //    'Starter', so the team owner is already one of the 5 -- coach
+      //    plus 3 more (not 4) exactly fills the cap under the reinstated bug.
+      const owner = await seedPlayer();
+      const teamId = await createTeam(owner);
+      const coach = await addMember(teamId, owner);
+      await setStatus(teamId, coach, "Starter");
+      await setCoach(teamId, coach, true);
+      for (let i = 0; i < 3; i++) {
+        const starter = await addMember(teamId, owner);
+        await setStatus(teamId, starter, "Starter");
+      }
+      const sixth = await addMember(teamId, owner);
+      await expect(setStatus(teamId, sixth, "Starter")).rejects.toThrow(
+        /Only 5 starters are allowed/,
+      );
+
+      // 3. This is the actual deployment step: hasura.setup() -> apply() on
+      //    the real, on-disk (fixed) file. It must detect the digest
+      //    mismatch against what was just recorded as "applied" and
+      //    reapply, with no new migration and no manual intervention.
+      await db.hasura.apply(triggersFilePath);
+      expect(await db.hasura.getSetting(settingKey)).not.toBe(oldDigest);
+
+      // 4. The bug is now fixed against the SAME rows from step 2, proving
+      //    this was a live reapplication, not a fresh install.
+      await setStatus(teamId, sixth, "Starter");
+      expect((await rosterStatusAndCoach(teamId, sixth))?.status).toBe(
+        "Starter",
+      );
+    });
+  });
   });
 
   describe("match lineup membership", () => {
