@@ -125,6 +125,19 @@ export class NotificationsService {
     type: string;
     reason?: string | null;
   }): Promise<void> {
+    // Former teammates only ever need to hear about an actual ban -- a
+    // website chat mute, in-game mute/gag, or silence is between the
+    // sanctioned player and moderation, not something a co-player from a
+    // match 6 months ago needs to be told about. This was missing the
+    // same `type !== "ban"` guard notifyBannedPlayer/notifyAdminsOfBan
+    // already have below, so every admin-issued sanction of any type was
+    // broadcast to recent teammates as "was {verb}" (reported live as
+    // co-players receiving what read to them as a ban notification when
+    // an admin only issued a website_chat_mute).
+    if (sanction.type !== "ban") {
+      return;
+    }
+
     if (await this.isSystemIssuedBan(sanction.sanctionId)) {
       return;
     }
