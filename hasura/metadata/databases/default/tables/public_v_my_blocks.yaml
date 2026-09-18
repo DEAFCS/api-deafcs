@@ -1,0 +1,46 @@
+table:
+  name: v_my_blocks
+  schema: public
+configuration:
+  column_config: {}
+  custom_column_names: {}
+  custom_name: my_blocks
+  custom_root_fields: {}
+object_relationships:
+  - name: player
+    using:
+      manual_configuration:
+        column_mapping:
+          steam_id: steam_id
+        insertion_order: null
+        remote_table:
+          name: players
+          schema: public
+insert_permissions:
+  - role: user
+    permission:
+      check: {}
+      columns:
+        - steam_id
+    comment: A logged-in player can only ever block on their own behalf (blocker_steam_id is always themselves).
+select_permissions:
+  - role: user
+    permission:
+      columns:
+        - steam_id
+        - name
+        - avatar_url
+        - custom_avatar_url
+        - profile_url
+        - created_at
+      filter:
+        blocker_steam_id:
+          _eq: X-Hasura-User-Id
+    comment: A player can see only the players THEY have blocked, never who has blocked them.
+delete_permissions:
+  - role: user
+    permission:
+      filter:
+        blocker_steam_id:
+          _eq: X-Hasura-User-Id
+    comment: A player can only unblock their own blocks.

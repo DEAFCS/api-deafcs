@@ -31,7 +31,7 @@ array_relationships:
           name: support_request_messages
           schema: public
 insert_permissions:
-  - role: user
+  - role: verified_user
     permission:
       check:
         _and:
@@ -56,7 +56,7 @@ insert_permissions:
         - organizer_experience
         - organizer_languages
         - organizer_additional_info
-    comment: A logged-in player can create a support request only for themselves.
+    comment: A logged-in, verified player can create a support request only for themselves. Unverified players (role "user") must use the verification-application flow instead -- see public_verification_applications.yaml, whose insert permission deliberately stays on role "user".
 select_permissions:
   - role: user
     permission:

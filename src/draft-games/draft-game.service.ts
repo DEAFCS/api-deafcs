@@ -22,6 +22,7 @@ import { DraftGameError } from "./types/DraftGameError";
 import { DraftGameQueues } from "./enums/DraftGameQueues";
 import { DraftService } from "./draft.service";
 import { SYSTEM_STEAM_ID } from "../matches/disconnect-budget/constants";
+import { BlocksService } from "src/blocks/blocks.service";
 
 export interface CreateDraftGameSettings {
   type: e_match_types_enum;
@@ -72,6 +73,7 @@ export class DraftGameService {
     private readonly draftService: DraftService,
     @InjectQueue(DraftGameQueues.DraftGames) private queue: Queue,
     private readonly postgres: PostgresService,
+    private readonly blocks: BlocksService,
   ) {}
 
   // "Sanction" (admin-issued) bars draft eligibility -- "Abandoned"
@@ -854,6 +856,12 @@ export class DraftGameService {
         throw new DraftGameError(
           "Only the host or an organizer can add players",
         );
+      }
+
+      if (
+        await this.blocks.isBlockedEitherDirection(user.steam_id, steamId)
+      ) {
+        throw new DraftGameError("You cannot add a blocked player");
       }
 
       const terminal =

@@ -81,8 +81,17 @@ describe("Support requests (Hasura-driven)", () => {
     }
   `;
 
+  // Creating a support request requires role verified_user and above (see
+  // public_support_requests.yaml's insert_permissions) -- these test
+  // players don't need players.role actually set to verified_user in
+  // Postgres for that, since this harness's gql() sets x-hasura-role
+  // directly on the request, the same way the real auth webhook's
+  // resolved role would arrive. Everything else (selecting your own
+  // request, replying on it) is unrelated to that permission and stays on
+  // role "user" below, matching public_support_requests.yaml's unchanged
+  // select_permissions and public_support_request_messages.yaml.
   const insertGeneral = async (player: string) =>
-    gql(INSERT_REQUEST, "user", player, {
+    gql(INSERT_REQUEST, "verified_user", player, {
       object: {
         category: "general_support",
         subject: "Need help",
@@ -103,6 +112,57 @@ describe("Support requests (Hasura-driven)", () => {
       is_consistent: true,
       inconsistent_objects: [],
     });
+  });
+
+  it("rejects support request creation for an unverified (role user) player", async () => {
+    const player = await fx.player();
+    const result = await gql(INSERT_REQUEST, "user", player, {
+      object: {
+        category: "general_support",
+        subject: "Need help",
+        initial_message: "I need help with a DEAFCS feature.",
+      },
+    });
+    // Hasura excludes a mutation field entirely from a role's schema when
+    // that role has no insert permission for it -- a validation-failed
+    // "field not found" error, not a runtime authorization error, but
+    // either way nothing gets inserted.
+    expect(result.errors).toBeDefined();
+    expect(result.data?.insert_support_requests_one ?? null).toBeNull();
+  });
+
+  it("rejects support request creation for a guest (no authenticated role)", async () => {
+    const result = await gql(INSERT_REQUEST, "guest", undefined, {
+      object: {
+        category: "general_support",
+        subject: "Need help",
+        initial_message: "I need help with a DEAFCS feature.",
+      },
+    });
+    expect(result.errors).toBeDefined();
+    expect(result.data?.insert_support_requests_one ?? null).toBeNull();
+  });
+
+  it("allows support request creation for verified_user and every role above it", async () => {
+    for (const role of [
+      "verified_user",
+      "moderator",
+      "administrator",
+    ]) {
+      const player = await fx.player();
+      const result = await gql(INSERT_REQUEST, role, player, {
+        object: {
+          category: "general_support",
+          subject: `Need help (${role})`,
+          initial_message: "I need help with a DEAFCS feature.",
+        },
+      });
+      expect(result.errors).toBeUndefined();
+      expect(result.data?.insert_support_requests_one).toMatchObject({
+        player_steam_id: player,
+        status: "open",
+      });
+    }
   });
 
   it("forces ownership and lets a player select only their own request", async () => {
@@ -136,7 +196,7 @@ describe("Support requests (Hasura-driven)", () => {
   it("rejects forged owners and statuses", async () => {
     const owner = await fx.player();
     const other = await fx.player();
-    const result = await gql(INSERT_REQUEST, "user", owner, {
+    const result = await gql(INSERT_REQUEST, "verified_user", owner, {
       object: {
         player_steam_id: other,
         status: "closed",
@@ -153,7 +213,7 @@ describe("Support requests (Hasura-driven)", () => {
     const reporter = await fx.player();
     const other = await fx.player();
     const reported = await fx.player();
-    const inserted = await gql(INSERT_REQUEST, "user", reporter, {
+    const inserted = await gql(INSERT_REQUEST, "verified_user", reporter, {
       object: {
         category: "player_report",
         subject: "Player conduct report",
@@ -188,7 +248,7 @@ describe("Support requests (Hasura-driven)", () => {
 
   it("requires the structured fields for player reports", async () => {
     const reporter = await fx.player();
-    const result = await gql(INSERT_REQUEST, "user", reporter, {
+    const result = await gql(INSERT_REQUEST, "verified_user", reporter, {
       object: {
         category: "player_report",
         subject: "Incomplete report",
@@ -200,7 +260,7 @@ describe("Support requests (Hasura-driven)", () => {
 
   it("stores a tournament organizer application without granting a role", async () => {
     const applicant = await fx.player();
-    const result = await gql(INSERT_REQUEST, "user", applicant, {
+    const result = await gql(INSERT_REQUEST, "verified_user", applicant, {
       object: {
         category: "organizer_application",
         subject: "Tournament organizer application",

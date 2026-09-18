@@ -10,6 +10,7 @@ import { ChatLobbyType } from "./enums/ChatLobbyTypes";
 import { e_player_roles_enum, e_notification_types_enum } from "generated/schema";
 import { isRoleAbove } from "src/utilities/isRoleAbove";
 import { NotificationsService } from "../notifications/notifications.service";
+import { BlocksService } from "src/blocks/blocks.service";
 import { v4 as uuidv4 } from "uuid";
 
 type WebsiteChatMuteStatus = {
@@ -39,6 +40,7 @@ export class ChatService {
     private readonly postgres: PostgresService,
     private readonly redisManager: RedisManagerService,
     private readonly notifications: NotificationsService,
+    private readonly blocks: BlocksService,
   ) {
     this.redis = this.redisManager.getConnection();
   }
@@ -226,6 +228,19 @@ export class ChatService {
           if (friends.length === 0) {
             return;
           }
+
+          // Explicit, not just relying on blocking having already removed
+          // the friendship row above -- keeps this join path correct on
+          // its own even if the DM/friendship coupling ever changes, and
+          // covers reconnects/refreshes the same as a fresh open.
+          if (
+            await this.blocks.isBlockedEitherDirection(
+              user.steam_id,
+              otherSteamId,
+            )
+          ) {
+            return;
+          }
         }
         break;
       }
@@ -279,6 +294,26 @@ export class ChatService {
       )
         .map(([, value]) => JSON.parse(value))
         .filter((message) => !deletedIds.has(String(message.id)));
+
+      // Per-viewer redaction: a shared room (Global, Team, Match, ...)
+      // shows the same message list to everyone except who the *joining*
+      // viewer personally blocked -- other members still see those
+      // messages normally, and the underlying content is never deleted
+      // (see chat_message_deletions for the actual admin-delete audit
+      // trail, a completely different, global mechanism). Direct is
+      // excluded: a DM's only "other party" is already refused at join
+      // time and at send time when blocked, so there's no third party to
+      // filter and no benefit to redacting your own 1:1 history.
+      if (type !== ChatLobbyType.Direct) {
+        const blockedSteamIds = await this.blocks.getMyBlockedSteamIds(
+          user.steam_id,
+        );
+        if (blockedSteamIds.size > 0) {
+          messages = messages.map((message) =>
+            this.redactIfBlocked(message, blockedSteamIds),
+          );
+        }
+      }
     }
 
     client.send(
@@ -481,6 +516,26 @@ export class ChatService {
         return { accepted: false };
       }
 
+      // Closes the "already had the DM tab open" bypass: joinMatchLobby's
+      // friends-only check only runs at join time, and blocking removes
+      // the friendship row (see ti_v_my_blocks), but a tab opened *before*
+      // the block never re-joins. Re-checked here on every send instead.
+      if (type === ChatLobbyType.Direct) {
+        const parties = id.split(":");
+        const otherSteamId = parties.find(
+          (p) => p !== String(player.steam_id),
+        );
+        if (
+          otherSteamId &&
+          (await this.blocks.isBlockedEitherDirection(
+            player.steam_id,
+            otherSteamId,
+          ))
+        ) {
+          return { accepted: false };
+        }
+      }
+
       // Only admins can post an announcement -- everyone else can read
       // (checked in joinMatchLobby) but silently can't send, same
       // "silently ignored" convention as the checks above.
@@ -545,7 +600,25 @@ export class ChatService {
       );
     }
 
-    void this.to(type, id, "chat", message);
+    if (type === ChatLobbyType.Direct || type === ChatLobbyType.Announcement) {
+      void this.to(type, id, "chat", message);
+    } else {
+      // Per-recipient redaction for live messages in shared rooms, mirroring
+      // the history-load redaction above -- a viewer who has blocked the
+      // sender gets a placeholder in real time too, not just on next join.
+      void this.to(type, id, "chat", message, async (recipientSteamId) => {
+        if (recipientSteamId === String(player.steam_id)) {
+          return undefined;
+        }
+        const recipientBlockedSender = await this.blocks.hasBlocked(
+          recipientSteamId,
+          player.steam_id,
+        );
+        return recipientBlockedSender
+          ? this.redactIfBlocked(message, new Set([String(player.steam_id)]))
+          : undefined;
+      });
+    }
 
     // Best-effort push for anyone who's a member of this lobby but isn't
     // currently connected to it (getAllUsersInLobby only ever holds
@@ -596,6 +669,26 @@ export class ChatService {
       [type, id],
     );
     return new Set(rows.map((row) => row.message_id));
+  }
+
+  // Replaces a message's content with a placeholder when its sender is in
+  // `blockedSteamIds` -- the message stays in the list (so ordering/count
+  // for the viewer is undisturbed) but its text is never actually shown to
+  // them. Does not touch the underlying stored content, so every other
+  // viewer (and chat_message_deletions/admin audit) sees the real message.
+  private redactIfBlocked(
+    message: Record<string, any>,
+    blockedSteamIds: Set<string>,
+  ): Record<string, any> {
+    const senderSteamId = String(message?.from?.steam_id ?? "");
+    if (!blockedSteamIds.has(senderSteamId)) {
+      return message;
+    }
+    return {
+      ...message,
+      message: "Message from blocked player",
+      blocked: true,
+    };
   }
 
   private formatAnnouncementRow(row: {
@@ -935,7 +1028,20 @@ export class ChatService {
     if (!members.length) return;
 
     const senderId = String(sender.steam_id);
-    const targets = members.filter((steamId) => steamId !== senderId);
+    const candidates = members.filter((steamId) => steamId !== senderId);
+    if (!candidates.length) return;
+
+    // No personal push notification from a blocked player -- covers DMs
+    // and every fixed-roster room (Match/Team/Tournament/...) this
+    // function's default path serves. Global/Announcement/Organizer use
+    // their own role-broadcast branches above and are out of scope here.
+    const blockingViewers = await this.blocks.getViewersBlocking(
+      candidates,
+      senderId,
+    );
+    const targets = candidates.filter(
+      (steamId) => !blockingViewers.has(steamId),
+    );
 
     if (!targets.length) return;
 
@@ -1179,6 +1285,14 @@ export class ChatService {
       | "edited"
       | "deleted",
     data: Record<string, any>,
+    // Optional per-recipient override -- used only for live "chat" events
+    // on shared rooms, so a viewer who blocked the sender gets a redacted
+    // payload instead of the real message while everyone else in the same
+    // loop still gets `data` unchanged. Returning undefined falls back to
+    // `data` for that recipient.
+    redactForRecipient?: (
+      steamId: string,
+    ) => Promise<Record<string, any> | undefined>,
   ) {
     const users = await this.getAllUsersInLobby(type, id);
     const eventName = `lobby:${type}:${id}:${event}`;
@@ -1193,12 +1307,16 @@ export class ChatService {
         continue;
       }
 
+      const payload = redactForRecipient
+        ? ((await redactForRecipient(String(steamId))) ?? data)
+        : data;
+
       await this.redis.publish(
         "send-message-to-steam-id",
         JSON.stringify({
           steamId,
           event: eventName,
-          data,
+          data: payload,
         }),
       );
     }

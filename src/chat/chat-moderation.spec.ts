@@ -41,6 +41,12 @@ describe("ChatService website moderation", () => {
       postgres as any,
       { getConnection: () => redis } as any,
       {} as any,
+      {
+        isBlockedEitherDirection: jest.fn().mockResolvedValue(false),
+        hasBlocked: jest.fn().mockResolvedValue(false),
+        getMyBlockedSteamIds: jest.fn().mockResolvedValue(new Set()),
+        getViewersBlocking: jest.fn().mockResolvedValue(new Set()),
+      } as any,
     );
   });
 
