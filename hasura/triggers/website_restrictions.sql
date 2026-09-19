@@ -90,6 +90,12 @@ DECLARE
   _want_tgtype constant smallint := 31;
   _existing_tgtype smallint;
   _existing_tgfoid oid;
+  -- 'O' ("origin") is the enabled state a plain CREATE TRIGGER produces.
+  -- Anything else -- 'D' disabled, 'R' replica-only, 'A' always -- means
+  -- this table is not actually protected the way it looks, even though the
+  -- trigger's name/type/function all still match.
+  _existing_tgenabled "char";
+  _existing_has_when boolean;
 BEGIN
   FOREACH _table_name IN ARRAY ARRAY[
     'friends',
@@ -126,11 +132,13 @@ BEGIN
          AND c.relkind IN ('r', 'p')
     ) THEN
       -- Do not assume the trigger name alone proves its definition is
-      -- correct: compare the actual timing/events (tgtype) and the actual
-      -- target function (tgfoid) of whatever is currently installed, not
-      -- just whether a same-named trigger exists.
-      SELECT t.tgtype, t.tgfoid
-        INTO _existing_tgtype, _existing_tgfoid
+      -- correct: compare the actual timing/events (tgtype), the actual
+      -- target function (tgfoid), whether it's actually enabled
+      -- (tgenabled), and whether a WHEN condition was added (tgqual) --
+      -- any of these could leave a same-named, same-shaped trigger that
+      -- silently never fires or only fires conditionally.
+      SELECT t.tgtype, t.tgfoid, t.tgenabled, t.tgqual IS NOT NULL
+        INTO _existing_tgtype, _existing_tgfoid, _existing_tgenabled, _existing_has_when
         FROM pg_trigger t
         JOIN pg_class c ON c.oid = t.tgrelid
         JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -139,7 +147,9 @@ BEGIN
          AND t.tgname = 'enforce_website_restriction_write';
 
       IF _existing_tgtype IS DISTINCT FROM _want_tgtype
-         OR _existing_tgfoid IS DISTINCT FROM _fn_oid THEN
+         OR _existing_tgfoid IS DISTINCT FROM _fn_oid
+         OR _existing_tgenabled IS DISTINCT FROM 'O'
+         OR COALESCE(_existing_has_when, false) THEN
         EXECUTE format(
           'DROP TRIGGER IF EXISTS enforce_website_restriction_write ON public.%I',
           _table_name

@@ -141,6 +141,84 @@ describe("website_restrictions.sql trigger reapplication no longer relocks uncha
     expect(fixedRow.tgtype).toBe(31);
   });
 
+  it("a correct-looking but DISABLED trigger is detected and re-enabled, restoring real enforcement", async () => {
+    // Start from a known-good state regardless of prior test ordering.
+    await rerunTriggerFile();
+    const goodOid = await triggerOid("seasons");
+    expect(goodOid).not.toBeNull();
+
+    await postgres.query(
+      `ALTER TABLE public.seasons DISABLE TRIGGER enforce_website_restriction_write`,
+    );
+    const [disabledRow] = await postgres.query<Array<{ tgenabled: string }>>(
+      `SELECT tgenabled FROM pg_trigger WHERE oid = $1`,
+      [goodOid],
+    );
+    expect(disabledRow.tgenabled).toBe("D");
+
+    // While disabled, a restricted actor's write must NOT be blocked -- this
+    // is the exact silent bypass a name/type/function-only comparison would
+    // have missed (same OID, same tgtype, same tgfoid, just switched off).
+    const administrator = await fx.player("AdministratorDisabled");
+    const restricted = await fx.player("RestrictedDisabled");
+    await postgres.query(
+      `INSERT INTO player_sanctions
+         (player_steam_id, sanctioned_by_steam_id, type, reason)
+       VALUES ($1, $2, 'website_restriction', 'abuse')`,
+      [restricted, administrator],
+    );
+    await expect(
+      runAsUser(postgres, restricted, "match_organizer", (query) =>
+        query(`INSERT INTO seasons (number, starts_at) VALUES (9001, now())`),
+      ),
+    ).resolves.toBeDefined();
+    await postgres.query(`DELETE FROM seasons WHERE number = 9001`);
+
+    await rerunTriggerFile();
+
+    const [reenabledRow] = await postgres.query<Array<{ tgenabled: string }>>(
+      `SELECT tgenabled FROM pg_trigger WHERE tgrelid = 'public.seasons'::regclass
+         AND tgname = 'enforce_website_restriction_write'`,
+    );
+    expect(reenabledRow.tgenabled).toBe("O");
+
+    await expect(
+      runAsUser(postgres, restricted, "match_organizer", (query) =>
+        query(`INSERT INTO seasons (number, starts_at) VALUES (9002, now())`),
+      ),
+    ).rejects.toThrow("restricted to read-only access");
+  });
+
+  it("a trigger with an added WHEN condition is detected and corrected", async () => {
+    await rerunTriggerFile();
+    await postgres.query(
+      `DROP TRIGGER enforce_website_restriction_write ON public.seasons`,
+    );
+    // A WHEN (false) condition would make the trigger permanently inert
+    // while still matching on name, tgtype, tgfoid and tgenabled.
+    await postgres.query(
+      `CREATE TRIGGER enforce_website_restriction_write
+         BEFORE INSERT OR UPDATE OR DELETE ON public.seasons
+         FOR EACH ROW WHEN (false)
+         EXECUTE FUNCTION public.enforce_website_restriction_write()`,
+    );
+    const [withWhen] = await postgres.query<Array<{ has_when: boolean }>>(
+      `SELECT tgqual IS NOT NULL AS has_when FROM pg_trigger
+        WHERE tgrelid = 'public.seasons'::regclass
+          AND tgname = 'enforce_website_restriction_write'`,
+    );
+    expect(withWhen.has_when).toBe(true);
+
+    await rerunTriggerFile();
+
+    const [afterFix] = await postgres.query<Array<{ has_when: boolean }>>(
+      `SELECT tgqual IS NOT NULL AS has_when FROM pg_trigger
+        WHERE tgrelid = 'public.seasons'::regclass
+          AND tgname = 'enforce_website_restriction_write'`,
+    );
+    expect(afterFix.has_when).toBe(false);
+  });
+
   it("digest tracking still records this file as applied after a real change", async () => {
     const settingKey = "hasura/triggers/website_restrictions";
     const digest = db.hasura.calcSqlDigest(triggerSql);
