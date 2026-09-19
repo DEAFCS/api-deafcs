@@ -67,9 +67,29 @@ BEGIN
 END;
 $$;
 
+-- Attaching (or re-verifying) enforce_website_restriction_write across every
+-- table below requires an AccessExclusiveLock per table for the DROP+CREATE
+-- TRIGGER pair, which can deadlock against long-lived Hasura subscriptions
+-- reading these same tables (e.g. the open-matchmaking lobby browser holding
+-- an AccessShareLock on `lobbies`). This file is re-applied on every
+-- hasura.setup() run whenever its digest changes (see HasuraService.apply()),
+-- including immediately after the versioned migration that first installs
+-- these same triggers -- so unconditionally redoing the DROP+CREATE here
+-- doubles the live-lock exposure for no reason once the trigger is already
+-- correctly in place. Instead, only take the lock on a table whose trigger
+-- is actually missing or actually different from the intended definition.
 DO $$
 DECLARE
   _table_name text;
+  _fn_oid oid := to_regprocedure('public.enforce_website_restriction_write()');
+  -- pg_trigger.tgtype bitmask for "FOR EACH ROW BEFORE INSERT OR UPDATE OR
+  -- DELETE": TRIGGER_TYPE_ROW(1) | TRIGGER_TYPE_BEFORE(2) |
+  -- TRIGGER_TYPE_INSERT(4) | TRIGGER_TYPE_DELETE(8) | TRIGGER_TYPE_UPDATE(16).
+  -- This is Postgres's own stable, documented catalog encoding for a
+  -- trigger's timing/events, not a value specific to this database.
+  _want_tgtype constant smallint := 31;
+  _existing_tgtype smallint;
+  _existing_tgfoid oid;
 BEGIN
   FOREACH _table_name IN ARRAY ARRAY[
     'friends',
@@ -105,14 +125,30 @@ BEGIN
          AND c.relname = _table_name
          AND c.relkind IN ('r', 'p')
     ) THEN
-      EXECUTE format(
-        'DROP TRIGGER IF EXISTS enforce_website_restriction_write ON public.%I',
-        _table_name
-      );
-      EXECUTE format(
-        'CREATE TRIGGER enforce_website_restriction_write BEFORE INSERT OR UPDATE OR DELETE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.enforce_website_restriction_write()',
-        _table_name
-      );
+      -- Do not assume the trigger name alone proves its definition is
+      -- correct: compare the actual timing/events (tgtype) and the actual
+      -- target function (tgfoid) of whatever is currently installed, not
+      -- just whether a same-named trigger exists.
+      SELECT t.tgtype, t.tgfoid
+        INTO _existing_tgtype, _existing_tgfoid
+        FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'public'
+         AND c.relname = _table_name
+         AND t.tgname = 'enforce_website_restriction_write';
+
+      IF _existing_tgtype IS DISTINCT FROM _want_tgtype
+         OR _existing_tgfoid IS DISTINCT FROM _fn_oid THEN
+        EXECUTE format(
+          'DROP TRIGGER IF EXISTS enforce_website_restriction_write ON public.%I',
+          _table_name
+        );
+        EXECUTE format(
+          'CREATE TRIGGER enforce_website_restriction_write BEFORE INSERT OR UPDATE OR DELETE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.enforce_website_restriction_write()',
+          _table_name
+        );
+      END IF;
     END IF;
   END LOOP;
 END;
