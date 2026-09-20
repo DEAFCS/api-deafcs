@@ -120,3 +120,75 @@ describe("MatchesController cancellation action", () => {
     );
   });
 });
+
+describe("MatchesController.callForOrganizer", () => {
+  function makeController(matchOverrides: Record<string, any> = {}) {
+    const controller = Object.create(MatchesController.prototype) as any;
+    controller.appConfig = { webDomain: "https://example.com" };
+    controller.hasura = {
+      query: jest.fn().mockResolvedValue({
+        matches_by_pk: {
+          is_in_lineup: true,
+          requested_organizer: false,
+          ...matchOverrides,
+        },
+      }),
+    };
+    controller.notifications = {
+      send: jest.fn(),
+      sendSilent: jest.fn(),
+    };
+    return controller;
+  }
+
+  it("notifies match organizers and administrators, not a plain user role", async () => {
+    const controller = makeController();
+
+    await controller.callForOrganizer({
+      user: { steam_id: "100" },
+      match_id: "match-1",
+    });
+
+    expect(controller.notifications.send).toHaveBeenCalledWith(
+      "MatchSupport",
+      expect.objectContaining({
+        title: "Match Assistanced Required",
+        role: "match_organizer",
+        entity_id: "match-1",
+      }),
+      undefined,
+      expect.anything(),
+    );
+    expect(controller.notifications.sendSilent).toHaveBeenCalledWith(
+      "MatchSupport",
+      expect.objectContaining({
+        title: "Match Assistanced Required",
+        role: "administrator",
+        entity_id: "match-1",
+      }),
+    );
+    // No role other than match_organizer/administrator is ever targeted --
+    // in particular never a bare "user" broadcast.
+    expect(controller.notifications.send).not.toHaveBeenCalledWith(
+      "MatchSupport",
+      expect.objectContaining({ role: "user" }),
+      undefined,
+      expect.anything(),
+    );
+    // Exactly one broadcast per role -- not a duplicate.
+    expect(controller.notifications.send).toHaveBeenCalledTimes(1);
+    expect(controller.notifications.sendSilent).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not re-notify once an organizer has already been requested", async () => {
+    const controller = makeController({ requested_organizer: true });
+
+    await controller.callForOrganizer({
+      user: { steam_id: "100" },
+      match_id: "match-1",
+    });
+
+    expect(controller.notifications.send).not.toHaveBeenCalled();
+    expect(controller.notifications.sendSilent).not.toHaveBeenCalled();
+  });
+});

@@ -2191,6 +2191,15 @@ export class MatchesController {
       DISCORD_COLORS.RED,
     );
 
+    // administrator broadcast, no steam_id involved above, so no duplicate
+    // risk -- sendSilent so this doesn't also double-post to Discord.
+    void this.notifications.sendSilent("MatchSupport", {
+      message: `Match Assistanced Required <a href="${this.appConfig.webDomain}/matches/${data.match_id}">${data.match_id}</a>`,
+      title: "Match Assistanced Required",
+      role: "administrator",
+      entity_id: data.match_id,
+    });
+
     return {
       success: true,
     };
