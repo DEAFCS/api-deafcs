@@ -925,11 +925,21 @@ export class TournamentsController {
 
   // Team-tournament counterpart to checkIntoTournament above: same shared
   // attendance window (tournaments.individual_check_in_ends_at), but
-  // confirms the whole team at once via the captain/authorized
-  // representative rather than requiring every roster player to check in
-  // individually. Reuses can_manage_tournament_team (the same
-  // captain/owner/team-admin/organizer check already used for editing a
-  // tournament team) instead of a new authorization rule.
+  // confirms the whole team at once via the captain rather than requiring
+  // every roster player to check in individually.
+  //
+  // Deliberately narrower than the general-purpose can_manage_tournament_team
+  // function/`can_manage` computed field (which also gates roster edit/kick,
+  // team identity edit and leave-tournament in the WEB UI, and treats roster
+  // Admins, the original owner, and a linked persistent team's owner/
+  // captain/admin as able to manage the team). Team check-in is specifically
+  // the captain's job: an ordinary roster admin or a former owner who is no
+  // longer captain must NOT be able to check the team in just because they
+  // can otherwise manage it. The only exception is an explicit emergency
+  // override for this tournament's organizer/creator or a platform
+  // administrator, via the same is_tournament_organizer check Hasura itself
+  // uses for tournament.is_organizer everywhere else -- not the team's own
+  // roster-admin/owner permissions.
   @HasuraAction()
   public async checkInTournamentTeam(data: {
     user: User;
@@ -945,9 +955,10 @@ export class TournamentsController {
           __args: { id: tournament_team_id },
           id: true,
           tournament_id: true,
-          can_manage: true,
+          captain_steam_id: true,
           tournament: {
             individual_check_in_ends_at: true,
+            is_organizer: true,
           },
         },
       },
@@ -957,7 +968,10 @@ export class TournamentsController {
     if (!team) {
       throw Error("tournament team not found");
     }
-    if (!team.can_manage) {
+    const isCaptain =
+      String(team.captain_steam_id) === String(data.user.steam_id);
+    const isTournamentOrganizer = !!team.tournament?.is_organizer;
+    if (!isCaptain && !isTournamentOrganizer) {
       throw Error("not authorized to check in this team");
     }
     if (

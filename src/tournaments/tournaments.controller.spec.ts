@@ -359,6 +359,150 @@ describe("TournamentsController.deleteTournament", () => {
   });
 });
 
+// Task 3: team check-in is specifically the captain's job. An ordinary
+// roster admin, a former owner who is no longer captain, or any other
+// "can_manage" team admin must NOT be able to check the team in on that
+// basis alone -- only tournament_teams.captain_steam_id, plus an explicit
+// emergency override for this tournament's organizer/creator or a platform
+// administrator (tournament.is_organizer, the same computed field Hasura
+// itself uses everywhere else for that exact concept). This is
+// deliberately narrower than the general-purpose can_manage_tournament_team
+// function, which is left untouched.
+describe("TournamentsController.checkInTournamentTeam", () => {
+  const teamId = "33333333-3333-3333-3333-333333333333";
+  const captainSteamId = "76561199000000042";
+  const otherPlayerSteamId = "76561199000000999";
+  const user = { steam_id: captainSteamId, role: "user" } as any;
+
+  const futureWindow = new Date(Date.now() + 60_000).toISOString();
+  const pastWindow = new Date(Date.now() - 60_000).toISOString();
+
+  let controller: TournamentsController;
+  let hasura: { query: jest.Mock; mutation: jest.Mock };
+  let postgres: { query: jest.Mock };
+  let terms: { assertAccepted: jest.Mock };
+
+  beforeEach(() => {
+    hasura = { query: jest.fn(), mutation: jest.fn() };
+    postgres = { query: jest.fn().mockResolvedValue({ rows: [] }) };
+    terms = { assertAccepted: jest.fn().mockResolvedValue(undefined) };
+
+    controller = new TournamentsController(
+      { log: jest.fn(), error: jest.fn() } as any,
+      hasura as any,
+      {} as any, // demoMetadata
+      {} as any, // clips
+      {} as any, // tournamentVoice
+      postgres as any,
+      {} as any, // awards
+      {} as any, // notifications
+      {} as any, // teamGeneration
+      terms as any,
+    );
+  });
+
+  const team = (overrides: Record<string, unknown> = {}) => ({
+    id: teamId,
+    tournament_id: "tid",
+    captain_steam_id: captainSteamId,
+    tournament: {
+      individual_check_in_ends_at: futureWindow,
+      is_organizer: false,
+    },
+    ...overrides,
+  });
+
+  it("allows the team's captain_steam_id", async () => {
+    hasura.query.mockResolvedValueOnce({ tournament_teams_by_pk: team() });
+
+    await expect(
+      controller.checkInTournamentTeam({ user, tournament_team_id: teamId }),
+    ).resolves.toEqual({ success: true });
+
+    expect(postgres.query).toHaveBeenCalledWith(
+      expect.stringContaining("UPDATE public.tournament_teams"),
+      [teamId],
+    );
+  });
+
+  it("allows this tournament's organizer/creator or an administrator as an emergency override, even when not captain", async () => {
+    hasura.query.mockResolvedValueOnce({
+      tournament_teams_by_pk: team({
+        captain_steam_id: otherPlayerSteamId,
+        tournament: {
+          individual_check_in_ends_at: futureWindow,
+          is_organizer: true,
+        },
+      }),
+    });
+
+    await expect(
+      controller.checkInTournamentTeam({ user, tournament_team_id: teamId }),
+    ).resolves.toEqual({ success: true });
+  });
+
+  it("rejects a roster admin/manager who is not the captain and not the tournament organizer", async () => {
+    // Regression coverage for the correction: previously this action also
+    // accepted the general can_manage flag (roster Admin, team owner, an
+    // organizer-independent "manager"), which let a non-captain roster
+    // admin check the team in. That is exactly what must no longer happen.
+    hasura.query.mockResolvedValueOnce({
+      tournament_teams_by_pk: team({
+        captain_steam_id: otherPlayerSteamId,
+      }),
+    });
+
+    await expect(
+      controller.checkInTournamentTeam({ user, tournament_team_id: teamId }),
+    ).rejects.toThrow(/not authorized to check in this team/i);
+
+    expect(postgres.query).not.toHaveBeenCalled();
+  });
+
+  it("rejects the team's original owner if they were reassigned away from captain", async () => {
+    // Same regression as above, phrased for the specific scenario Task 3's
+    // safety review called out: an owner who is no longer captain must not
+    // retain check-in ability just by virtue of having created the entry.
+    hasura.query.mockResolvedValueOnce({
+      tournament_teams_by_pk: team({
+        captain_steam_id: otherPlayerSteamId,
+      }),
+    });
+
+    await expect(
+      controller.checkInTournamentTeam({
+        user, // "user" here stands in for the original owner, no longer captain
+        tournament_team_id: teamId,
+      }),
+    ).rejects.toThrow(/not authorized to check in this team/i);
+  });
+
+  it("rejects outside the check-in window even for the captain", async () => {
+    hasura.query.mockResolvedValueOnce({
+      tournament_teams_by_pk: team({
+        tournament: {
+          individual_check_in_ends_at: pastWindow,
+          is_organizer: false,
+        },
+      }),
+    });
+
+    await expect(
+      controller.checkInTournamentTeam({ user, tournament_team_id: teamId }),
+    ).rejects.toThrow(/check-in is not currently open/i);
+
+    expect(postgres.query).not.toHaveBeenCalled();
+  });
+
+  it("rejects when the team does not exist", async () => {
+    hasura.query.mockResolvedValueOnce({ tournament_teams_by_pk: null });
+
+    await expect(
+      controller.checkInTournamentTeam({ user, tournament_team_id: teamId }),
+    ).rejects.toThrow(/tournament team not found/i);
+  });
+});
+
 describe("TournamentsController tournament_events (Cancelled)", () => {
   const tournamentId = "22222222-2222-2222-2222-222222222222";
 
