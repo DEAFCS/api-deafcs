@@ -1,0 +1,3 @@
+-- Intentionally do not restore a weaker or unknown historical value. The
+-- previous setting is not recoverable and lowering this boundary on rollback
+-- would re-open tournament creation to ordinary users.

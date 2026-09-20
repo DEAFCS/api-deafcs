@@ -67,7 +67,7 @@ BEGIN
     END IF;
 
     IF _actor_role IS NOT NULL
-        AND _actor_role NOT IN ('admin', 'administrator', 'tournament_organizer')
+        AND _actor_role NOT IN ('admin', 'administrator')
         AND _actor_steam_id IS DISTINCT FROM _owner_steam_id
         AND NOT (
             TG_OP = 'DELETE'

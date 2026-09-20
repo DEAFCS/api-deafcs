@@ -108,6 +108,29 @@ select_permissions:
         - updated_at
       filter: {}
     comment: Admins can see every application.
+  - role: moderator
+    permission:
+      columns:
+        - id
+        - player_steam_id
+        - is_deaf
+        - country
+        - found_via
+        - knows_deaf_player
+        - deaf_player_steam_url
+        - deaf_player_nickname
+        - social_instagram_url
+        - social_facebook_url
+        - social_vk_url
+        - additional_info
+        - account_declaration_accepted_at
+        - status
+        - reviewed_by_steam_id
+        - reviewed_at
+        - created_at
+        - updated_at
+      filter: {}
+    comment: Moderators can see every application.
 delete_permissions:
   - role: administrator
     permission:

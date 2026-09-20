@@ -6,12 +6,12 @@ LANGUAGE sql
 STABLE
 AS $$
     SELECT
-        hasura_session ->> 'x-hasura-role' IN ('admin', 'administrator', 'tournament_organizer')
-        OR tournament.organizer_steam_id = (hasura_session ->> 'x-hasura-user-id')::bigint
+        hasura_session ->> 'x-hasura-role' IN ('admin', 'administrator')
+        OR tournament.organizer_steam_id = nullif(hasura_session ->> 'x-hasura-user-id', '')::bigint
         OR EXISTS (
             SELECT 1
             FROM public.tournament_organizers
             WHERE tournament_id = tournament.id
-              AND steam_id = (hasura_session ->> 'x-hasura-user-id')::bigint
+              AND steam_id = nullif(hasura_session ->> 'x-hasura-user-id', '')::bigint
         );
 $$;

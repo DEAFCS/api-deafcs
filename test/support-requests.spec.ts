@@ -144,11 +144,7 @@ describe("Support requests (Hasura-driven)", () => {
   });
 
   it("allows support request creation for verified_user and every role above it", async () => {
-    for (const role of [
-      "verified_user",
-      "moderator",
-      "administrator",
-    ]) {
+    for (const role of ["verified_user", "moderator", "administrator"]) {
       const player = await fx.player();
       const result = await gql(INSERT_REQUEST, role, player, {
         object: {
@@ -322,21 +318,31 @@ describe("Support requests (Hasura-driven)", () => {
     expect(crossRead.data?.support_request_messages).toEqual([]);
   });
 
-  it("lets an admin close and reopen a request and blocks replies while closed", async () => {
+  it("lets a moderator reply, close and reopen, but never permanently delete", async () => {
     const owner = await fx.player();
-    const admin = await fx.player();
+    const moderator = await fx.player();
     const inserted = await insertGeneral(owner);
     const id = inserted.data.insert_support_requests_one.id;
 
+    const staffReply = await gql(
+      `mutation { insert_support_request_messages_one(object: { request_id: "${id}", message: "A moderator reply." }) { id is_admin sender_steam_id } }`,
+      "moderator",
+      moderator,
+    );
+    expect(staffReply.data?.insert_support_request_messages_one).toMatchObject({
+      is_admin: true,
+      sender_steam_id: moderator,
+    });
+
     const closed = await gql(
       `mutation { update_support_requests_by_pk(pk_columns: { id: "${id}" }, _set: { status: closed }) { status closed_at handled_by_steam_id } }`,
-      "administrator",
-      admin,
+      "moderator",
+      moderator,
     );
     expect(closed.errors).toBeUndefined();
     expect(closed.data?.update_support_requests_by_pk).toMatchObject({
       status: "closed",
-      handled_by_steam_id: admin,
+      handled_by_steam_id: moderator,
     });
     expect(closed.data?.update_support_requests_by_pk.closed_at).toBeTruthy();
 
@@ -349,8 +355,8 @@ describe("Support requests (Hasura-driven)", () => {
 
     const reopened = await gql(
       `mutation { update_support_requests_by_pk(pk_columns: { id: "${id}" }, _set: { status: open }) { status closed_at } }`,
-      "administrator",
-      admin,
+      "moderator",
+      moderator,
     );
     expect(reopened.data?.update_support_requests_by_pk).toEqual({
       status: "open",
@@ -369,5 +375,12 @@ describe("Support requests (Hasura-driven)", () => {
       is_admin: false,
       sender_steam_id: owner,
     });
+
+    const deleted = await gql(
+      `mutation { delete_support_requests_by_pk(id: "${id}") { id } }`,
+      "moderator",
+      moderator,
+    );
+    expect(deleted.errors).toBeDefined();
   });
 });

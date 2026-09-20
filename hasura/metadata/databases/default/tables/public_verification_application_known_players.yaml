@@ -44,3 +44,16 @@ select_permissions:
         - created_at
       filter: {}
     comment: Admins can see every application's community references.
+
+
+  - role: moderator
+    permission:
+      columns:
+        - id
+        - verification_application_id
+        - nickname
+        - steam_profile_url
+        - sort_order
+        - created_at
+      filter: {}
+    comment: Moderators can see every application's community references.

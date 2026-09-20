@@ -78,6 +78,8 @@ CREATE OR REPLACE FUNCTION public.tbi_tournament_team_roster() RETURNS TRIGGER
 DECLARE
     _team_id uuid;
     _owner_steam_id bigint;
+    _tournament public.tournaments;
+    _hasura_session json := current_setting('hasura.user', true)::json;
 BEGIN
     -- Player eligibility is checked unconditionally, before the
     -- admin/organizer bypass and before the free-agent invite redirect
@@ -98,7 +100,12 @@ BEGIN
             MESSAGE = 'Target player does not meet this tournament''s minimum role requirement';
     END IF;
 
-    IF current_setting('hasura.user')::jsonb ->> 'x-hasura-role' IN ('admin', 'administrator', 'tournament_organizer') THEN
+    SELECT t.* INTO _tournament
+      FROM public.tournaments t
+     WHERE t.id = NEW.tournament_id;
+
+    IF _hasura_session ->> 'x-hasura-role' IN ('admin', 'administrator')
+       OR (FOUND AND public.is_tournament_organizer(_tournament, _hasura_session)) THEN
         RETURN NEW;
     END IF;
 

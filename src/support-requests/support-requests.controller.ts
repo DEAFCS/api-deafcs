@@ -72,7 +72,7 @@ export class SupportRequestsController {
       {
         title: "New Support Request",
         message: `<a href="${requestUrl}">${NotificationsService.escapeHtml(name)}</a> opened a support request: ${subject}`,
-        role: "administrator",
+        role: "moderator",
         entity_id: data.new.id,
       },
     );
@@ -137,7 +137,7 @@ export class SupportRequestsController {
       {
         title: "Support Request Reply",
         message: `<a href="${requestUrl}">${NotificationsService.escapeHtml(name)}</a> replied on their support request: ${subject}`,
-        role: "administrator",
+        role: "moderator",
         entity_id: message.request_id,
       },
     );

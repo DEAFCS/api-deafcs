@@ -301,9 +301,15 @@ update_permissions:
           _eq: true
     comment: ""
 delete_permissions:
-  - role: tournament_organizer
+  - role: administrator
     permission:
       filter: {}
+    comment: ""
+  - role: tournament_organizer
+    permission:
+      filter:
+        organizer_steam_id:
+          _eq: X-Hasura-User-Id
     comment: ""
   - role: user
     permission:

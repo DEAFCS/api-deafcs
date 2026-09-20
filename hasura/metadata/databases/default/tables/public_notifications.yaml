@@ -61,6 +61,28 @@ select_permissions:
           - role:
               _eq: match_organizer
     comment: ""
+  - role: moderator
+    permission:
+      columns:
+        - actions
+        - created_at
+        - deletable
+        - deleted_at
+        - entity_id
+        - id
+        - is_read
+        - message
+        - role
+        - steam_id
+        - title
+        - type
+      filter:
+        _or:
+          - steam_id:
+              _eq: X-Hasura-User-Id
+          - role:
+              _eq: moderator
+    comment: ""
   - role: tournament_organizer
     permission:
       columns:
@@ -147,6 +169,30 @@ update_permissions:
                   _eq: X-Hasura-User-Id
               - role:
                   _eq: match_organizer
+          - _or:
+              - deleted_at:
+                  _is_null: true
+              - deletable:
+                  _eq: true
+    comment: ""
+  - role: moderator
+    permission:
+      columns:
+        - deleted_at
+        - is_read
+      filter:
+        _or:
+          - steam_id:
+              _eq: X-Hasura-User-Id
+          - role:
+              _eq: moderator
+      check:
+        _and:
+          - _or:
+              - steam_id:
+                  _eq: X-Hasura-User-Id
+              - role:
+                  _eq: moderator
           - _or:
               - deleted_at:
                   _is_null: true

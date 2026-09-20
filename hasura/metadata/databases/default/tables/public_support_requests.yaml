@@ -70,6 +70,11 @@ select_permissions:
       columns: [id, player_steam_id, category, subject, initial_message, status, reported_player_steam_id, reported_player_profile_url, related_match_reference, report_reason, report_details, report_evidence, organizer_motivation, organizer_experience, organizer_languages, organizer_additional_info, handled_by_steam_id, created_at, updated_at, closed_at]
       filter: {}
     comment: Administrators can review every support request.
+  - role: moderator
+    permission:
+      columns: [id, player_steam_id, category, subject, initial_message, status, reported_player_steam_id, reported_player_profile_url, related_match_reference, report_reason, report_details, report_evidence, organizer_motivation, organizer_experience, organizer_languages, organizer_additional_info, handled_by_steam_id, created_at, updated_at, closed_at]
+      filter: {}
+    comment: Moderators can review every support request.
 update_permissions:
   - role: administrator
     permission:
@@ -80,3 +85,14 @@ update_permissions:
       set:
         handled_by_steam_id: x-hasura-user-id
     comment: Administrators can close or reopen requests and are recorded as the handler.
+
+
+  - role: moderator
+    permission:
+      columns:
+        - status
+      filter: {}
+      check: {}
+      set:
+        handled_by_steam_id: x-hasura-user-id
+    comment: Moderators can close or reopen requests and are recorded as the handler.
