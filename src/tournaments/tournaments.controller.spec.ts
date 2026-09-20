@@ -336,11 +336,11 @@ describe("TournamentsController.deleteTournament", () => {
 // roster admin, a former owner who is no longer captain, or any other
 // "can_manage" team admin must NOT be able to check the team in on that
 // basis alone -- only tournament_teams.captain_steam_id, plus an explicit
-// emergency override for this tournament's organizer/creator or a platform
-// administrator (tournament.is_organizer, the same computed field Hasura
-// itself uses everywhere else for that exact concept). This is
-// deliberately narrower than the general-purpose can_manage_tournament_team
-// function, which is left untouched.
+// emergency override for this tournament's original organizer, an explicitly
+// assigned organizer, or a platform administrator. The override is resolved
+// by a parameterized query against trusted database rows, not the broader
+// tournament.is_organizer computed field. This is deliberately narrower than
+// the general-purpose can_manage_tournament_team function, which is untouched.
 describe("TournamentsController.checkInTournamentTeam", () => {
   const teamId = "33333333-3333-3333-3333-333333333333";
   const captainSteamId = "76561199000000042";
@@ -380,7 +380,6 @@ describe("TournamentsController.checkInTournamentTeam", () => {
     captain_steam_id: captainSteamId,
     tournament: {
       individual_check_in_ends_at: futureWindow,
-      is_organizer: false,
     },
     ...overrides,
   });
@@ -398,23 +397,107 @@ describe("TournamentsController.checkInTournamentTeam", () => {
     );
   });
 
-  it("allows this tournament's organizer/creator or an administrator as an emergency override, even when not captain", async () => {
+  it("allows an explicitly assigned organizer for this tournament", async () => {
     hasura.query.mockResolvedValueOnce({
       tournament_teams_by_pk: team({
         captain_steam_id: otherPlayerSteamId,
-        tournament: {
-          individual_check_in_ends_at: futureWindow,
-          is_organizer: true,
-        },
       }),
     });
+    postgres.query
+      .mockResolvedValueOnce([{ can_override: true }])
+      .mockResolvedValueOnce([]);
 
     await expect(
       controller.checkInTournamentTeam({ user, tournament_team_id: teamId }),
     ).resolves.toEqual({ success: true });
+
+    expect(postgres.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringMatching(
+        /public\.tournament_organizers[\s\S]*tournament_id = tournament\.id[\s\S]*steam_id = \$2/,
+      ),
+      ["tid", captainSteamId],
+    );
   });
 
-  it("rejects a roster admin/manager who is not the captain and not the tournament organizer", async () => {
+  it("allows the original organizer of this tournament", async () => {
+    hasura.query.mockResolvedValueOnce({
+      tournament_teams_by_pk: team({ captain_steam_id: otherPlayerSteamId }),
+    });
+    postgres.query
+      .mockResolvedValueOnce([{ can_override: true }])
+      .mockResolvedValueOnce([]);
+
+    await expect(
+      controller.checkInTournamentTeam({ user, tournament_team_id: teamId }),
+    ).resolves.toEqual({ success: true });
+
+    expect(postgres.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringMatching(/tournament\.organizer_steam_id = \$2/),
+      ["tid", captainSteamId],
+    );
+  });
+
+  it("allows a database-confirmed platform administrator", async () => {
+    hasura.query.mockResolvedValueOnce({
+      tournament_teams_by_pk: team({ captain_steam_id: otherPlayerSteamId }),
+    });
+    postgres.query
+      .mockResolvedValueOnce([{ can_override: true }])
+      .mockResolvedValueOnce([]);
+
+    await expect(
+      controller.checkInTournamentTeam({
+        user: { ...user, role: "administrator" },
+        tournament_team_id: teamId,
+      }),
+    ).resolves.toEqual({ success: true });
+
+    expect(postgres.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringMatching(
+        /public\.players[\s\S]*player\.role = 'administrator'/,
+      ),
+      ["tid", captainSteamId],
+    );
+  });
+
+  it("rejects a Tournament Organizer from an unrelated tournament", async () => {
+    hasura.query.mockResolvedValueOnce({
+      tournament_teams_by_pk: team({ captain_steam_id: otherPlayerSteamId }),
+    });
+    postgres.query.mockResolvedValueOnce([{ can_override: false }]);
+
+    await expect(
+      controller.checkInTournamentTeam({
+        user: { ...user, role: "tournament_organizer" },
+        tournament_team_id: teamId,
+      }),
+    ).rejects.toThrow(/not authorized to check in this team/i);
+
+    expect(postgres.query).toHaveBeenCalledTimes(1);
+    expect(postgres.query).toHaveBeenCalledWith(expect.any(String), [
+      "tid",
+      captainSteamId,
+    ]);
+  });
+
+  it("does not trust a supplied Administrator role when the database does not confirm it", async () => {
+    hasura.query.mockResolvedValueOnce({
+      tournament_teams_by_pk: team({ captain_steam_id: otherPlayerSteamId }),
+    });
+    postgres.query.mockResolvedValueOnce([{ can_override: false }]);
+
+    await expect(
+      controller.checkInTournamentTeam({
+        user: { ...user, role: "administrator" },
+        tournament_team_id: teamId,
+      }),
+    ).rejects.toThrow(/not authorized to check in this team/i);
+  });
+
+  it("rejects a roster admin/manager who is not the captain or a tournament organizer", async () => {
     // Regression coverage for the correction: previously this action also
     // accepted the general can_manage flag (roster Admin, team owner, an
     // organizer-independent "manager"), which let a non-captain roster
@@ -424,12 +507,13 @@ describe("TournamentsController.checkInTournamentTeam", () => {
         captain_steam_id: otherPlayerSteamId,
       }),
     });
+    postgres.query.mockResolvedValueOnce([{ can_override: false }]);
 
     await expect(
       controller.checkInTournamentTeam({ user, tournament_team_id: teamId }),
     ).rejects.toThrow(/not authorized to check in this team/i);
 
-    expect(postgres.query).not.toHaveBeenCalled();
+    expect(postgres.query).toHaveBeenCalledTimes(1);
   });
 
   it("rejects the team's original owner if they were reassigned away from captain", async () => {
@@ -441,6 +525,7 @@ describe("TournamentsController.checkInTournamentTeam", () => {
         captain_steam_id: otherPlayerSteamId,
       }),
     });
+    postgres.query.mockResolvedValueOnce([{ can_override: false }]);
 
     await expect(
       controller.checkInTournamentTeam({
@@ -455,7 +540,6 @@ describe("TournamentsController.checkInTournamentTeam", () => {
       tournament_teams_by_pk: team({
         tournament: {
           individual_check_in_ends_at: pastWindow,
-          is_organizer: false,
         },
       }),
     });

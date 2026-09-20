@@ -927,10 +927,10 @@ export class TournamentsController {
   // the captain's job: an ordinary roster admin or a former owner who is no
   // longer captain must NOT be able to check the team in just because they
   // can otherwise manage it. The only exception is an explicit emergency
-  // override for this tournament's organizer/creator or a platform
-  // administrator, via the same is_tournament_organizer check Hasura itself
-  // uses for tournament.is_organizer everywhere else -- not the team's own
-  // roster-admin/owner permissions.
+  // override for this tournament's original organizer, an assigned organizer
+  // of this tournament, or a platform administrator. That override is checked
+  // directly against trusted database rows and never relies on the broader
+  // tournament.is_organizer computed field.
   @HasuraAction()
   public async checkInTournamentTeam(data: {
     user: User;
@@ -949,7 +949,6 @@ export class TournamentsController {
           captain_steam_id: true,
           tournament: {
             individual_check_in_ends_at: true,
-            is_organizer: true,
           },
         },
       },
@@ -961,8 +960,38 @@ export class TournamentsController {
     }
     const isCaptain =
       String(team.captain_steam_id) === String(data.user.steam_id);
-    const isTournamentOrganizer = !!team.tournament?.is_organizer;
-    if (!isCaptain && !isTournamentOrganizer) {
+
+    let hasEmergencyOverride = false;
+    if (!isCaptain) {
+      const [authorization] = await this.postgres.query<
+        Array<{ can_override: boolean }>
+      >(
+        `SELECT EXISTS (
+           SELECT 1
+           FROM public.tournaments AS tournament
+           WHERE tournament.id = $1
+             AND (
+               tournament.organizer_steam_id = $2
+               OR EXISTS (
+                 SELECT 1
+                 FROM public.tournament_organizers AS assigned_organizer
+                 WHERE assigned_organizer.tournament_id = tournament.id
+                   AND assigned_organizer.steam_id = $2
+               )
+               OR EXISTS (
+                 SELECT 1
+                 FROM public.players AS player
+                 WHERE player.steam_id = $2
+                   AND player.role = 'administrator'
+               )
+             )
+         ) AS can_override`,
+        [team.tournament_id, data.user.steam_id],
+      );
+      hasEmergencyOverride = authorization?.can_override === true;
+    }
+
+    if (!isCaptain && !hasEmergencyOverride) {
       throw Error("not authorized to check in this team");
     }
     if (
