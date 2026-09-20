@@ -53,6 +53,21 @@ insert_permissions:
         - application_id
         - message
     comment: An admin can reply on any application.
+  - role: moderator
+    permission:
+      check:
+        _and:
+          - sender_steam_id:
+              _eq: X-Hasura-User-Id
+          - is_admin:
+              _eq: true
+      set:
+        sender_steam_id: x-hasura-user-id
+        is_admin: "true"
+      columns:
+        - application_id
+        - message
+    comment: A moderator can reply on any application.
 select_permissions:
   - role: user
     permission:
@@ -79,3 +94,16 @@ select_permissions:
         - created_at
       filter: {}
     comment: Admins can see every thread.
+
+
+  - role: moderator
+    permission:
+      columns:
+        - id
+        - application_id
+        - sender_steam_id
+        - is_admin
+        - message
+        - created_at
+      filter: {}
+    comment: Moderators can see every thread.

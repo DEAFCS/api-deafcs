@@ -1,4 +1,8 @@
-import { Controller, BadRequestException } from "@nestjs/common";
+import {
+  Controller,
+  BadRequestException,
+  ForbiddenException,
+} from "@nestjs/common";
 import { HasuraAction, HasuraEvent } from "../hasura/hasura.controller";
 import { HasuraEventData } from "../hasura/types/HasuraEventData";
 import { HasuraService } from "../hasura/hasura.service";
@@ -8,6 +12,7 @@ import { User } from "../auth/types/User";
 import { e_notification_types_enum } from "generated/schema";
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "src/configs/types/AppConfig";
+import { isRoleAbove } from "src/utilities/isRoleAbove";
 
 // The role a player is bumped to once their verification application is
 // approved. Matches the role matchmaking currently gates on (see
@@ -42,19 +47,37 @@ export class VerificationApplicationsController {
     application_id: string;
     user?: User;
   }) {
-    const application = await this.requireApplication(data.application_id);
+    const reviewer = this.requireModerator(data.user);
+    const application = await this.postgres.transaction(async (client) => {
+      const result = await client.query<ApplicationRow>(
+        `SELECT id, player_steam_id, status
+           FROM public.verification_applications
+          WHERE id = $1
+          FOR UPDATE`,
+        [data.application_id],
+      );
+      const current = result.rows[0];
+      this.assertPendingApplication(current);
 
-    await this.postgres.query(
-      `UPDATE public.verification_applications
-       SET status = 'approved', reviewed_by_steam_id = $2, reviewed_at = now(), updated_at = now()
-       WHERE id = $1`,
-      [data.application_id, data.user?.steam_id ?? null],
-    );
+      await client.query(
+        `UPDATE public.verification_applications
+            SET status = 'approved', reviewed_by_steam_id = $2,
+                reviewed_at = now(), updated_at = now()
+          WHERE id = $1`,
+        [data.application_id, reviewer.steam_id],
+      );
 
-    await this.postgres.query(
-      `UPDATE public.players SET role = $2 WHERE steam_id = $1`,
-      [application.player_steam_id, VERIFIED_ROLE],
-    );
+      // Approval promotes only the ordinary pre-verification role. An
+      // existing elevated role is intentionally left untouched.
+      await client.query(
+        `UPDATE public.players
+            SET role = $2
+          WHERE steam_id = $1 AND role = 'user'`,
+        [current.player_steam_id, VERIFIED_ROLE],
+      );
+
+      return current;
+    });
 
     await this.notifications.notifyPlayers(
       "VerificationApplicationReviewed" as unknown as e_notification_types_enum,
@@ -77,23 +100,37 @@ export class VerificationApplicationsController {
     reason?: string | null;
     user?: User;
   }) {
-    const application = await this.requireApplication(data.application_id);
-
-    await this.postgres.query(
-      `UPDATE public.verification_applications
-       SET status = 'rejected', reviewed_by_steam_id = $2, reviewed_at = now(), updated_at = now()
-       WHERE id = $1`,
-      [data.application_id, data.user?.steam_id ?? null],
-    );
-
-    if (data.reason) {
-      await this.postgres.query(
-        `INSERT INTO public.verification_application_messages
-           (application_id, sender_steam_id, is_admin, message)
-         VALUES ($1, $2, true, $3)`,
-        [data.application_id, data.user?.steam_id ?? null, data.reason],
+    const reviewer = this.requireModerator(data.user);
+    const application = await this.postgres.transaction(async (client) => {
+      const result = await client.query<ApplicationRow>(
+        `SELECT id, player_steam_id, status
+           FROM public.verification_applications
+          WHERE id = $1
+          FOR UPDATE`,
+        [data.application_id],
       );
-    }
+      const current = result.rows[0];
+      this.assertPendingApplication(current);
+
+      await client.query(
+        `UPDATE public.verification_applications
+            SET status = 'rejected', reviewed_by_steam_id = $2,
+                reviewed_at = now(), updated_at = now()
+          WHERE id = $1`,
+        [data.application_id, reviewer.steam_id],
+      );
+
+      if (data.reason) {
+        await client.query(
+          `INSERT INTO public.verification_application_messages
+             (application_id, sender_steam_id, is_admin, message)
+           VALUES ($1, $2, true, $3)`,
+          [data.application_id, reviewer.steam_id, data.reason],
+        );
+      }
+
+      return current;
+    });
 
     await this.notifications.notifyPlayers(
       "VerificationApplicationReviewed" as unknown as e_notification_types_enum,
@@ -134,7 +171,7 @@ export class VerificationApplicationsController {
       {
         title: "New Verification Application",
         message: `<a href="${applicationUrl}">${NotificationsService.escapeHtml(name)}</a> submitted a verification application.`,
-        role: "administrator",
+        role: "moderator",
         entity_id: data.new.id,
       },
     );
@@ -144,9 +181,7 @@ export class VerificationApplicationsController {
   // whichever side did not send the message: an admin reply notifies the
   // applicant, a player reply notifies every administrator.
   @HasuraEvent()
-  public async verification_application_messages(
-    data: HasuraEventData<any>,
-  ) {
+  public async verification_application_messages(data: HasuraEventData<any>) {
     const message = data.new;
 
     const [application] = await this.postgres.query<
@@ -192,24 +227,27 @@ export class VerificationApplicationsController {
       {
         title: "Verification Application Reply",
         message: `<a href="${applicationUrl}">${NotificationsService.escapeHtml(name)}</a> replied on their verification application.`,
-        role: "administrator",
+        role: "moderator",
         entity_id: message.application_id,
       },
     );
   }
 
-  private async requireApplication(
-    applicationId: string,
-  ): Promise<ApplicationRow> {
-    const [application] = await this.postgres.query<ApplicationRow[]>(
-      `SELECT id, player_steam_id, status FROM public.verification_applications WHERE id = $1`,
-      [applicationId],
-    );
+  private requireModerator(user?: User): User {
+    if (!user || !isRoleAbove(user.role, "moderator")) {
+      throw new ForbiddenException("Moderator access required");
+    }
+    return user;
+  }
 
+  private assertPendingApplication(
+    application: ApplicationRow | undefined,
+  ): asserts application is ApplicationRow {
     if (!application) {
       throw new BadRequestException("Application not found");
     }
-
-    return application;
+    if (application.status !== "pending") {
+      throw new BadRequestException("Application has already been reviewed");
+    }
   }
 }

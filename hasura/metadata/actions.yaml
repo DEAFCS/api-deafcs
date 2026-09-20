@@ -1370,7 +1370,8 @@ actions:
       forward_client_headers: true
     permissions:
       - role: administrator
-    comment: Approve a verification application and bump the player's role (admin only).
+      - role: moderator
+    comment: Approve a verification application (moderator or administrator).
   - name: rejectVerificationApplication
     definition:
       kind: synchronous
@@ -1378,7 +1379,8 @@ actions:
       forward_client_headers: true
     permissions:
       - role: administrator
-    comment: Reject a verification application (admin only).
+      - role: moderator
+    comment: Reject a verification application (moderator or administrator).
 custom_types:
   enums: []
   input_objects:

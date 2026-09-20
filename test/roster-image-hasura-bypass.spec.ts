@@ -83,14 +83,16 @@ describe("team_roster.roster_image_url Hasura direct-mutation bypass", () => {
     const result = await graphql(
       "tournament_organizer",
       "76561199700000099",
-      `mutation ($teamId: uuid!, $steamId: bigint!) {
-        update_team_roster_by_pk(
-          pk_columns: { team_id: $teamId, player_steam_id: $steamId }
-          _set: { roster_image_url: "avatars/roster-teams/hacked.png" }
-        ) {
-          roster_image_url
+      `
+        mutation ($teamId: uuid!, $steamId: bigint!) {
+          update_team_roster_by_pk(
+            pk_columns: { team_id: $teamId, player_steam_id: $steamId }
+            _set: { roster_image_url: "avatars/roster-teams/hacked.png" }
+          ) {
+            roster_image_url
+          }
         }
-      }`,
+      `,
       { teamId: team.id, steamId: player_steam_id },
     );
 
@@ -124,14 +126,16 @@ describe("team_roster.roster_image_url Hasura direct-mutation bypass", () => {
     const result = await graphql(
       "user",
       adminSteam,
-      `mutation ($teamId: uuid!, $steamId: bigint!) {
-        update_team_roster_by_pk(
-          pk_columns: { team_id: $teamId, player_steam_id: $steamId }
-          _set: { roster_image_url: "avatars/roster-teams/hacked.png" }
-        ) {
-          roster_image_url
+      `
+        mutation ($teamId: uuid!, $steamId: bigint!) {
+          update_team_roster_by_pk(
+            pk_columns: { team_id: $teamId, player_steam_id: $steamId }
+            _set: { roster_image_url: "avatars/roster-teams/hacked.png" }
+          ) {
+            roster_image_url
+          }
         }
-      }`,
+      `,
       { teamId: team.id, steamId: adminSteam },
     );
 
@@ -139,7 +143,7 @@ describe("team_roster.roster_image_url Hasura direct-mutation bypass", () => {
     expect(result.errors).toBeDefined();
   });
 
-  it("still allows tournament_organizer to update the unrelated 'coach' column (fix is scoped, not a blanket lockout)", async () => {
+  it("does not let a Tournament Organizer modify an unrelated team's roster", async () => {
     const team = await fx.team(1);
     const [{ player_steam_id }] = (await db.postgres.query<
       Array<{ player_steam_id: string }>
@@ -150,18 +154,26 @@ describe("team_roster.roster_image_url Hasura direct-mutation bypass", () => {
     const result = await graphql(
       "tournament_organizer",
       "76561199700000099",
-      `mutation ($teamId: uuid!, $steamId: bigint!) {
-        update_team_roster_by_pk(
-          pk_columns: { team_id: $teamId, player_steam_id: $steamId }
-          _set: { coach: true }
-        ) {
-          coach
+      `
+        mutation ($teamId: uuid!, $steamId: bigint!) {
+          update_team_roster_by_pk(
+            pk_columns: { team_id: $teamId, player_steam_id: $steamId }
+            _set: { coach: true }
+          ) {
+            coach
+          }
         }
-      }`,
+      `,
       { teamId: team.id, steamId: player_steam_id },
     );
 
-    expect(result.errors).toBeUndefined();
-    expect(result.data?.update_team_roster_by_pk?.coach).toBe(true);
+    expect(result.data?.update_team_roster_by_pk).toBeNull();
+
+    const [row] = await db.postgres.query<Array<{ coach: boolean }>>(
+      `SELECT coach FROM team_roster
+        WHERE team_id = $1 AND player_steam_id = $2`,
+      [team.id, player_steam_id],
+    );
+    expect(row.coach).toBe(false);
   });
 });

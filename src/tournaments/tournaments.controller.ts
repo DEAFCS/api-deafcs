@@ -272,7 +272,8 @@ export class TournamentsController {
 
     this.logger.log(`[${tournament_id}] deleting tournament`);
 
-    // Query with user context for authorization checks
+    // Query with user context so administrators retain elevated visibility
+    // while non-admins can see only tournaments they manage.
     const { tournaments_by_pk } = await this.hasura.query(
       {
         tournaments_by_pk: {
@@ -282,6 +283,7 @@ export class TournamentsController {
           id: true,
           status: true,
           is_organizer: true,
+          organizer_steam_id: true,
         },
       },
       data.user.steam_id,
@@ -291,8 +293,15 @@ export class TournamentsController {
       throw Error("tournament not found");
     }
 
-    if (!tournaments_by_pk.is_organizer) {
-      throw Error("not the tournament organizer");
+    const isAdministrator = data.user.role === "administrator";
+    const isOriginalCreator =
+      String(tournaments_by_pk.organizer_steam_id) ===
+      String(data.user.steam_id);
+
+    // Assigned co-organizers may manage a tournament, but permanent deletion
+    // is reserved for its original creator or an administrator.
+    if (!isAdministrator && !isOriginalCreator) {
+      throw Error("only the tournament creator or an administrator can delete it");
     }
 
     if (tournaments_by_pk.status === "Live") {

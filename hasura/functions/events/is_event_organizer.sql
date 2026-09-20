@@ -9,7 +9,7 @@ AS $$
     -- read as anonymous rather than fail the ::bigint cast. COALESCE because
     -- a NULL user id makes the organizer comparison NULL, not false.
     SELECT COALESCE(
-        hasura_session ->> 'x-hasura-role' IN ('admin', 'administrator', 'tournament_organizer')
+        hasura_session ->> 'x-hasura-role' IN ('admin', 'administrator')
         OR event.organizer_steam_id = nullif(hasura_session ->> 'x-hasura-user-id', '')::bigint
         OR EXISTS (
             SELECT 1

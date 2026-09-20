@@ -59,6 +59,24 @@ insert_permissions:
         - request_id
         - message
     comment: Administrators can reply on any open support request.
+  - role: moderator
+    permission:
+      check:
+        _and:
+          - sender_steam_id:
+              _eq: X-Hasura-User-Id
+          - is_admin:
+              _eq: true
+          - request:
+              status:
+                _eq: open
+      set:
+        sender_steam_id: x-hasura-user-id
+        is_admin: "true"
+      columns:
+        - request_id
+        - message
+    comment: Moderators can reply on any open support request.
 select_permissions:
   - role: user
     permission:
@@ -73,3 +91,10 @@ select_permissions:
       columns: [id, request_id, sender_steam_id, is_admin, message, created_at]
       filter: {}
     comment: Administrators can read every support conversation.
+
+
+  - role: moderator
+    permission:
+      columns: [id, request_id, sender_steam_id, is_admin, message, created_at]
+      filter: {}
+    comment: Moderators can read every support conversation.

@@ -7,12 +7,12 @@ BEGIN
 	IF TG_OP = 'UPDATE' AND NEW.role != OLD.role THEN
 		SELECT current_setting('hasura.user', true)::jsonb ->> 'x-hasura-role' INTO changing_player_role;
 
-		IF NOT is_role_below(OLD.role, changing_player_role) THEN
-			RAISE EXCEPTION 'You cannot change the role of a player above your own' USING ERRCODE = '22000';
-		END IF;
-
-		IF NOT is_role_below(NEW.role, changing_player_role) THEN
-			RAISE EXCEPTION 'You cannot change the role of a player higher than yourself' USING ERRCODE = '22000';
+		-- Any request carrying Hasura session state is an end-user request.
+		-- Platform role assignment is administrator-only; trusted internal SQL
+		-- (which has no Hasura session) remains available for system workflows.
+		IF changing_player_role IS NOT NULL
+		   AND changing_player_role NOT IN ('admin', 'administrator') THEN
+			RAISE EXCEPTION 'Only administrators can change player roles' USING ERRCODE = '22000';
 		END IF;
 	END IF;
 

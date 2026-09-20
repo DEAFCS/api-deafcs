@@ -14,7 +14,7 @@ BEGIN
 
     _steam_id := (hasura_session ->> 'x-hasura-user-id')::bigint;
 
-    is_organizer = hasura_session ->> 'x-hasura-role' = 'administrator' OR hasura_session ->> 'x-hasura-role' = 'tournament_organizer' ;
+    is_organizer := public.is_tournament_organizer(tournament, hasura_session);
 
     IF is_organizer AND tournament.status = 'Setup' THEN
         RETURN true;

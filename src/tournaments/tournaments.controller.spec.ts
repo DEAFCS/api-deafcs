@@ -12,12 +12,16 @@ import { TournamentsController } from "./tournaments.controller";
 // test/tournament-deletion.spec.ts.
 describe("TournamentsController.deleteTournament", () => {
   const tournamentId = "11111111-1111-1111-1111-111111111111";
-  const user = { steam_id: "76561199000000001" } as any;
+  const user = {
+    steam_id: "76561199000000001",
+    role: "tournament_organizer",
+  } as any;
 
   const okTournament = {
     id: tournamentId,
     status: "Setup",
     is_organizer: true,
+    organizer_steam_id: user.steam_id,
   };
 
   const noLeagueLinks = {
@@ -109,16 +113,38 @@ describe("TournamentsController.deleteTournament", () => {
     expect(postgres.transaction).not.toHaveBeenCalled();
   });
 
-  it("rejects a non-organizer", async () => {
+  it("rejects an assigned co-organizer because only the creator may delete", async () => {
     hasura.query.mockResolvedValueOnce({
-      tournaments_by_pk: { ...okTournament, is_organizer: false },
+      tournaments_by_pk: {
+        ...okTournament,
+        is_organizer: true,
+        organizer_steam_id: "76561199000000999",
+      },
     });
 
     await expect(
       controller.deleteTournament({ user, tournament_id: tournamentId }),
-    ).rejects.toThrow(/not the tournament organizer/i);
+    ).rejects.toThrow(/only the tournament creator or an administrator/i);
 
     expect(postgres.transaction).not.toHaveBeenCalled();
+  });
+
+  it("allows an administrator to delete a tournament they did not create", async () => {
+    hasura.query
+      .mockResolvedValueOnce({
+        tournaments_by_pk: {
+          ...okTournament,
+          organizer_steam_id: "76561199000000999",
+        },
+      })
+      .mockResolvedValueOnce(noLeagueLinks);
+
+    await controller.deleteTournament({
+      user: { ...user, role: "administrator" },
+      tournament_id: tournamentId,
+    });
+
+    expect(postgres.transaction).toHaveBeenCalledTimes(1);
   });
 
   it("rejects deleting a Live tournament", async () => {
@@ -189,7 +215,8 @@ describe("TournamentsController.deleteTournament", () => {
     expect(matchesOrder).toBeLessThan(tournamentOrder);
 
     // The detach step locks and scopes to this tournament's own brackets only.
-    const detachCall = client.query.mock.calls[matchQueryCallIndex(/WITH owned_brackets/i)];
+    const detachCall =
+      client.query.mock.calls[matchQueryCallIndex(/WITH owned_brackets/i)];
     expect(detachCall[0]).toMatch(/FOR UPDATE/i);
     expect(detachCall[0]).toMatch(/SET match_id = NULL/i);
     expect(detachCall[0]).toMatch(/ts\.tournament_id = \$1/i);

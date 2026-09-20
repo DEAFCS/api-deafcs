@@ -64,14 +64,14 @@ export class VerificationCallService {
     return rows[0];
   }
 
-  // Either an administrator, or the one applicant this application
+  // Either a moderator, or the one applicant this application
   // actually belongs to -- nobody else has any business on this call.
   private async assertParticipant(
     applicationId: string,
     user: User,
   ): Promise<ApplicationRow> {
     const application = await this.getApplication(applicationId);
-    if (isRoleAbove(user.role, "administrator")) {
+    if (isRoleAbove(user.role, "moderator")) {
       return application;
     }
     if (String(user.steam_id) === application.player_steam_id) {
@@ -80,7 +80,7 @@ export class VerificationCallService {
     throw new Error("not authorized for this verification call");
   }
 
-  // Which admin is currently ringing a given application -- kept just
+  // Which staff member is currently ringing a given application -- kept just
   // long enough for the applicant to actually answer (see ring/respond
   // below), so the answer can be routed back to that specific admin's
   // own popup instead of leaving it silently guessing.
@@ -89,7 +89,7 @@ export class VerificationCallService {
   }
   private static readonly RINGING_TTL_SECONDS = 60;
 
-  // Admin rings the applicant -- a full-screen "Admin is calling..."
+  // Moderator rings the applicant -- a full-screen staff call overlay
   // overlay on whatever page the applicant is currently on (see
   // GlobalVerificationCallNotifier.vue), not itself part of the WebRTC
   // signaling. The admin's own call page now waits on this ring instead
@@ -97,8 +97,8 @@ export class VerificationCallService {
   // previously it had no way to know whether the applicant had even
   // seen the popup, let alone answered it.
   public async ring(applicationId: string, user: User): Promise<void> {
-    if (!isRoleAbove(user.role, "administrator")) {
-      throw new Error("admin only");
+    if (!isRoleAbove(user.role, "moderator")) {
+      throw new Error("moderator only");
     }
     const application = await this.getApplication(applicationId);
 
@@ -161,7 +161,11 @@ export class VerificationCallService {
   private async notifyRingResolved(
     applicationId: string,
     adminSteamId: string,
-    data: { accepted: boolean; applicantName: string | null; timedOut?: boolean },
+    data: {
+      accepted: boolean;
+      applicantName: string | null;
+      timedOut?: boolean;
+    },
   ): Promise<void> {
     await this.redis.publish(
       "send-message-to-steam-id",

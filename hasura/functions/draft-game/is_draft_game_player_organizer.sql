@@ -4,7 +4,7 @@ LANGUAGE sql
 STABLE
 AS $$
     SELECT
-        hasura_session ->> 'x-hasura-role' IN ('admin', 'administrator', 'tournament_organizer', 'match_organizer')
+        hasura_session ->> 'x-hasura-role' IN ('admin', 'administrator', 'match_organizer')
         OR EXISTS (
             SELECT 1
             FROM public.draft_games dg

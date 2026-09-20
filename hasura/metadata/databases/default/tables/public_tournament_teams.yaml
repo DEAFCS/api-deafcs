@@ -51,6 +51,9 @@ insert_permissions:
       check:
         _and:
           - tournament:
+              is_organizer:
+                _eq: true
+          - tournament:
               status:
                 _nin:
                   - Cancelled
@@ -140,8 +143,14 @@ update_permissions:
         - name
         - seed
         - short_name
-      filter: {}
-      check: null
+      filter:
+        tournament:
+          is_organizer:
+            _eq: true
+      check:
+        tournament:
+          is_organizer:
+            _eq: true
     comment: ""
   - role: user
     permission:
@@ -189,6 +198,9 @@ delete_permissions:
     permission:
       filter:
         _and:
+          - tournament:
+              is_organizer:
+                _eq: true
           - tournament:
               status:
                 _nin:

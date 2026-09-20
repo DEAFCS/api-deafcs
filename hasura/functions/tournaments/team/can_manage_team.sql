@@ -3,9 +3,10 @@ CREATE OR REPLACE FUNCTION public.can_manage_tournament_team(tournament_team pub
     AS $$
 DECLARE
     _user_steam_id bigint;
+    _tournament public.tournaments;
 BEGIN
 
-    IF hasura_session ->> 'x-hasura-role' = 'admin' OR hasura_session ->> 'x-hasura-role' = 'administrator' OR hasura_session ->> 'x-hasura-role' = 'tournament_organizer' THEN
+    IF hasura_session ->> 'x-hasura-role' IN ('admin', 'administrator') THEN
         RETURN true;
     END IF;
 
@@ -13,6 +14,14 @@ BEGIN
 
     IF _user_steam_id IS NULL THEN
         RETURN false;
+    END IF;
+
+    SELECT t.* INTO _tournament
+      FROM public.tournaments t
+     WHERE t.id = tournament_team.tournament_id;
+
+    IF FOUND AND public.is_tournament_organizer(_tournament, hasura_session) THEN
+        RETURN true;
     END IF;
 
     IF tournament_team.owner_steam_id = _user_steam_id THEN
