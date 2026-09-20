@@ -36,6 +36,7 @@ describe("CancelExpiredMatches", () => {
   };
   const notifications = {
     send: jest.fn(),
+    sendSilent: jest.fn(),
   };
   const configService = {
     get: jest.fn(),
@@ -140,10 +141,24 @@ describe("CancelExpiredMatches", () => {
       undefined,
       DISCORD_COLORS.RED,
     );
+    // Administrators must also receive this alert, as a separate silent
+    // (no double Discord post) role-broadcast alongside the organizer one.
+    expect(notifications.sendSilent).toHaveBeenCalledWith(
+      "MatchSupport",
+      expect.objectContaining({
+        title: "Tournament match requires attention",
+        role: "administrator",
+        entity_id: "match-1",
+      }),
+    );
+    // Exactly one send() and one sendSilent() call -- not a duplicate per
+    // organizer, and no unauthorized role (e.g. plain "user") notified.
+    expect(notifications.send).toHaveBeenCalledTimes(1);
+    expect(notifications.sendSilent).toHaveBeenCalledTimes(1);
     expect(rconService.connect).not.toHaveBeenCalled();
   });
 
-  it("does not re-notify when an organizer notification is already pending", async () => {
+  it("does not re-notify (organizer or admin) when an organizer notification is already pending", async () => {
     pendingNotificationCount = 1;
     tournamentMatches = [expiredTournamentMatch()];
 
@@ -161,6 +176,7 @@ describe("CancelExpiredMatches", () => {
       }),
     );
     expect(notifications.send).not.toHaveBeenCalled();
+    expect(notifications.sendSilent).not.toHaveBeenCalled();
   });
 
   it("forfeits to the ready lineup", async () => {
