@@ -237,6 +237,15 @@ export class CancelExpiredMatches extends WorkerHost {
       undefined,
       DISCORD_COLORS.RED,
     );
+
+    // administrator broadcast, no steam_id involved above, so no duplicate
+    // risk -- sendSilent so this doesn't also double-post to Discord.
+    await this.notifications.sendSilent("MatchSupport", {
+      message: `Tournament match requires admin attention <a href="${this.appConfig.webDomain}/matches/${matchId}">${matchId}</a>`,
+      title: "Tournament match requires attention",
+      role: "administrator",
+      entity_id: matchId,
+    });
   }
 
   private async hasPendingOrganizerNotification(matchId: string) {

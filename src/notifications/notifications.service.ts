@@ -631,8 +631,14 @@ export class NotificationsService {
               id: true,
               name: true,
               organizer_steam_id: true,
+              admin: {
+                role: true,
+              },
               organizers: {
                 steam_id: true,
+                organizer: {
+                  role: true,
+                },
               },
               discord_notifications_enabled: true,
               discord_webhook: true,
@@ -655,6 +661,9 @@ export class NotificationsService {
           matches_by_pk: {
             __args: { id: matchId },
             organizer_steam_id: true,
+            organizer: {
+              role: true,
+            },
           },
         });
 
@@ -662,7 +671,13 @@ export class NotificationsService {
           return;
         }
 
-        if (matches_by_pk.organizer_steam_id) {
+        // Administrators already get the role-broadcast below; a personal
+        // copy here would double up for an admin who is also this match's
+        // organizer.
+        if (
+          matches_by_pk.organizer_steam_id &&
+          matches_by_pk.organizer?.role !== "administrator"
+        ) {
           await this.insertNotification({
             type: "MatchStatusChange",
             title,
@@ -678,6 +693,14 @@ export class NotificationsService {
           title,
           message,
           role: "match_organizer",
+          entity_id: matchId,
+        });
+
+        await this.insertNotification({
+          type: "MatchStatusChange",
+          title,
+          message,
+          role: "administrator",
           entity_id: matchId,
         });
 
@@ -701,13 +724,22 @@ export class NotificationsService {
       const tournamentContext = ` in tournament <b>${NotificationsService.escapeHtml(tournament.name)}</b>`;
       const message = `A map has been paused${tournamentContext} in match <a href="${matchUrl}">View Match</a>`;
 
-      const organizerSteamIds = new Set<string>();
-      organizerSteamIds.add(String(tournament.organizer_steam_id));
+      const organizerRoles = new Map<string, string | undefined>();
+      organizerRoles.set(
+        String(tournament.organizer_steam_id),
+        tournament.admin?.role,
+      );
       for (const org of tournament.organizers || []) {
-        organizerSteamIds.add(String(org.steam_id));
+        organizerRoles.set(String(org.steam_id), org.organizer?.role);
       }
 
-      for (const steamId of organizerSteamIds) {
+      for (const [steamId, role] of organizerRoles) {
+        // Administrators already get the role-broadcast below; a personal
+        // copy here would double up for an admin who is also this
+        // tournament's organizer.
+        if (role === "administrator") {
+          continue;
+        }
         await this.insertNotification({
           type: "MatchStatusChange",
           title,

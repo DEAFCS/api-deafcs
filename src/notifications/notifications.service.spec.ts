@@ -171,6 +171,147 @@ describe("NotificationsService sanction notifications", () => {
     );
   });
 
+  describe("sendMatchMapPauseNotification", () => {
+    function insertedObjects() {
+      return hasura.mutation.mock.calls
+        .filter((call) => call[0]?.insert_notifications_one)
+        .map((call) => call[0].insert_notifications_one.__args.object);
+    }
+
+    describe("non-tournament match", () => {
+      it("notifies the organizer personally, plus match_organizer and administrator broadcasts", async () => {
+        hasura.query
+          .mockResolvedValueOnce({ tournament_brackets: [] })
+          .mockResolvedValueOnce({
+            matches_by_pk: {
+              organizer_steam_id: player,
+              organizer: { role: "verified_user" },
+            },
+          })
+          .mockResolvedValueOnce({ settings_by_pk: null });
+
+        await service.sendMatchMapPauseNotification("match-1");
+
+        const objects = insertedObjects();
+        expect(objects).toEqual([
+          expect.objectContaining({ steam_id: player, role: "user" }),
+          expect.objectContaining({ role: "match_organizer" }),
+          expect.objectContaining({ role: "administrator" }),
+        ]);
+        // Exactly one row per audience -- no duplicates.
+        expect(objects).toHaveLength(3);
+      });
+
+      it("skips the personal copy when the match organizer is themselves an administrator (no duplicate)", async () => {
+        hasura.query
+          .mockResolvedValueOnce({ tournament_brackets: [] })
+          .mockResolvedValueOnce({
+            matches_by_pk: {
+              organizer_steam_id: admin,
+              organizer: { role: "administrator" },
+            },
+          })
+          .mockResolvedValueOnce({ settings_by_pk: null });
+
+        await service.sendMatchMapPauseNotification("match-1");
+
+        const objects = insertedObjects();
+        // Only the broadcasts -- the personal "user" copy for this admin is
+        // skipped since they already get the administrator broadcast.
+        expect(objects).toEqual([
+          expect.objectContaining({ role: "match_organizer" }),
+          expect.objectContaining({ role: "administrator" }),
+        ]);
+        expect(objects).toHaveLength(2);
+        expect(objects.filter((o) => o.steam_id === admin)).toHaveLength(0);
+      });
+    });
+
+    describe("tournament match", () => {
+      const tournamentBrackets = (organizers: Array<{ steam_id: string; role: string }>) => ({
+        tournament_brackets: [
+          {
+            stage: {
+              tournament: {
+                id: "t1",
+                name: "Cup",
+                organizer_steam_id: organizers[0].steam_id,
+                admin: { role: organizers[0].role },
+                organizers: organizers.slice(1).map((o) => ({
+                  steam_id: o.steam_id,
+                  organizer: { role: o.role },
+                })),
+                discord_notifications_enabled: false,
+                discord_webhook: null,
+                discord_role_id: null,
+                discord_notify_MapPaused: false,
+              },
+            },
+          },
+        ],
+      });
+
+      it("notifies every tournament organizer plus a single administrator broadcast", async () => {
+        hasura.query.mockResolvedValueOnce(
+          tournamentBrackets([{ steam_id: player, role: "tournament_organizer" }]),
+        );
+
+        await service.sendMatchMapPauseNotification("match-1");
+
+        const objects = insertedObjects();
+        expect(objects).toEqual([
+          expect.objectContaining({
+            steam_id: player,
+            role: "tournament_organizer",
+          }),
+          expect.objectContaining({ role: "administrator" }),
+        ]);
+        expect(objects).toHaveLength(2);
+      });
+
+      it("skips the personal tournament_organizer copy for an organizer who is also an administrator (no duplicate)", async () => {
+        hasura.query.mockResolvedValueOnce(
+          tournamentBrackets([
+            { steam_id: admin, role: "administrator" },
+            { steam_id: player, role: "tournament_organizer" },
+          ]),
+        );
+
+        await service.sendMatchMapPauseNotification("match-1");
+
+        const objects = insertedObjects();
+        // The admin-organizer gets exactly the administrator broadcast, not
+        // also a personal tournament_organizer row.
+        expect(objects).toEqual([
+          expect.objectContaining({
+            steam_id: player,
+            role: "tournament_organizer",
+          }),
+          expect.objectContaining({ role: "administrator" }),
+        ]);
+        expect(objects).toHaveLength(2);
+        expect(
+          objects.filter(
+            (o) => o.steam_id === admin && o.role === "tournament_organizer",
+          ),
+        ).toHaveLength(0);
+      });
+
+      it("never targets an unauthorized role such as plain verified_user", async () => {
+        hasura.query.mockResolvedValueOnce(
+          tournamentBrackets([{ steam_id: player, role: "tournament_organizer" }]),
+        );
+
+        await service.sendMatchMapPauseNotification("match-1");
+
+        const roles = insertedObjects().map((o) => o.role);
+        for (const role of roles) {
+          expect(["tournament_organizer", "administrator"]).toContain(role);
+        }
+      });
+    });
+  });
+
   describe("notifyBannedPlayer (the sanctioned player's own notification)", () => {
     it("still notifies the banned player themselves", async () => {
       hasura.query.mockResolvedValueOnce({
