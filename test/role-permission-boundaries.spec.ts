@@ -296,4 +296,74 @@ describe("role permission boundaries (direct Hasura requests)", () => {
     });
     expect(deleted.errors).toBeDefined();
   });
+
+  // Regression for a real production incident: verification/support-request
+  // submissions broadcast as role: "moderator" (notifications.service.ts
+  // send()), but Administrator's own select/update permission on
+  // notifications still literally required role = administrator, unchanged
+  // since before that role existed. Administrators never saw the alert in
+  // the panel even though push notifications (which resolve visibility via
+  // isRoleAbove, not this literal Hasura filter) reached their phone --
+  // confirmed live via a direct admin-secret-authenticated query against
+  // production before this fix. Administrator must see (and be able to mark
+  // read) anything Moderator sees, without granting Match Organizer,
+  // Tournament Organizer, or an ordinary player any new visibility, and
+  // without leaking another player's own targeted notifications.
+  it("lets Administrator see and act on Moderator-broadcast notifications, without widening any other role", async () => {
+    const [broadcast] = await db.postgres.query<Array<{ id: string }>>(
+      `INSERT INTO notifications (title, message, role, type, entity_id)
+       VALUES ('New verification application', 'test', 'moderator',
+               'VerificationApplicationSubmitted', 'test-entity-1')
+       RETURNING id`,
+    );
+
+    const admin = await fx.player();
+    const moderator = await fx.player();
+    const matchOrganizer = await fx.player();
+    const tournamentOrganizer = await fx.player();
+    const ordinaryPlayer = await fx.player();
+
+    const query = `query($id: uuid!) { notifications_by_pk(id: $id) { id role } }`;
+    for (const [role, steamId, shouldSee] of [
+      ["administrator", admin, true],
+      ["moderator", moderator, true],
+      ["match_organizer", matchOrganizer, false],
+      ["tournament_organizer", tournamentOrganizer, false],
+      ["user", ordinaryPlayer, false],
+    ] as const) {
+      const result = await graphql(role, steamId, query, { id: broadcast.id });
+      expect(result.data?.notifications_by_pk?.id ?? null).toBe(
+        shouldSee ? broadcast.id : null,
+      );
+    }
+
+    // Administrator must also be able to mark it read (update_permissions),
+    // not just select it.
+    const markRead = await graphql(
+      "administrator",
+      admin,
+      `mutation($id: uuid!) {
+        update_notifications_by_pk(pk_columns: { id: $id }, _set: { is_read: true }) {
+          is_read
+        }
+      }`,
+      { id: broadcast.id },
+    );
+    expect(markRead.data?.update_notifications_by_pk?.is_read).toBe(true);
+
+    // A different player's own targeted notification stays private -- this
+    // fix must not have broadened anything beyond the moderator broadcast.
+    const [targeted] = await db.postgres.query<Array<{ id: string }>>(
+      `INSERT INTO notifications (title, message, role, type, entity_id, steam_id)
+       VALUES ('Your application', 'test', 'user',
+               'VerificationApplicationReviewed', 'test-entity-2', $1)
+       RETURNING id`,
+      [ordinaryPlayer],
+    );
+    const otherPlayer = await fx.player();
+    const leaked = await graphql("user", otherPlayer, query, {
+      id: targeted.id,
+    });
+    expect(leaked.data?.notifications_by_pk).toBeNull();
+  });
 });

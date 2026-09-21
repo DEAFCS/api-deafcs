@@ -37,7 +37,9 @@ select_permissions:
           - steam_id:
               _eq: X-Hasura-User-Id
           - role:
-              _eq: administrator
+              _in:
+                - administrator
+                - moderator
     comment: ""
   - role: match_organizer
     permission:
@@ -137,14 +139,18 @@ update_permissions:
           - steam_id:
               _eq: X-Hasura-User-Id
           - role:
-              _eq: administrator
+              _in:
+                - administrator
+                - moderator
       check:
         _and:
           - _or:
               - steam_id:
                   _eq: X-Hasura-User-Id
               - role:
-                  _eq: administrator
+                  _in:
+                    - administrator
+                    - moderator
           - _or:
               - deleted_at:
                   _is_null: true
