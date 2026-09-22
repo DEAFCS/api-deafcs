@@ -138,6 +138,36 @@ export class MatchesController {
     return new Set(rows.map((row) => row.steam_id));
   }
 
+  // The automatic leaver ban (see DisconnectBudgetService.applyLeaverBan)
+  // fires the instant a player's 5-minute reconnect budget runs out, then
+  // immediately kicks them from is_banned on their very next connect --
+  // including a reconnect to the same match they just abandoned. That
+  // match may well still be going (a team match doesn't necessarily
+  // forfeit just because one player left), and they should still be able
+  // to help finish it; the ban itself, and its full cooldown starting from
+  // the moment it was applied, are unaffected -- this only lets them back
+  // into this one specific match. Scoped to abandoned_matches rows for
+  // this exact match_id, not just any leaver ban on the player, so an
+  // unrelated standing ban from a past match still kicks them normally.
+  private async getOwnMatchLeaverSteamIds(
+    matchId: string,
+    steamIds: string[],
+  ): Promise<Set<string>> {
+    if (steamIds.length === 0) {
+      return new Set();
+    }
+
+    const rows = await this.postgres.query<Array<{ steam_id: string }>>(
+      `SELECT DISTINCT steam_id::text AS steam_id
+         FROM public.abandoned_matches
+        WHERE match_id = $1
+          AND steam_id = ANY($2::bigint[])`,
+      [matchId, steamIds],
+    );
+
+    return new Set(rows.map((row) => row.steam_id));
+  }
+
   // Draft matches (Open Match/AUTO-SPLIT pickup lobbies) get the same
   // Sanction-vs-Abandoned treatment as tournament matches above -- an
   // automatic leaver/no-show ban shouldn't block a draft match either.
@@ -459,13 +489,28 @@ export class MatchesController {
       ? await this.getAdminSanctionedSteamIds(allRosterSteamIds)
       : null;
 
+    // Sanction-only matches already never count an automatic leaver ban
+    // (adminSanctionedSteamIds only ever holds real admin sanctions), so
+    // this exemption only matters for the remaining case: a regular match
+    // where is_banned falls through to the raw computed field.
+    const ownMatchLeaverSteamIds = adminSanctionedSteamIds
+      ? null
+      : await this.getOwnMatchLeaverSteamIds(match.id, allRosterSteamIds);
+
     const isBanned = (player: {
       steam_id?: string | null;
       player?: { is_banned?: boolean | null };
-    }): boolean =>
-      adminSanctionedSteamIds
-        ? adminSanctionedSteamIds.has(player.steam_id ?? "")
-        : player.player?.is_banned || false;
+    }): boolean => {
+      if (adminSanctionedSteamIds) {
+        return adminSanctionedSteamIds.has(player.steam_id ?? "");
+      }
+
+      if (ownMatchLeaverSteamIds?.has(player.steam_id ?? "")) {
+        return false;
+      }
+
+      return player.player?.is_banned || false;
+    };
 
     const lineup1TeamId = match.lineup_1.team?.id;
     match.lineup_1.tag =
