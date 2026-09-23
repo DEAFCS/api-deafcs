@@ -53,6 +53,13 @@ describe("TypeSenseService player ratings", () => {
           optional: true,
           index: true,
         }),
+        expect.objectContaining({
+          name: "role",
+          type: "string",
+          optional: true,
+          sort: true,
+          index: true,
+        }),
       ]),
     );
     expect(reindexQueue.add).toHaveBeenCalledTimes(1);
