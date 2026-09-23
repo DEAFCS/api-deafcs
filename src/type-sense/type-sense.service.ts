@@ -14,6 +14,16 @@ import { RefreshAllPlayersJob } from "./jobs/RefreshAllPlayers";
 export class TypeSenseService {
   private client: Client;
 
+  private static readonly PLAYER_ROLE_RANK: Readonly<Record<string, number>> = {
+    user: 0,
+    verified_user: 1,
+    streamer: 2,
+    moderator: 3,
+    match_organizer: 4,
+    tournament_organizer: 5,
+    administrator: 6,
+  };
+
   constructor(
     private readonly logger: Logger,
     private readonly config: ConfigService,
@@ -117,9 +127,10 @@ export class TypeSenseService {
         sort: true,
         index: true,
       },
+      { name: "role", type: "string", optional: true, index: true },
       {
-        name: "role",
-        type: "string",
+        name: "role_rank",
+        type: "int32",
         optional: true,
         sort: true,
         index: true,
@@ -436,6 +447,7 @@ export class TypeSenseService {
         Object.assign({}, player, elo, {
           id: steamId,
           steam_id: steamId,
+          role_rank: TypeSenseService.playerRoleRank(player.role),
           is_registered: isRegistered,
           elo: TypeSenseService.primaryElo(
             elo.elo_competitive,
@@ -476,6 +488,10 @@ export class TypeSenseService {
 
     const parsed = parseInt(String(value), 10);
     return Number.isNaN(parsed) ? null : parsed;
+  }
+
+  private static playerRoleRank(role: string | null | undefined): number {
+    return role ? (TypeSenseService.PLAYER_ROLE_RANK[role] ?? 0) : 0;
   }
 
   // Mirrors the general PlayerElo display order. A real zero is retained;
