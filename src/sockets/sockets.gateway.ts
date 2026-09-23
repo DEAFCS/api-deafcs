@@ -20,6 +20,13 @@ export class SocketsGateway implements OnGatewayConnection {
 
   @SubscribeMessage("ping")
   public async handleMessage(client: FiveStackWebSocketClient): Promise<void> {
+    // The client only knows its socket is still alive once this round-trips
+    // back -- without it, a dead TCP connection can sit at readyState OPEN
+    // indefinitely (laptop sleep, network switch, an idle NAT/proxy timeout)
+    // with no close/error event ever firing, silently freezing chat until
+    // the user manually refreshes the page.
+    client.send(JSON.stringify({ event: "pong" }));
+
     if (!client.user) {
       return;
     }
