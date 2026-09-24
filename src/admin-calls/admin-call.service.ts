@@ -165,6 +165,23 @@ export class AdminCallService {
         data: { targetSteamId, ...data },
       }),
     );
+
+    // The ring itself went out to every connected session/device the
+    // target player has open (send-message-to-steam-id fans out to all
+    // of them, see SocketsService.sendMessageToSteamId), so
+    // GlobalAdminCallNotifier's "Admin is calling..." overlay can be up
+    // on several devices at once. Whichever device actually answers only
+    // clears its own local overlay -- without this, every other device
+    // was stuck showing the overlay until its own 60s auto-decline timer
+    // fired or the tab was refreshed.
+    await this.redis.publish(
+      "send-message-to-steam-id",
+      JSON.stringify({
+        steamId: targetSteamId,
+        event: "admin-call:ring-resolved",
+        data: { targetSteamId },
+      }),
+    );
   }
 
   // The player answering the ring above -- routes the accept/decline
