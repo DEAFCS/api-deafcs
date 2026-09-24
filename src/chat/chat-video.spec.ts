@@ -1,4 +1,5 @@
 import { PATH_METADATA } from "@nestjs/common/constants";
+import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { ChatService } from "./chat.service";
 import { ChatVideoController } from "./chat-video.controller";
 import { ChatLobbyType } from "./enums/ChatLobbyTypes";
@@ -9,6 +10,87 @@ describe("ChatVideoController routing", () => {
     expect(Reflect.getMetadata(PATH_METADATA, ChatVideoController)).toBe(
       "matches/chat-video",
     );
+  });
+});
+
+describe("ChatVideoController upload routes", () => {
+  const owner: User = {
+    steam_id: "76561190000000123",
+    name: "Player",
+    role: "verified_user",
+  };
+  const token = "T".repeat(43);
+  const file = {
+    buffer: Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+    mimetype: "video/webm;codecs=vp9",
+  } as Express.Multer.File;
+  const body = { durationMs: "10000" };
+
+  it("routes PC uploads through the authenticated owner-bound draft service", async () => {
+    const chat = {
+      uploadOwnedVideoDraft: jest
+        .fn()
+        .mockResolvedValue({ mediaId: "media-1" }),
+    };
+    const controller = new ChatVideoController(
+      chat as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(
+      controller.directUpload("draft-1", { user: owner } as any, file, body),
+    ).resolves.toEqual({ success: true });
+    expect(chat.uploadOwnedVideoDraft).toHaveBeenCalledWith(
+      "draft-1",
+      owner,
+      file.buffer,
+      file.mimetype,
+      10_000,
+    );
+  });
+
+  it("accepts the phone capability route without a request.user", async () => {
+    const chat = {
+      uploadPhoneVideoDraft: jest
+        .fn()
+        .mockResolvedValue({ mediaId: "media-1" }),
+    };
+    const controller = new ChatVideoController(
+      chat as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(
+      controller.phoneUpload(`Bearer ${token}`, file, body),
+    ).resolves.toEqual({ success: true });
+    expect(chat.uploadPhoneVideoDraft).toHaveBeenCalledWith(
+      token,
+      file.buffer,
+      file.mimetype,
+      10_000,
+    );
+  });
+
+  it("rejects an expired phone capability before upload", async () => {
+    const chat = {
+      getPhoneVideoDraft: jest.fn().mockResolvedValue(undefined),
+      uploadPhoneVideoDraft: jest.fn(),
+    };
+    const controller = new ChatVideoController(
+      chat as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(
+      controller.phoneStatus(`Bearer ${token}`),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    await expect(
+      controller.phoneUpload(`Bearer ${token}`, file, body),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(chat.uploadPhoneVideoDraft).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -92,7 +174,7 @@ describe("ChatService temporary video drafts", () => {
     const uploaded = await service.uploadPhoneVideoDraft(
       session!.token,
       webm,
-      "video/webm",
+      "video/webm;codecs=vp8",
       10_000,
     );
     expect(uploaded).toEqual({ mediaId: expect.any(String) });
@@ -214,6 +296,65 @@ describe("ChatService temporary video drafts", () => {
         Buffer.from("not a video"),
         "video/webm",
         1000,
+      ),
+    ).resolves.toBeUndefined();
+    expect(s3.put).not.toHaveBeenCalled();
+  });
+
+  it("accepts MP4 content with the ISO BMFF ftyp signature", async () => {
+    const session = await service.createVideoDraftSession(
+      ChatLobbyType.Global,
+      "global",
+      owner,
+    );
+    const mp4 = Buffer.alloc(16);
+    mp4.write("ftyp", 4, 4, "ascii");
+
+    const uploaded = await service.uploadPhoneVideoDraft(
+      session!.token,
+      mp4,
+      "video/mp4",
+      1_000,
+    );
+
+    expect(uploaded).toEqual({ mediaId: expect.any(String) });
+    expect(s3.put).toHaveBeenCalledWith(
+      expect.stringMatching(/^chat-video\/.+\.mp4$/),
+      mp4,
+      "video/mp4",
+    );
+  });
+
+  it("rejects an expired phone token before S3", async () => {
+    const webm = Buffer.concat([
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+      Buffer.alloc(256),
+    ]);
+
+    await expect(
+      service.uploadPhoneVideoDraft("X".repeat(43), webm, "video/webm", 1_000),
+    ).resolves.toBeUndefined();
+    expect(s3.put).not.toHaveBeenCalled();
+  });
+
+  it("rejects a PC upload from the wrong session owner before S3", async () => {
+    const session = await service.createVideoDraftSession(
+      ChatLobbyType.Global,
+      "global",
+      owner,
+    );
+    const webm = Buffer.concat([
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+      Buffer.alloc(256),
+    ]);
+
+    await expect(
+      service.uploadOwnedVideoDraft(
+        session!.id,
+        stranger,
+        webm,
+        "video/webm",
+        1_000,
       ),
     ).resolves.toBeUndefined();
     expect(s3.put).not.toHaveBeenCalled();
