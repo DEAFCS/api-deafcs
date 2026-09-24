@@ -26,7 +26,7 @@ import { ExpireChatVideoDraft } from "./jobs/ExpireChatVideoDraft";
 
 const MAX_VIDEO_BYTES = 80 * 1024 * 1024;
 
-@Controller("chat-video")
+@Controller("matches/chat-video")
 export class ChatVideoController {
   constructor(
     private readonly chat: ChatService,

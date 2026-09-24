@@ -1,6 +1,16 @@
+import { PATH_METADATA } from "@nestjs/common/constants";
 import { ChatService } from "./chat.service";
+import { ChatVideoController } from "./chat-video.controller";
 import { ChatLobbyType } from "./enums/ChatLobbyTypes";
 import { User } from "../auth/types/User";
+
+describe("ChatVideoController routing", () => {
+  it("uses the existing API ingress prefix", () => {
+    expect(Reflect.getMetadata(PATH_METADATA, ChatVideoController)).toBe(
+      "matches/chat-video",
+    );
+  });
+});
 
 describe("ChatService temporary video drafts", () => {
   const owner: User = {
