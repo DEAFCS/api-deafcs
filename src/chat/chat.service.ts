@@ -972,6 +972,17 @@ export class ChatService {
           excludeSteamId: sender.steam_id,
         },
       );
+
+      // Same "chicken-and-egg" fix as Announcement below: the live to()
+      // broadcast only reaches sockets with an active listener registered
+      // for this lobby, which (unlike joining, which happens automatically
+      // for every logged-in player -- see useChatTabSetup) requires
+      // <ChatLobby> to have actually mounted at least once this session,
+      // i.e. the chat hub panel having been opened. Without this, Global
+      // Chat's unread badge silently never appeared for anyone who hadn't
+      // opened chat yet this session (reported: no red badge until you
+      // manually open chat once).
+      await this.pingRoleBroadcastFallback(type, id, sender, message, "verified_user");
       return;
     }
 
@@ -1002,30 +1013,7 @@ export class ChatService {
       // this, the unread badge silently never appeared for anyone who
       // hadn't opened chat yet. No fixed roster to pull "everyone" from
       // here, so this pings literally every registered player.
-      const senderId = String(sender.steam_id);
-      const { players: allPlayers } = await this.hasuraService.query({
-        players: { steam_id: true },
-      });
-      for (const player of allPlayers ?? []) {
-        const steamId = String(player.steam_id);
-        if (steamId === senderId) continue;
-        await this.redis.publish(
-          "send-message-to-steam-id",
-          JSON.stringify({
-            steamId,
-            event: "chat:new-message",
-            data: {
-              type,
-              id,
-              senderSteamId: sender.steam_id,
-              senderName: sender.name,
-              senderAvatarUrl: sender.avatar_url,
-              message:
-                message.length > 200 ? `${message.slice(0, 200)}…` : message,
-            },
-          }),
-        );
-      }
+      await this.pingRoleBroadcastFallback(type, id, sender, message, "user");
       return;
     }
 
@@ -1048,6 +1036,16 @@ export class ChatService {
           entity_id: `${type}:${id}`,
           excludeSteamId: sender.steam_id,
         },
+      );
+
+      // Same chicken-and-egg fix as Global/Announcement above -- see
+      // those comments for the full explanation.
+      await this.pingRoleBroadcastFallback(
+        type,
+        id,
+        sender,
+        message,
+        "match_organizer",
       );
       return;
     }
@@ -1121,6 +1119,49 @@ export class ChatService {
             senderName: sender.name,
             senderAvatarUrl: sender.avatar_url,
             message: message.length > 200 ? `${message.slice(0, 200)}…` : message,
+          },
+        }),
+      );
+    }
+  }
+
+  // Shared by every role-broadcast chat type (Global, Announcement,
+  // Organizer): the live to() room broadcast in notifyLobbyMembers only
+  // reaches sockets with an active per-lobby listener, which requires
+  // <ChatLobby> to have actually mounted at least once this session (the
+  // chat hub panel having been opened) -- see the callers' comments for
+  // the full "chicken-and-egg" explanation. This pings every player at or
+  // above `minRole` on the same steamId-addressed channel the fixed-roster
+  // path below uses, so the frontend can update the tab/unread badge even
+  // when it was never joined.
+  private async pingRoleBroadcastFallback(
+    type: ChatLobbyType,
+    id: string,
+    sender: User,
+    message: string,
+    minRole: e_player_roles_enum,
+  ): Promise<void> {
+    const senderId = String(sender.steam_id);
+    const { players: rolePlayers } = await this.hasuraService.query({
+      players: { steam_id: true, role: true },
+    });
+    for (const player of rolePlayers ?? []) {
+      const steamId = String(player.steam_id);
+      if (steamId === senderId) continue;
+      if (!isRoleAbove(player.role, minRole)) continue;
+      await this.redis.publish(
+        "send-message-to-steam-id",
+        JSON.stringify({
+          steamId,
+          event: "chat:new-message",
+          data: {
+            type,
+            id,
+            senderSteamId: sender.steam_id,
+            senderName: sender.name,
+            senderAvatarUrl: sender.avatar_url,
+            message:
+              message.length > 200 ? `${message.slice(0, 200)}…` : message,
           },
         }),
       );
