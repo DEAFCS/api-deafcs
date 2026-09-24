@@ -7,11 +7,22 @@ import { PostgresService } from "../postgres/postgres.service";
 import { RconService } from "../rcon/rcon.service";
 import { FiveStackWebSocketClient } from "src/sockets/types/FiveStackWebSocketClient";
 import { ChatLobbyType } from "./enums/ChatLobbyTypes";
-import { e_player_roles_enum, e_notification_types_enum } from "generated/schema";
+import {
+  e_player_roles_enum,
+  e_notification_types_enum,
+} from "generated/schema";
 import { isRoleAbove } from "src/utilities/isRoleAbove";
 import { NotificationsService } from "../notifications/notifications.service";
 import { BlocksService } from "src/blocks/blocks.service";
 import { v4 as uuidv4 } from "uuid";
+import { createHash, randomBytes } from "crypto";
+import { S3Service } from "../s3/s3.service";
+import { InjectQueue } from "@nestjs/bullmq";
+import { Queue } from "bullmq";
+import {
+  ChatVideoQueues,
+  ExpireSentChatVideoMediaJobName,
+} from "./enums/ChatVideoQueues";
 import {
   WebsiteRestrictionsService,
   WebsiteRestrictionStatus,
@@ -46,6 +57,9 @@ export class ChatService {
     private readonly notifications: NotificationsService,
     private readonly blocks: BlocksService,
     private readonly websiteRestrictions: WebsiteRestrictionsService,
+    private readonly s3: S3Service = null as any,
+    @InjectQueue(ChatVideoQueues.DraftExpiry)
+    private readonly chatVideoCleanupQueue: Queue = null as any,
   ) {
     this.redis = this.redisManager.getConnection();
   }
@@ -193,10 +207,7 @@ export class ChatService {
         break;
       case ChatLobbyType.Direct: {
         const parties = id.split(":");
-        if (
-          parties.length !== 2 ||
-          !parties.includes(String(user.steam_id))
-        ) {
+        if (parties.length !== 2 || !parties.includes(String(user.steam_id))) {
           return;
         }
 
@@ -206,9 +217,7 @@ export class ChatService {
         // two steam ids (it's just a sorted pair), so this was the only
         // thing actually stopping unsolicited DMs to strangers.
         {
-          const otherSteamId = parties.find(
-            (p) => p !== String(user.steam_id),
-          );
+          const otherSteamId = parties.find((p) => p !== String(user.steam_id));
           const { friends } = await this.hasuraService.query({
             friends: {
               __args: {
@@ -294,9 +303,7 @@ export class ChatService {
       messages = await this.getAnnouncementMessages();
     } else {
       const deletedIds = await this.getDeletedMessageIds(type, id);
-      messages = Object.entries(
-        await this.redis.hgetall(`chat_${type}_${id}`),
-      )
+      messages = Object.entries(await this.redis.hgetall(`chat_${type}_${id}`))
         .map(([, value]) => JSON.parse(value))
         .filter((message) => !deletedIds.has(String(message.id)));
 
@@ -496,6 +503,7 @@ export class ChatService {
     _message: string,
     skipCheck = false,
     clientId?: string,
+    videoDraftId?: string,
   ): Promise<{
     accepted: boolean;
     muteStatus?: WebsiteChatMuteStatus;
@@ -542,9 +550,7 @@ export class ChatService {
       // the block never re-joins. Re-checked here on every send instead.
       if (type === ChatLobbyType.Direct) {
         const parties = id.split(":");
-        const otherSteamId = parties.find(
-          (p) => p !== String(player.steam_id),
-        );
+        const otherSteamId = parties.find((p) => p !== String(player.steam_id));
         if (
           otherSteamId &&
           (await this.blocks.isBlockedEitherDirection(
@@ -575,6 +581,7 @@ export class ChatService {
       HasuraService.PLAYER_ROLE_CACHE_KEY(player.steam_id),
     )) as unknown as e_player_roles_enum;
 
+    const messageTtlSeconds = this.expiresIn;
     const timestamp = new Date();
     const message: Record<string, unknown> = {
       message: _message,
@@ -591,6 +598,20 @@ export class ChatService {
       // is needed alongside from.steam_id.
       clientId,
     };
+
+    let sentVideoMediaId: string | undefined;
+    if (videoDraftId) {
+      const media = await this.consumeVideoDraft(
+        videoDraftId,
+        type,
+        id,
+        player,
+        messageTtlSeconds,
+      );
+      if (!media) return { accepted: false };
+      message.media = media;
+      sentVideoMediaId = String(media.id);
+    }
 
     if (type === ChatLobbyType.Announcement) {
       // Persisted in Postgres instead of the Redis 24h-TTL hash below --
@@ -612,12 +633,18 @@ export class ChatService {
       await this.redis.sendCommand(
         new Redis.Command("HEXPIRE", [
           messageKey,
-          this.expiresIn,
+          messageTtlSeconds,
           "FIELDS",
           1,
           messageField,
         ]),
       );
+      if (sentVideoMediaId) {
+        await this.redis.expire(
+          this.videoMediaKey(sentVideoMediaId),
+          messageTtlSeconds,
+        );
+      }
     }
 
     if (type === ChatLobbyType.Direct || type === ChatLobbyType.Announcement) {
@@ -645,11 +672,10 @@ export class ChatService {
     // people with an open socket to this exact channel -- i.e. already
     // seeing the message live, so they're excluded rather than targeted).
     // A failure here must never break message delivery, hence the catch.
-    void this.notifyLobbyMembers(type, id, player, _message).catch(
-      (error) =>
-        this.logger.warn(
-          `[chat] push notify failed for ${type}:${id}: ${(error as Error)?.message}`,
-        ),
+    void this.notifyLobbyMembers(type, id, player, _message).catch((error) =>
+      this.logger.warn(
+        `[chat] push notify failed for ${type}:${id}: ${(error as Error)?.message}`,
+      ),
     );
 
     return { accepted: true };
@@ -707,8 +733,498 @@ export class ChatService {
     return {
       ...message,
       message: "Message from blocked player",
+      media: undefined,
       blocked: true,
     };
+  }
+
+  private readonly videoDraftTtlSeconds = 5 * 60;
+  private readonly videoMediaTtlSeconds = 60 * 60 * 24;
+  private readonly videoMaxBytes = 80 * 1024 * 1024;
+
+  private videoTokenKey(token: string) {
+    return `chat_video_token:${createHash("sha256").update(token).digest("hex")}`;
+  }
+
+  private videoDraftKey(id: string) {
+    return `chat_video_draft:${id}`;
+  }
+
+  private videoMediaKey(id: string) {
+    return `chat_video_media:${id}`;
+  }
+
+  public async createVideoDraftSession(
+    type: ChatLobbyType,
+    id: string,
+    user: User,
+  ) {
+    if (
+      type === ChatLobbyType.Announcement ||
+      !Object.values(ChatLobbyType).includes(type)
+    )
+      return undefined;
+    if ((await this.websiteRestrictions.getStatus(user.steam_id)).active)
+      return undefined;
+    if ((await this.getWebsiteChatMuteStatus(user.steam_id)).active)
+      return undefined;
+    if (
+      type === ChatLobbyType.Tournament &&
+      !(await this.canAccessTournamentChat(id, user.steam_id))
+    )
+      return undefined;
+    if (!(await this.getUserData(type, id, user.steam_id))) return undefined;
+    if (
+      type === ChatLobbyType.Draft &&
+      !(await this.canSendDraftMessage(id, user))
+    )
+      return undefined;
+    if (type === ChatLobbyType.Direct) {
+      const other = id
+        .split(":")
+        .find((steamId) => steamId !== String(user.steam_id));
+      if (
+        !other ||
+        (await this.blocks.isBlockedEitherDirection(user.steam_id, other))
+      )
+        return undefined;
+    }
+    const activeKey = `chat_video_active:${String(user.steam_id)}`;
+    const sessionId = uuidv4();
+    if (
+      !(await this.redis.set(
+        activeKey,
+        sessionId,
+        "EX",
+        this.videoDraftTtlSeconds,
+        "NX",
+      ))
+    )
+      return undefined;
+    const token = randomBytes(32).toString("base64url");
+    const session = {
+      id: sessionId,
+      ownerSteamId: String(user.steam_id),
+      type,
+      roomId: id,
+      state: "recording",
+      createdAt: Date.now(),
+      tokenKey: this.videoTokenKey(token),
+    };
+    await this.redis.set(
+      this.videoDraftKey(sessionId),
+      JSON.stringify(session),
+      "EX",
+      this.videoDraftTtlSeconds,
+    );
+    await this.redis.set(
+      this.videoTokenKey(token),
+      sessionId,
+      "EX",
+      this.videoDraftTtlSeconds,
+    );
+    return {
+      id: sessionId,
+      token,
+      expiresAt: new Date(
+        Date.now() + this.videoDraftTtlSeconds * 1000,
+      ).toISOString(),
+    };
+  }
+
+  public async getPhoneVideoDraft(token: string) {
+    const id = await this.redis.get(this.videoTokenKey(token));
+    if (!id) return undefined;
+    const raw = await this.redis.get(this.videoDraftKey(id));
+    if (!raw) return undefined;
+    const session = JSON.parse(raw);
+    return session.state === "recording"
+      ? {
+          id,
+          expiresAt: new Date(
+            session.createdAt + this.videoDraftTtlSeconds * 1000,
+          ).toISOString(),
+        }
+      : undefined;
+  }
+
+  public async uploadPhoneVideoDraft(
+    token: string,
+    file: Buffer,
+    claimedMimeType: string,
+    durationMs: number,
+  ) {
+    const id = await this.redis.get(this.videoTokenKey(token));
+    if (!id) return undefined;
+    const raw = await this.redis.get(this.videoDraftKey(id));
+    if (!raw) return undefined;
+    const session = JSON.parse(raw);
+    return this.storeVideoDraft(id, session, file, claimedMimeType, durationMs);
+  }
+
+  public async uploadOwnedVideoDraft(
+    id: string,
+    user: User,
+    file: Buffer,
+    claimedMimeType: string,
+    durationMs: number,
+  ) {
+    const raw = await this.redis.get(this.videoDraftKey(id));
+    if (!raw) return undefined;
+    const session = JSON.parse(raw);
+    if (session.ownerSteamId !== String(user.steam_id)) return undefined;
+    return this.storeVideoDraft(id, session, file, claimedMimeType, durationMs);
+  }
+
+  private async storeVideoDraft(
+    id: string,
+    session: any,
+    file: Buffer,
+    claimedMimeType: string,
+    durationMs: number,
+  ) {
+    if (
+      session.state !== "recording" ||
+      file.length === 0 ||
+      file.length > this.videoMaxBytes ||
+      !Number.isFinite(durationMs) ||
+      durationMs <= 0 ||
+      durationMs > 60_000
+    )
+      return undefined;
+    const mimeType = this.detectVideoMime(file.subarray(0, 16));
+    if (
+      !mimeType ||
+      mimeType !== claimedMimeType.split(";")[0].trim().toLowerCase()
+    )
+      return undefined;
+    const lockKey = `chat_video_upload_lock:${id}`;
+    if (!(await this.redis.set(lockKey, "1", "EX", 120, "NX")))
+      return undefined;
+    const mediaId = uuidv4();
+    const objectKey = `chat-video/${mediaId}.${mimeType === "video/webm" ? "webm" : "mp4"}`;
+    try {
+      await this.s3.put(objectKey, file, mimeType);
+      const media = {
+        type: "video",
+        id: mediaId,
+        mimeType,
+        durationMs: Math.round(durationMs),
+        size: file.length,
+      };
+      await this.redis.set(
+        this.videoMediaKey(mediaId),
+        JSON.stringify({
+          ...media,
+          objectKey,
+          ownerSteamId: session.ownerSteamId,
+          chatType: session.type,
+          roomId: session.roomId,
+        }),
+        "EX",
+        this.videoMediaTtlSeconds,
+      );
+      await this.redis.set(
+        `chat_video_session_media:${id}`,
+        mediaId,
+        "EX",
+        this.videoMediaTtlSeconds,
+      );
+      if (session.tokenKey) await this.redis.del(session.tokenKey);
+      session.state = "ready";
+      session.mediaId = mediaId;
+      const remaining = Math.max(
+        1,
+        Math.ceil(
+          (session.createdAt + this.videoDraftTtlSeconds * 1000 - Date.now()) /
+            1000,
+        ),
+      );
+      await this.redis.set(
+        this.videoDraftKey(id),
+        JSON.stringify(session),
+        "EX",
+        remaining,
+      );
+      return { mediaId };
+    } catch (error) {
+      await this.s3.remove(objectKey).catch((): boolean => false);
+      await this.redis.del(
+        this.videoMediaKey(mediaId),
+        `chat_video_session_media:${id}`,
+      );
+      throw error;
+    } finally {
+      await this.redis.del(lockKey);
+    }
+  }
+
+  public async getOwnedVideoDraft(id: string, user: User) {
+    const raw = await this.redis.get(this.videoDraftKey(id));
+    if (!raw) return undefined;
+    const session = JSON.parse(raw);
+    if (session.ownerSteamId !== String(user.steam_id)) return undefined;
+    if (session.state === "ready") {
+      const mediaRaw = await this.redis.get(
+        this.videoMediaKey(session.mediaId),
+      );
+      if (!mediaRaw) return { state: "expired" };
+      const media = JSON.parse(mediaRaw);
+      return {
+        state: "ready",
+        media: {
+          type: "video",
+          id: media.id,
+          mimeType: media.mimeType,
+          durationMs: media.durationMs,
+          size: media.size,
+        },
+      };
+    }
+    return { state: session.state };
+  }
+
+  public async cancelPhoneVideoDraft(token: string) {
+    const tokenKey = this.videoTokenKey(token);
+    const id = await this.redis.get(tokenKey);
+    if (id) await this.cancelVideoDraft(id);
+    await this.redis.del(tokenKey);
+  }
+
+  public async cancelOwnedVideoDraft(id: string, user: User) {
+    const raw = await this.redis.get(this.videoDraftKey(id));
+    if (!raw) return;
+    const session = JSON.parse(raw);
+    if (
+      session.ownerSteamId !== String(user.steam_id) ||
+      session.state === "sent"
+    )
+      return;
+    await this.cancelVideoDraft(id);
+  }
+
+  private async cancelVideoDraft(id: string) {
+    const raw = await this.redis.get(this.videoDraftKey(id));
+    if (raw) {
+      const session = JSON.parse(raw);
+      if (session.state === "sent") {
+        const values = await this.redis.hgetall(
+          `chat_${session.type}_${session.roomId}`,
+        );
+        const attached = Object.values(values).some((value) => {
+          try {
+            return JSON.parse(value)?.media?.id === session.mediaId;
+          } catch {
+            return false;
+          }
+        });
+        if (!attached && session.mediaId)
+          await this.removeVideoMedia(session.mediaId);
+        return;
+      }
+      if (session.tokenKey) await this.redis.del(session.tokenKey);
+      await this.redis.del(`chat_video_claim:${id}`);
+      await this.redis.del(`chat_video_active:${session.ownerSteamId}`);
+      if (session.mediaId) await this.removeVideoMedia(session.mediaId);
+    }
+    await this.redis.del(this.videoDraftKey(id));
+    await this.redis.del(`chat_video_session_media:${id}`);
+  }
+
+  public async cleanupExpiredVideoDraft(id: string) {
+    const raw = await this.redis.get(this.videoDraftKey(id));
+    if (raw) {
+      const session = JSON.parse(raw);
+      if (session.state === "sent") return;
+      if (session.mediaId) await this.removeVideoMedia(session.mediaId);
+      if (session.tokenKey) await this.redis.del(session.tokenKey);
+      await this.redis.del(`chat_video_active:${session.ownerSteamId}`);
+      await this.redis.del(this.videoDraftKey(id));
+    } else {
+      const mediaId = await this.redis.get(`chat_video_session_media:${id}`);
+      if (mediaId) await this.removeVideoMedia(mediaId);
+    }
+    await this.redis.del(`chat_video_session_media:${id}`);
+  }
+
+  private detectVideoMime(header: Buffer): string | undefined {
+    if (
+      header.length >= 4 &&
+      header.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))
+    )
+      return "video/webm";
+    if (
+      header.length >= 12 &&
+      header.subarray(4, 8).toString("ascii") === "ftyp"
+    )
+      return "video/mp4";
+    return undefined;
+  }
+
+  private async consumeVideoDraft(
+    id: string,
+    type: ChatLobbyType,
+    roomId: string,
+    user: User,
+    messageTtlSeconds = this.expiresIn,
+  ) {
+    const claimKey = `chat_video_claim:${id}`;
+    if (
+      !(await this.redis.set(
+        claimKey,
+        String(user.steam_id),
+        "EX",
+        this.videoMediaTtlSeconds,
+        "NX",
+      ))
+    )
+      return undefined;
+    const raw = await this.redis.get(this.videoDraftKey(id));
+    if (!raw) {
+      await this.redis.del(claimKey);
+      return undefined;
+    }
+    const session = JSON.parse(raw);
+    if (
+      session.state !== "ready" ||
+      session.ownerSteamId !== String(user.steam_id) ||
+      session.type !== type ||
+      session.roomId !== roomId
+    ) {
+      await this.redis.del(claimKey);
+      return undefined;
+    }
+    const rawMedia = await this.redis.get(this.videoMediaKey(session.mediaId));
+    if (!rawMedia) {
+      await this.redis.del(claimKey);
+      return undefined;
+    }
+    const media = JSON.parse(rawMedia);
+    if (
+      media.ownerSteamId !== String(user.steam_id) ||
+      media.roomId !== roomId ||
+      media.chatType !== type
+    ) {
+      await this.redis.del(claimKey);
+      return undefined;
+    }
+    const publicMedia = {
+      type: media.type,
+      id: media.id,
+      mimeType: media.mimeType,
+      durationMs: media.durationMs,
+      size: media.size,
+    };
+    try {
+      await this.chatVideoCleanupQueue.add(
+        ExpireSentChatVideoMediaJobName,
+        { mediaId: media.id, objectKey: media.objectKey },
+        {
+          jobId: `chat-video-media-expiry-${media.id}`,
+          delay: messageTtlSeconds * 1000 + 60 * 60 * 1000 + 1000,
+          attempts: 5,
+          backoff: { type: "exponential", delay: 30_000 },
+          removeOnComplete: true,
+          removeOnFail: { age: 7 * 24 * 60 * 60 },
+        },
+      );
+    } catch (error) {
+      this.logger.warn(
+        `[chat-video] unable to schedule message-lifetime cleanup for ${media.id}`,
+        error,
+      );
+      await this.redis.del(claimKey);
+      return undefined;
+    }
+    session.state = "sent";
+    await this.redis.del(`chat_video_active:${session.ownerSteamId}`);
+    await this.redis.set(
+      this.videoDraftKey(id),
+      JSON.stringify(session),
+      "EX",
+      this.videoMediaTtlSeconds,
+    );
+    return publicMedia;
+  }
+
+  public async cleanupExpiredSentVideoMedia(
+    mediaId: string,
+    objectKey: string,
+  ) {
+    const prefix = `chat-video/${mediaId}.`;
+    const extension = objectKey.startsWith(prefix)
+      ? objectKey.slice(prefix.length)
+      : "";
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        mediaId,
+      ) ||
+      !["webm", "mp4"].includes(extension)
+    ) {
+      throw new Error("invalid chat video cleanup target");
+    }
+
+    const removed = await this.s3.remove(objectKey);
+    if (!removed && (await this.s3.has(objectKey))) {
+      throw new Error(`unable to remove expired chat video ${mediaId}`);
+    }
+    await this.redis.del(this.videoMediaKey(mediaId));
+  }
+
+  public async getVideoMediaForViewer(mediaId: string, user: User) {
+    const raw = await this.redis.get(this.videoMediaKey(mediaId));
+    if (!raw) return undefined;
+    const media = JSON.parse(raw);
+    if (
+      !(await this.getUserData(
+        media.chatType,
+        media.roomId,
+        String(user.steam_id),
+      ))
+    )
+      return undefined;
+    const deletedIds = await this.getDeletedMessageIds(
+      media.chatType,
+      media.roomId,
+    );
+    const values = await this.redis.hgetall(
+      `chat_${media.chatType}_${media.roomId}`,
+    );
+    const message = Object.values(values)
+      .map((value) => {
+        try {
+          return JSON.parse(value);
+        } catch {
+          return null;
+        }
+      })
+      .find(
+        (candidate: any) =>
+          candidate?.media?.id === mediaId &&
+          !deletedIds.has(String(candidate.id)),
+      );
+    if (!message) return undefined;
+    if (media.chatType === ChatLobbyType.Direct) {
+      if (
+        await this.blocks.isBlockedEitherDirection(
+          user.steam_id,
+          message.from?.steam_id,
+        )
+      )
+        return undefined;
+    } else if (
+      (await this.blocks.getMyBlockedSteamIds(user.steam_id)).has(
+        String(message.from?.steam_id),
+      )
+    )
+      return undefined;
+    return media;
+  }
+
+  public async removeVideoMedia(mediaId: string) {
+    const raw = await this.redis.get(this.videoMediaKey(mediaId));
+    if (raw) await this.s3.remove(JSON.parse(raw).objectKey);
+    await this.redis.del(this.videoMediaKey(mediaId));
   }
 
   private formatAnnouncementRow(row: {
@@ -892,6 +1408,16 @@ export class ChatService {
       audited = rows.length > 0;
 
       if (audited) {
+        if (stored.media?.id) {
+          try {
+            await this.removeVideoMedia(String(stored.media.id));
+          } catch (error) {
+            this.logger.warn(
+              `[chat] unable to remove deleted video ${stored.media.id}`,
+              error,
+            );
+          }
+        }
         try {
           await this.redis.hdel(messageKey, messageId);
         } catch (error) {
@@ -928,16 +1454,17 @@ export class ChatService {
   // chat it's from -- Direct (1:1 DMs) deliberately has no entry, so the
   // title stays just the sender's name there, matching how a private
   // message app would show it.
-  private static readonly CHAT_LABELS: Partial<Record<ChatLobbyType, string>> = {
-    [ChatLobbyType.Global]: "GLOBAL CHAT",
-    [ChatLobbyType.Organizer]: "ORGANIZER",
-    [ChatLobbyType.MatchMaking]: "LOBBY",
-    [ChatLobbyType.Draft]: "DRAFT",
-    [ChatLobbyType.Tournament]: "TOURNAMENT",
-    [ChatLobbyType.Match]: "MATCH",
-    [ChatLobbyType.MatchTeam]: "TEAM",
-    [ChatLobbyType.Announcement]: "ANNOUNCEMENT",
-  };
+  private static readonly CHAT_LABELS: Partial<Record<ChatLobbyType, string>> =
+    {
+      [ChatLobbyType.Global]: "GLOBAL CHAT",
+      [ChatLobbyType.Organizer]: "ORGANIZER",
+      [ChatLobbyType.MatchMaking]: "LOBBY",
+      [ChatLobbyType.Draft]: "DRAFT",
+      [ChatLobbyType.Tournament]: "TOURNAMENT",
+      [ChatLobbyType.Match]: "MATCH",
+      [ChatLobbyType.MatchTeam]: "TEAM",
+      [ChatLobbyType.Announcement]: "ANNOUNCEMENT",
+    };
 
   private notificationTitle(
     type: ChatLobbyType,
@@ -965,8 +1492,7 @@ export class ChatService {
         "GlobalChatMessage" as unknown as e_notification_types_enum,
         {
           title: this.notificationTitle(type, sender.name),
-          message:
-            message.length > 200 ? `${message.slice(0, 200)}…` : message,
+          message: message.length > 200 ? `${message.slice(0, 200)}…` : message,
           role: "verified_user" as e_player_roles_enum,
           entity_id: `${type}:${id}`,
           excludeSteamId: sender.steam_id,
@@ -982,7 +1508,13 @@ export class ChatService {
       // Chat's unread badge silently never appeared for anyone who hadn't
       // opened chat yet this session (reported: no red badge until you
       // manually open chat once).
-      await this.pingRoleBroadcastFallback(type, id, sender, message, "verified_user");
+      await this.pingRoleBroadcastFallback(
+        type,
+        id,
+        sender,
+        message,
+        "verified_user",
+      );
       return;
     }
 
@@ -996,8 +1528,7 @@ export class ChatService {
         "AnnouncementChatMessage" as unknown as e_notification_types_enum,
         {
           title: this.notificationTitle(type, sender.name),
-          message:
-            message.length > 200 ? `${message.slice(0, 200)}…` : message,
+          message: message.length > 200 ? `${message.slice(0, 200)}…` : message,
           role: "user" as e_player_roles_enum,
           entity_id: `${type}:${id}`,
           excludeSteamId: sender.steam_id,
@@ -1030,8 +1561,7 @@ export class ChatService {
         "OrganizerChatMessage" as unknown as e_notification_types_enum,
         {
           title: this.notificationTitle(type, sender.name),
-          message:
-            message.length > 200 ? `${message.slice(0, 200)}…` : message,
+          message: message.length > 200 ? `${message.slice(0, 200)}…` : message,
           role: "match_organizer" as e_player_roles_enum,
           entity_id: `${type}:${id}`,
           excludeSteamId: sender.steam_id,
@@ -1118,7 +1648,8 @@ export class ChatService {
             senderSteamId: sender.steam_id,
             senderName: sender.name,
             senderAvatarUrl: sender.avatar_url,
-            message: message.length > 200 ? `${message.slice(0, 200)}…` : message,
+            message:
+              message.length > 200 ? `${message.slice(0, 200)}…` : message,
           },
         }),
       );

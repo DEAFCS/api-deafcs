@@ -32,7 +32,8 @@ type Modules =
   | "S3Scan"
   | "Scrims"
   | "AdminCalls"
-  | "VerificationCalls";
+  | "VerificationCalls"
+  | "ChatVideo";
 
 export type UseQueueOptions = {
   concurrency?: number;

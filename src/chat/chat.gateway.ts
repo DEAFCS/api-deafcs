@@ -53,6 +53,7 @@ export class ChatGateway {
     data: {
       id: string;
       message: string;
+      videoDraftId?: string;
       type: ChatLobbyType;
       // Per-browser-session id (see web-sockets/Socket.ts) -- echoed back
       // in the broadcast so a *different* session for the same account
@@ -64,13 +65,13 @@ export class ChatGateway {
     },
     @ConnectedSocket() client: FiveStackWebSocketClient,
   ) {
-    if (!data.message) {
+    if (!client.user || (!data.message && !data.videoDraftId)) {
       return;
     }
 
-    data.message = data.message.trim();
+    data.message = (data.message ?? "").trim();
 
-    if (data.message.length === 0) {
+    if (data.message.length === 0 && !data.videoDraftId) {
       return;
     }
 
@@ -81,6 +82,7 @@ export class ChatGateway {
       data.message,
       false,
       data.clientId,
+      data.videoDraftId,
     );
 
     if (!result.accepted) {
@@ -119,6 +121,7 @@ export class ChatGateway {
       return;
     }
 
+    if (!data.message || !data.message.length) return;
     await this.chat.sendChatToServer(
       data.id,
       `${isRoleAbove(client.user.role, "match_organizer") ? `[organizer] ` : ""}${client.user.name}: ${data.message}`.replaceAll(
@@ -153,11 +156,6 @@ export class ChatGateway {
       return;
     }
 
-    await this.chat.deleteMessage(
-      client.user,
-      data.type,
-      data.roomId,
-      data.id,
-    );
+    await this.chat.deleteMessage(client.user, data.type, data.roomId, data.id);
   }
 }
