@@ -8,6 +8,7 @@ import { RedisManagerService } from "../redis/redis-manager/redis-manager.servic
 import { User } from "../auth/types/User";
 import { isRoleAbove } from "../utilities/isRoleAbove";
 import { AdminCallQueues } from "./enums/AdminCallQueues";
+import { PushNotificationsService } from "../notifications/push/push-notifications.service";
 
 // General-purpose admin<->player webcam call, reachable from the
 // camera icon on every player profile page -- for anything an admin
@@ -37,6 +38,7 @@ export class AdminCallService {
     private readonly hasura: HasuraService,
     private readonly postgres: PostgresService,
     private readonly redisManager: RedisManagerService,
+    private readonly pushNotifications: PushNotificationsService,
     @InjectQueue(AdminCallQueues.RingTimeout) private readonly queue: Queue,
   ) {
     this.mediaMtxHost = process.env.MEDIAMTX_CAMERA_HOST || "mediamtx-camera";
@@ -115,6 +117,20 @@ export class AdminCallService {
         },
       }),
     );
+
+    this.pushNotifications
+      .sendCallRing(player.steam_id, {
+        title: user.name
+          ? `${user.name} is calling you`
+          : "Admin is calling you",
+        body: "Tap to open DEAFCS and answer.",
+        entityId: targetSteamId,
+      })
+      .catch((error) =>
+        this.logger.warn(
+          `[admin-call] push ring notification failed: ${(error as Error)?.message}`,
+        ),
+      );
 
     // Safety net for the admin's own "Calling..." screen: it previously
     // relied entirely on the player's browser running its own 60s

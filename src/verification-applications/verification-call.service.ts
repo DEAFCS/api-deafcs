@@ -8,6 +8,7 @@ import { RedisManagerService } from "../redis/redis-manager/redis-manager.servic
 import { User } from "../auth/types/User";
 import { isRoleAbove } from "../utilities/isRoleAbove";
 import { VerificationCallQueues } from "./enums/VerificationCallQueues";
+import { PushNotificationsService } from "../notifications/push/push-notifications.service";
 
 // Admin <-> applicant webcam call for a verification application, for
 // when an admin wants to ask something live before approving or
@@ -39,6 +40,7 @@ export class VerificationCallService {
     private readonly hasura: HasuraService,
     private readonly postgres: PostgresService,
     private readonly redisManager: RedisManagerService,
+    private readonly pushNotifications: PushNotificationsService,
     @InjectQueue(VerificationCallQueues.RingTimeout)
     private readonly queue: Queue,
   ) {
@@ -121,6 +123,20 @@ export class VerificationCallService {
         },
       }),
     );
+
+    this.pushNotifications
+      .sendCallRing(application.player_steam_id, {
+        title: user.name
+          ? `${user.name} is calling you`
+          : "Admin is calling you",
+        body: "Tap to open DEAFCS and answer.",
+        entityId: applicationId,
+      })
+      .catch((error) =>
+        this.logger.warn(
+          `[verification-call] push ring notification failed: ${(error as Error)?.message}`,
+        ),
+      );
 
     // Safety net for the admin's own "Calling..." screen: it previously
     // relied entirely on the applicant's browser running its own 60s

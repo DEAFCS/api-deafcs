@@ -53,6 +53,15 @@ export const NOTIFICATION_CATEGORIES: Record<string, string[]> = {
     "NameChangeRequest",
     "FormTeamSuggestion",
   ],
+  // Incoming admin/verification webcam call rings (PushNotificationsService
+  // .sendCallRing). Deliberately mapped to no `e_notification_types`
+  // values: a ring is a live 60-second event, not something that belongs
+  // in the persistent notifications bell, so it bypasses the
+  // notifications-table/Hasura-event-trigger path entirely and is sent
+  // directly. Still listed here so it gets a real settings toggle and a
+  // preference row through the exact same getPreferences/setPreference
+  // machinery as every other category.
+  calls: [],
   // Admin/system broadcasts (role: administrator) -- only ever reach admins
   // in practice since handleNotificationInsert's role-broadcast check
   // already gates on isRoleAbove, but still exposed as its own category so

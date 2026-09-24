@@ -193,6 +193,44 @@ export class PushNotificationsService {
     await Promise.all(rows.map((row) => this.sendToSubscription(row, payload)));
   }
 
+  // Incoming call ring (admin<->player, admin<->applicant). Bypasses the
+  // notifications-table/Hasura-event-trigger path entirely (see the
+  // `calls` category comment in notification-categories.ts) since a ring
+  // is a live, time-boxed event, not a persistent notification -- this
+  // is the direct equivalent of handleNotificationInsert's targeted
+  // branch, just triggered straight from AdminCallService/
+  // VerificationCallService.ring() instead of a database INSERT.
+  public async sendCallRing(
+    targetSteamId: string,
+    data: { title: string; body: string; entityId: string },
+  ): Promise<void> {
+    if (!this.vapidConfigured) return;
+
+    const rows = await this.postgres.query<SubscriptionRow[]>(
+      `SELECT id, steam_id, endpoint, p256dh, auth FROM public.push_subscriptions WHERE steam_id = $1`,
+      [targetSteamId],
+    );
+    if (!rows.length) return;
+
+    const filtered = await this.filterByPreference(rows, "calls");
+    if (!filtered.length) return;
+
+    const payload = JSON.stringify({
+      title: data.title,
+      body: data.body,
+      type: "AdminCall",
+      entity_id: data.entityId,
+      // Read by sw-push.js to apply the stronger, harder-to-miss
+      // treatment (vibration, requireInteraction) an incoming call
+      // deserves over an ordinary notification.
+      callRing: true,
+    });
+
+    await Promise.all(
+      filtered.map((row) => this.sendToSubscription(row, payload)),
+    );
+  }
+
   private static stripHtml(html: string): string {
     return html
       .replace(/<[^>]*>/g, "")
