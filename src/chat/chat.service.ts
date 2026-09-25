@@ -509,6 +509,47 @@ export class ChatService {
     muteStatus?: WebsiteChatMuteStatus;
     restrictionStatus?: WebsiteRestrictionStatus;
   }> {
+    let videoDraftSession: any;
+    if (videoDraftId) {
+      // Short Video is a standalone chat message. Its destination and author
+      // must match the server-created draft, and retries use its stable id.
+      if (_message.trim()) return { accepted: false };
+      const rawSession = await this.redis.get(this.videoDraftKey(videoDraftId));
+      if (!rawSession) return { accepted: false };
+      videoDraftSession = JSON.parse(rawSession);
+      if (
+        videoDraftSession.ownerSteamId !== String(player.steam_id) ||
+        videoDraftSession.type !== type ||
+        videoDraftSession.roomId !== id
+      )
+        return { accepted: false };
+
+      const existing = await this.findSentVideoMessage(
+        videoDraftId,
+        videoDraftSession,
+      );
+      if (existing) {
+        if (videoDraftSession.state !== "sent") {
+          const ttl = Number(videoDraftSession.messageTtlSeconds);
+          if (Number.isFinite(ttl) && ttl > 0)
+            await this.applyVideoMessageTtl(
+              type,
+              id,
+              String(existing.id),
+              String(existing.media.id),
+              ttl,
+            );
+          await this.markVideoDraftSent(
+            videoDraftId,
+            videoDraftSession,
+            String(existing.id),
+          );
+        }
+        return { accepted: true };
+      }
+      if (videoDraftSession.state === "sent") return { accepted: true };
+    }
+
     // verify they are in the lobby
     if (skipCheck === false) {
       const restrictionStatus = await this.websiteRestrictions.getStatus(
@@ -600,17 +641,23 @@ export class ChatService {
     };
 
     let sentVideoMediaId: string | undefined;
+    let sentVideoMessageField: string | undefined;
+    let sentVideoTtlSeconds: number | undefined;
     if (videoDraftId) {
-      const media = await this.consumeVideoDraft(
+      const consumed = await this.consumeVideoDraft(
         videoDraftId,
         type,
         id,
         player,
         messageTtlSeconds,
       );
-      if (!media) return { accepted: false };
-      message.media = media;
-      sentVideoMediaId = String(media.id);
+      if (!consumed) return { accepted: false };
+      if (consumed.alreadySent) return { accepted: true };
+      videoDraftSession = consumed.session;
+      message.media = consumed.media;
+      sentVideoMediaId = String(consumed.media.id);
+      sentVideoMessageField = videoDraftId;
+      sentVideoTtlSeconds = Number(consumed.session.messageTtlSeconds);
     }
 
     if (type === ChatLobbyType.Announcement) {
@@ -626,23 +673,73 @@ export class ChatService {
       message.id = rows[0].id;
     } else {
       const messageKey = `chat_${type}_${id}`;
-      const messageField = uuidv4();
+      const messageField = sentVideoMessageField ?? uuidv4();
       message.id = messageField;
-      await this.redis.hset(messageKey, messageField, JSON.stringify(message));
-
-      await this.redis.sendCommand(
-        new Redis.Command("HEXPIRE", [
-          messageKey,
-          messageTtlSeconds,
-          "FIELDS",
-          1,
-          messageField,
-        ]),
-      );
       if (sentVideoMediaId) {
-        await this.redis.expire(
-          this.videoMediaKey(sentVideoMediaId),
-          messageTtlSeconds,
+        try {
+          const inserted = await this.redis.hsetnx(
+            messageKey,
+            messageField,
+            JSON.stringify(message),
+          );
+          if (Number(inserted) !== 1) {
+            const existing = await this.findSentVideoMessage(
+              videoDraftId!,
+              videoDraftSession,
+            );
+            if (!existing) return { accepted: false };
+            const ttl = Number(videoDraftSession.messageTtlSeconds);
+            if (Number.isFinite(ttl) && ttl > 0)
+              await this.applyVideoMessageTtl(
+                type,
+                id,
+                String(existing.id),
+                sentVideoMediaId,
+                ttl,
+              );
+            await this.markVideoDraftSent(
+              videoDraftId!,
+              videoDraftSession,
+              String(existing.id),
+            );
+            return { accepted: true };
+          }
+          await this.applyVideoMessageTtl(
+            type,
+            id,
+            messageField,
+            sentVideoMediaId,
+            sentVideoTtlSeconds ?? messageTtlSeconds,
+          );
+          await this.markVideoDraftSent(
+            videoDraftId!,
+            videoDraftSession,
+            messageField,
+          );
+        } catch (error) {
+          const current = await this.redis
+            .get(this.videoDraftKey(videoDraftId!))
+            .catch((): null => null);
+          const currentSession = current ? JSON.parse(current) : undefined;
+          const persisted = currentSession
+            ? await this.findSentVideoMessage(videoDraftId!, currentSession)
+            : undefined;
+          if (!persisted)
+            await this.resetVideoDraftAfterFailedSend(videoDraftId!).catch(
+              (): void => undefined,
+            );
+          throw error;
+        }
+      } else {
+        await this.redis.hset(messageKey, messageField, JSON.stringify(message));
+        await this.redis.sendCommand(
+          new Redis.Command("HEXPIRE", [
+            messageKey,
+            messageTtlSeconds,
+            "FIELDS",
+            1,
+            messageField,
+          ]),
         );
       }
     }
@@ -833,19 +930,183 @@ export class ChatService {
   }
 
   public async getPhoneVideoDraft(token: string) {
-    const id = await this.redis.get(this.videoTokenKey(token));
+    const tokenKey = this.videoTokenKey(token);
+    const id = await this.redis.get(tokenKey);
     if (!id) return undefined;
     const raw = await this.redis.get(this.videoDraftKey(id));
     if (!raw) return undefined;
     const session = JSON.parse(raw);
-    return session.state === "recording"
-      ? {
-          id,
-          expiresAt: new Date(
-            session.createdAt + this.videoDraftTtlSeconds * 1000,
-          ).toISOString(),
+    if (session.tokenKey !== tokenKey) return undefined;
+    if (
+      session.state !== "sent" &&
+      Date.now() >= session.createdAt + this.videoDraftTtlSeconds * 1000
+    )
+      return undefined;
+    if (!["recording", "ready", "sending", "sent"].includes(session.state))
+      return undefined;
+    return {
+      state: session.state,
+      expiresAt: new Date(
+        session.createdAt + this.videoDraftTtlSeconds * 1000,
+      ).toISOString(),
+    };
+  }
+
+  public async sendOwnedVideoDraft(id: string, user: User) {
+    return this.sendVideoDraftSession(id, String(user.steam_id));
+  }
+
+  public async sendPhoneVideoDraft(token: string) {
+    const tokenKey = this.videoTokenKey(token);
+    const id = await this.redis.get(tokenKey);
+    if (!id) return { accepted: false };
+    return this.sendVideoDraftSession(id, undefined, tokenKey);
+  }
+
+  private async sendVideoDraftSession(
+    id: string,
+    authenticatedSteamId?: string,
+    tokenKey?: string,
+  ) {
+    const raw = await this.redis.get(this.videoDraftKey(id));
+    if (!raw) return { accepted: false };
+    const session = JSON.parse(raw);
+    if (
+      (authenticatedSteamId &&
+        session.ownerSteamId !== authenticatedSteamId) ||
+      (tokenKey && session.tokenKey !== tokenKey)
+    )
+      return { accepted: false };
+    if (tokenKey && (await this.redis.get(tokenKey)) !== id)
+      return { accepted: false };
+    const existing = await this.findSentVideoMessage(id, session);
+    if (existing) {
+      if (session.state !== "sent") {
+        const ttl = Number(session.messageTtlSeconds);
+        if (Number.isFinite(ttl) && ttl > 0)
+          await this.applyVideoMessageTtl(
+            session.type,
+            session.roomId,
+            String(existing.id),
+            String(existing.media.id),
+            ttl,
+          );
+        await this.markVideoDraftSent(id, session, String(existing.id));
+      }
+      return { accepted: true };
+    }
+    if (session.state === "sent") return { accepted: true };
+    if (
+      !["ready", "sending"].includes(session.state) ||
+      Date.now() >= session.createdAt + this.videoDraftTtlSeconds * 1000
+    )
+      return { accepted: false };
+
+    // Resolve the account and current role from Hasura for both callers.
+    // The phone's capability never supplies account identity or destination.
+    const owner = await this.getCurrentUser(session.ownerSteamId);
+    if (!owner) return { accepted: false };
+    return this.sendMessageToChat(
+      session.type,
+      session.roomId,
+      owner,
+      "",
+      false,
+      undefined,
+      id,
+    );
+  }
+
+  public async retakeOwnedVideoDraft(id: string, user: User) {
+    return this.resetVideoDraftForRetake(id, String(user.steam_id));
+  }
+
+  public async retakePhoneVideoDraft(token: string) {
+    const tokenKey = this.videoTokenKey(token);
+    const id = await this.redis.get(tokenKey);
+    if (!id) return undefined;
+    return this.resetVideoDraftForRetake(id, undefined, tokenKey);
+  }
+
+  private async resetVideoDraftForRetake(
+    id: string,
+    authenticatedSteamId?: string,
+    tokenKey?: string,
+  ) {
+    const draftKey = this.videoDraftKey(id);
+    const lockKey = "chat_video_claim:" + id;
+    const raw = await this.redis.get(draftKey);
+    if (!raw) return undefined;
+    const session = JSON.parse(raw);
+    if (
+      (authenticatedSteamId &&
+        session.ownerSteamId !== authenticatedSteamId) ||
+      (tokenKey && session.tokenKey !== tokenKey) ||
+      (tokenKey && (await this.redis.get(tokenKey)) !== id)
+    )
+      return undefined;
+    if (session.state === "sent") return { state: "sent" };
+    if (Date.now() >= session.createdAt + this.videoDraftTtlSeconds * 1000)
+      return { state: "expired" };
+    if (!(await this.redis.set(lockKey, "retake", "EX", 120, "NX")))
+      return undefined;
+
+    let keepSentClaim = false;
+    try {
+      const latestRaw = await this.redis.get(draftKey);
+      if (!latestRaw) return undefined;
+      const latest = JSON.parse(latestRaw);
+      if (
+        (authenticatedSteamId &&
+          latest.ownerSteamId !== authenticatedSteamId) ||
+        (tokenKey && latest.tokenKey !== tokenKey) ||
+        (tokenKey && (await this.redis.get(tokenKey)) !== id)
+      )
+        return undefined;
+      if (latest.state === "sent") return { state: "sent" };
+      if (
+        Date.now() >= latest.createdAt + this.videoDraftTtlSeconds * 1000
+      )
+        return { state: "expired" };
+      if (latest.state === "sending") {
+        const existing = await this.findSentVideoMessage(id, latest);
+        if (!existing) return undefined;
+        await this.markVideoDraftSent(id, latest, String(existing.id));
+        keepSentClaim = true;
+        return { state: "sent" };
+      }
+      if (latest.state === "ready") {
+        if (await this.redis.get("chat_video_upload_lock:" + id))
+          return undefined;
+        const existing = await this.findSentVideoMessage(id, latest);
+        if (existing) {
+          await this.markVideoDraftSent(id, latest, String(existing.id));
+          keepSentClaim = true;
+          return { state: "sent" };
         }
-      : undefined;
+        if (latest.mediaId) await this.removeVideoMedia(latest.mediaId);
+        await this.redis.del("chat_video_session_media:" + id);
+      } else if (latest.state !== "recording") {
+        return undefined;
+      }
+
+      const remaining = Math.ceil(
+        (latest.createdAt + this.videoDraftTtlSeconds * 1000 - Date.now()) /
+          1000,
+      );
+      if (remaining <= 0) return { state: "expired" };
+      latest.state = "recording";
+      delete latest.mediaId;
+      delete latest.messageTtlSeconds;
+      delete latest.sendStartedAt;
+      await this.redis.set(draftKey, JSON.stringify(latest), "EX", remaining);
+      if (latest.tokenKey)
+        await this.redis.set(latest.tokenKey, id, "EX", remaining);
+      return { state: "recording" };
+    } finally {
+      if (!keepSentClaim && (await this.redis.get(lockKey)) === "retake")
+        await this.redis.del(lockKey);
+    }
   }
 
   public async uploadPhoneVideoDraft(
@@ -898,9 +1159,14 @@ export class ChatService {
       mimeType !== claimedMimeType.split(";")[0].trim().toLowerCase()
     )
       return undefined;
-    const lockKey = `chat_video_upload_lock:${id}`;
-    if (!(await this.redis.set(lockKey, "1", "EX", 120, "NX")))
+    const claimKey = `chat_video_claim:${id}`;
+    if (!(await this.redis.set(claimKey, "uploading", "EX", 120, "NX")))
       return undefined;
+    const lockKey = `chat_video_upload_lock:${id}`;
+    if (!(await this.redis.set(lockKey, "1", "EX", 120, "NX"))) {
+      await this.redis.del(claimKey);
+      return undefined;
+    }
     const mediaId = uuidv4();
     const objectKey = `chat-video/${mediaId}.${mimeType === "video/webm" ? "webm" : "mp4"}`;
     try {
@@ -930,7 +1196,6 @@ export class ChatService {
         "EX",
         this.videoMediaTtlSeconds,
       );
-      if (session.tokenKey) await this.redis.del(session.tokenKey);
       session.state = "ready";
       session.mediaId = mediaId;
       const remaining = Math.max(
@@ -956,6 +1221,8 @@ export class ChatService {
       throw error;
     } finally {
       await this.redis.del(lockKey);
+      if ((await this.redis.get(claimKey)) === "uploading")
+        await this.redis.del(claimKey);
     }
   }
 
@@ -987,8 +1254,8 @@ export class ChatService {
   public async cancelPhoneVideoDraft(token: string) {
     const tokenKey = this.videoTokenKey(token);
     const id = await this.redis.get(tokenKey);
-    if (id) await this.cancelVideoDraft(id);
-    await this.redis.del(tokenKey);
+    if (!id) return;
+    if (await this.cancelVideoDraft(id)) await this.redis.del(tokenKey);
   }
 
   public async cancelOwnedVideoDraft(id: string, user: User) {
@@ -1004,43 +1271,62 @@ export class ChatService {
   }
 
   private async cancelVideoDraft(id: string) {
-    const raw = await this.redis.get(this.videoDraftKey(id));
-    if (raw) {
+    const draftKey = this.videoDraftKey(id);
+    const claimKey = `chat_video_claim:${id}`;
+    if (!(await this.redis.set(claimKey, "cancel", "EX", 120, "NX")))
+      return false;
+    try {
+      const raw = await this.redis.get(draftKey);
+      if (!raw) return true;
       const session = JSON.parse(raw);
-      if (session.state === "sent") {
-        const values = await this.redis.hgetall(
-          `chat_${session.type}_${session.roomId}`,
-        );
-        const attached = Object.values(values).some((value) => {
-          try {
-            return JSON.parse(value)?.media?.id === session.mediaId;
-          } catch {
-            return false;
-          }
-        });
-        if (!attached && session.mediaId)
-          await this.removeVideoMedia(session.mediaId);
-        return;
+      if (session.state === "sent") return false;
+      const existing = await this.findSentVideoMessage(id, session);
+      if (existing) {
+        await this.markVideoDraftSent(id, session, String(existing.id));
+        return false;
       }
-      if (session.tokenKey) await this.redis.del(session.tokenKey);
-      await this.redis.del(`chat_video_claim:${id}`);
-      await this.redis.del(`chat_video_active:${session.ownerSteamId}`);
+      if (session.state === "sending") return false;
       if (session.mediaId) await this.removeVideoMedia(session.mediaId);
+      if (session.tokenKey) await this.redis.del(session.tokenKey);
+      await this.redis.del(`chat_video_active:${session.ownerSteamId}`);
+      await this.redis.del(draftKey, `chat_video_session_media:${id}`);
+      return true;
+    } finally {
+      if ((await this.redis.get(claimKey)) === "cancel")
+        await this.redis.del(claimKey);
     }
-    await this.redis.del(this.videoDraftKey(id));
-    await this.redis.del(`chat_video_session_media:${id}`);
   }
 
   public async cleanupExpiredVideoDraft(id: string) {
-    const raw = await this.redis.get(this.videoDraftKey(id));
+    const draftKey = this.videoDraftKey(id);
+    const raw = await this.redis.get(draftKey);
     if (raw) {
       const session = JSON.parse(raw);
       if (session.state === "sent") return;
+      const claimKey = `chat_video_claim:${id}`;
+      const claim = await this.redis.get(claimKey);
+      const existing = await this.findSentVideoMessage(id, session);
+      if (existing) {
+        const ttl = Number(session.messageTtlSeconds);
+        if (Number.isFinite(ttl) && ttl > 0)
+          await this.applyVideoMessageTtl(
+            session.type,
+            session.roomId,
+            String(existing.id),
+            String(existing.media.id),
+            ttl,
+          );
+        await this.markVideoDraftSent(id, session, String(existing.id));
+        return;
+      }
+      if (claim) return;
       if (session.mediaId) await this.removeVideoMedia(session.mediaId);
       if (session.tokenKey) await this.redis.del(session.tokenKey);
       await this.redis.del(`chat_video_active:${session.ownerSteamId}`);
-      await this.redis.del(this.videoDraftKey(id));
+      await this.redis.del(draftKey);
     } else {
+      const claim = await this.redis.get(`chat_video_claim:${id}`);
+      if (claim) return;
       const mediaId = await this.redis.get(`chat_video_session_media:${id}`);
       if (mediaId) await this.removeVideoMedia(mediaId);
     }
@@ -1061,6 +1347,149 @@ export class ChatService {
     return undefined;
   }
 
+  private async findSentVideoMessage(id: string, session: any) {
+    if (!session.mediaId) return undefined;
+    const messageKey = `chat_${session.type}_${session.roomId}`;
+    const messageField = session.messageId || id;
+    const raw = await this.redis.hget(messageKey, messageField);
+    const candidates = raw ? [raw] : [];
+    for (const value of candidates) {
+      try {
+        const message = JSON.parse(value as string);
+        if (
+          String(message?.media?.id) === String(session.mediaId) &&
+          String(message?.from?.steam_id) === String(session.ownerSteamId)
+        )
+          return message;
+      } catch {
+        // Ignore malformed entries while looking for this exact attachment.
+      }
+    }
+    // Older sent sessions used a random message id. Search only for those
+    // legacy sessions, avoiding a full history scan on the normal send path.
+    if (session.state === "sent" && !session.messageId) {
+      const values = await this.redis.hgetall(messageKey);
+      for (const value of Object.values(values)) {
+        try {
+          const message = JSON.parse(value as string);
+          if (
+            String(message?.media?.id) === String(session.mediaId) &&
+            String(message?.from?.steam_id) === String(session.ownerSteamId)
+          )
+            return message;
+        } catch {
+          // Ignore malformed entries while searching legacy video messages.
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private async applyVideoMessageTtl(
+    type: ChatLobbyType,
+    roomId: string,
+    messageId: string,
+    mediaId: string,
+    ttlSeconds: number,
+  ) {
+    const messageKey = `chat_${type}_${roomId}`;
+    await this.redis.sendCommand(
+      new Redis.Command("HEXPIRE", [
+        messageKey,
+        ttlSeconds,
+        "FIELDS",
+        1,
+        messageId,
+      ]),
+    );
+    await this.redis.expire(this.videoMediaKey(mediaId), ttlSeconds);
+  }
+
+  private async scheduleSentVideoMediaCleanup(
+    mediaId: string,
+    objectKey: string,
+    messageTtlSeconds: number,
+  ) {
+    const jobId = `chat-video-media-expiry-${mediaId}`;
+    const delay = messageTtlSeconds * 1000 + 60 * 60 * 1000 + 1000;
+    const existing = await this.chatVideoCleanupQueue.getJob(jobId);
+    if (existing) {
+      const state = await existing.getState();
+      if (state === "delayed") {
+        await existing.changeDelay(delay);
+        return;
+      }
+      await existing.remove();
+    }
+    await this.chatVideoCleanupQueue.add(
+      ExpireSentChatVideoMediaJobName,
+      { mediaId, objectKey },
+      {
+        jobId,
+        delay,
+        attempts: 5,
+        backoff: { type: "exponential", delay: 30_000 },
+        removeOnComplete: true,
+        removeOnFail: { age: 7 * 24 * 60 * 60 },
+      },
+    );
+  }
+
+  private async markVideoDraftSent(
+    id: string,
+    session: any,
+    messageId: string,
+  ) {
+    session.state = "sent";
+    session.messageId = messageId;
+    delete session.sendStartedAt;
+    await this.redis.del(`chat_video_active:${session.ownerSteamId}`);
+    await this.redis.set(
+      this.videoDraftKey(id),
+      JSON.stringify(session),
+      "EX",
+      this.videoMediaTtlSeconds,
+    );
+    await this.redis.set(
+      `chat_video_claim:${id}`,
+      "sent",
+      "EX",
+      this.videoMediaTtlSeconds,
+    );
+  }
+
+  private async resetVideoDraftAfterFailedSend(id: string) {
+    const draftKey = this.videoDraftKey(id);
+    const raw = await this.redis.get(draftKey);
+    if (!raw) return;
+    const session = JSON.parse(raw);
+    if (session.state !== "sending") return;
+    const remaining = Math.ceil(
+      (session.createdAt + this.videoDraftTtlSeconds * 1000 - Date.now()) /
+        1000,
+    );
+    if (remaining > 0) {
+      session.state = "ready";
+      delete session.messageTtlSeconds;
+      delete session.sendStartedAt;
+      await this.redis.set(draftKey, JSON.stringify(session), "EX", remaining);
+    }
+    if ((await this.redis.get(`chat_video_claim:${id}`)) === "sending")
+      await this.redis.del(`chat_video_claim:${id}`);
+  }
+
+  private async waitForSentVideoMessage(id: string, session: any) {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const latestRaw = await this.redis.get(this.videoDraftKey(id));
+      const latest = latestRaw ? JSON.parse(latestRaw) : session;
+      const existing = await this.findSentVideoMessage(id, latest);
+      if (existing) return { session: latest, message: existing };
+      if (latest.state === "sent") return undefined;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return undefined;
+  }
+
   private async consumeVideoDraft(
     id: string,
     type: ChatLobbyType,
@@ -1069,16 +1498,38 @@ export class ChatService {
     messageTtlSeconds = this.expiresIn,
   ) {
     const claimKey = `chat_video_claim:${id}`;
-    if (
-      !(await this.redis.set(
-        claimKey,
-        String(user.steam_id),
-        "EX",
-        this.videoMediaTtlSeconds,
-        "NX",
-      ))
-    )
+    const claimed = await this.redis.set(
+      claimKey,
+      "sending",
+      "EX",
+      120,
+      "NX",
+    );
+    if (!claimed) {
+      if ((await this.redis.get(claimKey)) !== "sending") return undefined;
+      const rawSession = await this.redis.get(this.videoDraftKey(id));
+      if (!rawSession) return undefined;
+      const current = JSON.parse(rawSession);
+      const complete = await this.waitForSentVideoMessage(id, current);
+      if (complete) {
+        const ttl = Number(complete.session.messageTtlSeconds);
+        if (Number.isFinite(ttl) && ttl > 0)
+          await this.applyVideoMessageTtl(
+            type,
+            roomId,
+            String(complete.message.id),
+            String(complete.message.media.id),
+            ttl,
+          );
+        await this.markVideoDraftSent(
+          id,
+          complete.session,
+          String(complete.message.id),
+        );
+        return { alreadySent: true };
+      }
       return undefined;
+    }
     const raw = await this.redis.get(this.videoDraftKey(id));
     if (!raw) {
       await this.redis.del(claimKey);
@@ -1086,13 +1537,30 @@ export class ChatService {
     }
     const session = JSON.parse(raw);
     if (
-      session.state !== "ready" ||
+      !["ready", "sending"].includes(session.state) ||
       session.ownerSteamId !== String(user.steam_id) ||
       session.type !== type ||
-      session.roomId !== roomId
+      session.roomId !== roomId ||
+      Date.now() >= session.createdAt + this.videoDraftTtlSeconds * 1000
     ) {
       await this.redis.del(claimKey);
       return undefined;
+    }
+    if (session.state === "sending") {
+      const existing = await this.findSentVideoMessage(id, session);
+      if (existing) {
+        const ttl = Number(session.messageTtlSeconds);
+        if (Number.isFinite(ttl) && ttl > 0)
+          await this.applyVideoMessageTtl(
+            type,
+            roomId,
+            String(existing.id),
+            String(existing.media.id),
+            ttl,
+          );
+        await this.markVideoDraftSent(id, session, String(existing.id));
+        return { alreadySent: true };
+      }
     }
     const rawMedia = await this.redis.get(this.videoMediaKey(session.mediaId));
     if (!rawMedia) {
@@ -1115,36 +1583,31 @@ export class ChatService {
       durationMs: media.durationMs,
       size: media.size,
     };
-    try {
-      await this.chatVideoCleanupQueue.add(
-        ExpireSentChatVideoMediaJobName,
-        { mediaId: media.id, objectKey: media.objectKey },
-        {
-          jobId: `chat-video-media-expiry-${media.id}`,
-          delay: messageTtlSeconds * 1000 + 60 * 60 * 1000 + 1000,
-          attempts: 5,
-          backoff: { type: "exponential", delay: 30_000 },
-          removeOnComplete: true,
-          removeOnFail: { age: 7 * 24 * 60 * 60 },
-        },
-      );
-    } catch (error) {
-      this.logger.warn(
-        `[chat-video] unable to schedule message-lifetime cleanup for ${media.id}`,
-        error,
-      );
-      await this.redis.del(claimKey);
-      return undefined;
-    }
-    session.state = "sent";
-    await this.redis.del(`chat_video_active:${session.ownerSteamId}`);
+    const ttl = Number(session.messageTtlSeconds) || messageTtlSeconds;
+    session.messageTtlSeconds = ttl;
+    session.state = "sending";
+    session.sendStartedAt = Date.now();
     await this.redis.set(
       this.videoDraftKey(id),
       JSON.stringify(session),
       "EX",
       this.videoMediaTtlSeconds,
     );
-    return publicMedia;
+    try {
+      await this.scheduleSentVideoMediaCleanup(
+        media.id,
+        media.objectKey,
+        ttl,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `[chat-video] unable to schedule message-lifetime cleanup for ${media.id}`,
+        error,
+      );
+      await this.resetVideoDraftAfterFailedSend(id);
+      return undefined;
+    }
+    return { media: publicMedia, session };
   }
 
   public async cleanupExpiredSentVideoMedia(
@@ -2200,6 +2663,28 @@ export class ChatService {
           field,
         ]),
       );
+
+      const parsed = JSON.parse(message);
+      if (parsed.media?.type === "video" && parsed.media.id) {
+        const mediaKey = this.videoMediaKey(String(parsed.media.id));
+        const rawMedia = await this.redis.get(mediaKey);
+        if (rawMedia) {
+          const media = JSON.parse(rawMedia);
+          await this.scheduleSentVideoMediaCleanup(
+            String(media.id),
+            media.objectKey,
+            this.expiresIn,
+          );
+          media.chatType = toType;
+          media.roomId = toId;
+          await this.redis.set(
+            mediaKey,
+            JSON.stringify(media),
+            "EX",
+            this.expiresIn,
+          );
+        }
+      }
     }
 
     await this.redis.del(fromKey);

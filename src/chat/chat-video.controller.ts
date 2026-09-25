@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Body,
+  ConflictException,
   Controller,
   ForbiddenException,
   Get,
@@ -73,7 +74,7 @@ export class ChatVideoController {
       throw new NotFoundException(
         "This video session has expired or was already used.",
       );
-    return { expiresAt: session.expiresAt };
+    return session;
   }
 
   @Post("phone/upload")
@@ -99,6 +100,26 @@ export class ChatVideoController {
         "video is invalid or this session is no longer available",
       );
     return { success: true };
+  }
+
+  @Post("phone/send")
+  public async sendPhone(@Headers("authorization") authorization?: string) {
+    const token = this.phoneToken(authorization);
+    const result = await this.chat.sendPhoneVideoDraft(token);
+    if (!result.accepted)
+      throw new ForbiddenException(
+        "Video could not be sent. Check that you still have permission to chat.",
+      );
+    return { success: true };
+  }
+
+  @Post("phone/retake")
+  public async retakePhone(@Headers("authorization") authorization?: string) {
+    const token = this.phoneToken(authorization);
+    const result = await this.chat.retakePhoneVideoDraft(token);
+    if (!result)
+      throw new ConflictException("This video session is no longer available.");
+    return result;
   }
 
   @Get("sessions/:id")
@@ -137,6 +158,36 @@ export class ChatVideoController {
         "video is invalid or this session is no longer available",
       );
     return { success: true };
+  }
+
+  @Post("sessions/:id/send")
+  public async sendOwned(
+    @Param("id") id: string,
+    @Req() request: Request,
+  ) {
+    const user = request.user as User | undefined;
+    if (!user?.steam_id)
+      throw new ForbiddenException("authentication required");
+    const result = await this.chat.sendOwnedVideoDraft(id, user);
+    if (!result.accepted)
+      throw new ForbiddenException(
+        "Video could not be sent. Check that you still have permission to chat.",
+      );
+    return { success: true };
+  }
+
+  @Post("sessions/:id/retake")
+  public async retakeOwned(
+    @Param("id") id: string,
+    @Req() request: Request,
+  ) {
+    const user = request.user as User | undefined;
+    if (!user?.steam_id)
+      throw new ForbiddenException("authentication required");
+    const result = await this.chat.retakeOwnedVideoDraft(id, user);
+    if (!result)
+      throw new ConflictException("This video session is no longer available.");
+    return result;
   }
 
   @Post("phone/cancel")

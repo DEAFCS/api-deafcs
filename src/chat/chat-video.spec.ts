@@ -73,6 +73,38 @@ describe("ChatVideoController upload routes", () => {
     );
   });
 
+  it("sends a PC video using only the authenticated draft id", async () => {
+    const chat = {
+      sendOwnedVideoDraft: jest.fn().mockResolvedValue({ accepted: true }),
+    };
+    const controller = new ChatVideoController(
+      chat as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(
+      controller.sendOwned("draft-1", { user: owner } as any),
+    ).resolves.toEqual({ success: true });
+    expect(chat.sendOwnedVideoDraft).toHaveBeenCalledWith("draft-1", owner);
+  });
+
+  it("sends a phone video using only its capability token", async () => {
+    const chat = {
+      sendPhoneVideoDraft: jest.fn().mockResolvedValue({ accepted: true }),
+    };
+    const controller = new ChatVideoController(
+      chat as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(controller.sendPhone(`Bearer ${token}`)).resolves.toEqual({
+      success: true,
+    });
+    expect(chat.sendPhoneVideoDraft).toHaveBeenCalledWith(token);
+  });
+
   it("rejects an expired phone capability before upload", async () => {
     const chat = {
       getPhoneVideoDraft: jest.fn().mockResolvedValue(undefined),
@@ -106,6 +138,7 @@ describe("ChatService temporary video drafts", () => {
     role: "verified_user",
   };
   const values = new Map<string, string>();
+  const hashes = new Map<string, Map<string, string>>();
   let service: ChatService;
   let s3: { put: jest.Mock; remove: jest.Mock };
   let redis: any;
@@ -113,6 +146,7 @@ describe("ChatService temporary video drafts", () => {
 
   beforeEach(() => {
     values.clear();
+    hashes.clear();
     redis = {
       get: jest.fn(async (key: string) => values.get(key) ?? null),
       set: jest.fn(async (key: string, value: string, ...args: any[]) => {
@@ -121,19 +155,47 @@ describe("ChatService temporary video drafts", () => {
         return "OK";
       }),
       del: jest.fn(async (...keys: string[]) =>
-        keys.reduce((count, key) => count + Number(values.delete(key)), 0),
+        keys.reduce(
+          (count, key) =>
+            count + Number(values.delete(key) || hashes.delete(key)),
+          0,
+        ),
       ),
       expire: jest.fn().mockResolvedValue(1),
-      hset: jest.fn().mockResolvedValue(1),
+      hset: jest.fn(async (key: string, field: string, value: string) => {
+        const hash = hashes.get(key) ?? new Map<string, string>();
+        hash.set(field, value);
+        hashes.set(key, hash);
+        return 1;
+      }),
+      hsetnx: jest.fn(async (key: string, field: string, value: string) => {
+        const hash = hashes.get(key) ?? new Map<string, string>();
+        if (hash.has(field)) return 0;
+        hash.set(field, value);
+        hashes.set(key, hash);
+        return 1;
+      }),
+      hget: jest.fn(async (key: string, field: string) =>
+        hashes.get(key)?.get(field) ?? null,
+      ),
+      hdel: jest.fn(async (key: string, field: string) =>
+        Number(hashes.get(key)?.delete(field) ?? false),
+      ),
       sendCommand: jest.fn().mockResolvedValue([1]),
-      hgetall: jest.fn().mockResolvedValue({}),
+      hgetall: jest.fn(async (key: string) =>
+        Object.fromEntries(hashes.get(key) ?? []),
+      ),
+      keys: jest.fn().mockResolvedValue([]),
     };
     s3 = {
       put: jest.fn().mockResolvedValue(undefined),
       remove: jest.fn().mockResolvedValue(true),
       has: jest.fn().mockResolvedValue(false),
     };
-    expiryQueue = { add: jest.fn().mockResolvedValue(undefined) };
+    expiryQueue = {
+      add: jest.fn().mockResolvedValue(undefined),
+      getJob: jest.fn().mockResolvedValue(undefined),
+    };
     service = new ChatService(
       { warn: jest.fn(), log: jest.fn() } as any,
       {} as any,
@@ -154,7 +216,7 @@ describe("ChatService temporary video drafts", () => {
       .mockResolvedValue({ user: owner });
   });
 
-  it("hashes the phone capability, accepts a supported video signature once, and binds send to its owner and room", async () => {
+  it("hashes the phone capability, accepts a supported video signature, and reports the uploaded preview", async () => {
     await service.updateChatMessageTTL(37);
     const session = await service.createVideoDraftSession(
       ChatLobbyType.Global,
@@ -178,9 +240,9 @@ describe("ChatService temporary video drafts", () => {
       10_000,
     );
     expect(uploaded).toEqual({ mediaId: expect.any(String) });
-    await expect(
-      service.getPhoneVideoDraft(session!.token),
-    ).resolves.toBeUndefined();
+    await expect(service.getPhoneVideoDraft(session!.token)).resolves.toMatchObject({
+      state: "ready",
+    });
     await expect(
       service.uploadOwnedVideoDraft(
         session!.id,
@@ -190,51 +252,10 @@ describe("ChatService temporary video drafts", () => {
         10_000,
       ),
     ).resolves.toBeUndefined();
-    await expect(
-      (service as any).consumeVideoDraft(
-        session!.id,
-        ChatLobbyType.Global,
-        "other-room",
-        owner,
-      ),
-    ).resolves.toBeUndefined();
-    await expect(
-      (service as any).consumeVideoDraft(
-        session!.id,
-        ChatLobbyType.Global,
-        "global",
-        stranger,
-      ),
-    ).resolves.toBeUndefined();
-    const consumed = await (service as any).consumeVideoDraft(
-      session!.id,
-      ChatLobbyType.Global,
-      "global",
-      owner,
-    );
-    await expect(Promise.resolve(consumed)).resolves.toMatchObject({
-      type: "video",
-      mimeType: "video/webm",
-      size: webm.length,
-    });
-    expect(expiryQueue.add).toHaveBeenCalledWith(
-      "ExpireSentChatVideoMedia",
-      {
-        mediaId: uploaded!.mediaId,
-        objectKey: expect.stringMatching(/^chat-video\/.+\.webm$/),
-      },
-      expect.objectContaining({ delay: 37 * 1000 + 60 * 60 * 1000 + 1000 }),
-    );
+    expect(expiryQueue.add).not.toHaveBeenCalled();
     await expect(
       service.getVideoMediaForViewer(uploaded!.mediaId, owner),
     ).resolves.toBeUndefined();
-    await service.cleanupExpiredSentVideoMedia(
-      uploaded!.mediaId,
-      `chat-video/${uploaded!.mediaId}.webm`,
-    );
-    expect(s3.remove).toHaveBeenCalledWith(
-      `chat-video/${uploaded!.mediaId}.webm`,
-    );
     expect(s3.put).toHaveBeenCalledWith(
       expect.stringMatching(/^chat-video\/.+\.webm$/),
       webm,
@@ -269,6 +290,29 @@ describe("ChatService temporary video drafts", () => {
         ChatLobbyType.Global,
         "global",
         owner,
+        "text cannot accompany video",
+        true,
+        "browser-session",
+        session!.id,
+      ),
+    ).resolves.toMatchObject({ accepted: false });
+    await expect(
+      service.sendMessageToChat(
+        ChatLobbyType.Global,
+        "another-room",
+        owner,
+        "",
+        true,
+        "browser-session",
+        session!.id,
+      ),
+    ).resolves.toMatchObject({ accepted: false });
+
+    await expect(
+      service.sendMessageToChat(
+        ChatLobbyType.Global,
+        "global",
+        owner,
         "",
         true,
         "browser-session",
@@ -282,6 +326,170 @@ describe("ChatService temporary video drafts", () => {
       /^chat_video_media:[0-9a-f-]{36}$/,
     );
     expect(redis.expire.mock.calls[0][1]).toBe(37);
+    expect(hashes.get("chat_global_global")?.has(session!.id)).toBe(true);
+    expect(expiryQueue.add).toHaveBeenCalledWith(
+      "ExpireSentChatVideoMedia",
+      {
+        mediaId: expect.any(String),
+        objectKey: expect.stringMatching(/^chat-video\/.+\.webm$/),
+      },
+      expect.objectContaining({ delay: 37 * 1000 + 60 * 60 * 1000 + 1000 }),
+    );
+    const mediaId = JSON.parse(
+      hashes.get("chat_global_global")!.get(session!.id)!,
+    ).media.id;
+    expect(await service.getVideoMediaForViewer(mediaId, owner)).toBeDefined();
+    hashes.get("chat_global_global")!.delete(session!.id);
+    await expect(
+      service.getVideoMediaForViewer(mediaId, owner),
+    ).resolves.toBeUndefined();
+  });
+
+  it("sends once through the server-bound phone session and makes retries idempotent", async () => {
+    const session = await service.createVideoDraftSession(
+      ChatLobbyType.Global,
+      "global",
+      owner,
+    );
+    const webm = Buffer.concat([
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+      Buffer.alloc(256),
+    ]);
+    await service.uploadPhoneVideoDraft(
+      session!.token,
+      webm,
+      "video/webm",
+      10_000,
+    );
+    jest.spyOn(service as any, "getCurrentUser").mockResolvedValue(owner);
+    jest
+      .spyOn(service, "getWebsiteChatMuteStatus")
+      .mockResolvedValue({ active: false, expiresAt: null, permanent: false });
+    const normalChatSend = jest.spyOn(service, "sendMessageToChat");
+    jest.spyOn(service as any, "to").mockImplementation(() => undefined);
+    jest
+      .spyOn(service as any, "notifyLobbyMembers")
+      .mockResolvedValue(undefined);
+
+    const results = await Promise.all([
+      service.sendPhoneVideoDraft(session!.token),
+      service.sendOwnedVideoDraft(session!.id, owner),
+    ]);
+    await expect(service.sendPhoneVideoDraft(session!.token)).resolves.toEqual({
+      accepted: true,
+    });
+
+    expect(results).toEqual([{ accepted: true }, { accepted: true }]);
+    expect(
+      normalChatSend.mock.calls.every(
+        (call) =>
+          call[0] === ChatLobbyType.Global &&
+          call[1] === "global" &&
+          call[3] === "" &&
+          call[4] === false &&
+          call[5] === undefined &&
+          call[6] === session!.id,
+      ),
+    ).toBe(true);
+    const messages = [...(hashes.get("chat_global_global")?.values() ?? [])].map(
+      (value) => JSON.parse(value),
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      id: session!.id,
+      message: "",
+      from: { steam_id: owner.steam_id },
+      media: { type: "video" },
+    });
+    expect(expiryQueue.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("moves a sent video's access and cleanup lifetime with migrated chat history", async () => {
+    await service.updateChatMessageTTL(37);
+    jest
+      .spyOn(service as any, "canSendDraftMessage")
+      .mockResolvedValue(true);
+    const session = await service.createVideoDraftSession(
+      ChatLobbyType.Draft,
+      "draft-1",
+      owner,
+    );
+    const webm = Buffer.concat([
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+      Buffer.alloc(256),
+    ]);
+    const uploaded = await service.uploadPhoneVideoDraft(
+      session!.token,
+      webm,
+      "video/webm",
+      10_000,
+    );
+    jest.spyOn(service as any, "to").mockImplementation(() => undefined);
+    jest
+      .spyOn(service as any, "notifyLobbyMembers")
+      .mockResolvedValue(undefined);
+    await expect(
+      service.sendMessageToChat(
+        ChatLobbyType.Draft,
+        "draft-1",
+        owner,
+        "",
+        true,
+        undefined,
+        session!.id,
+      ),
+    ).resolves.toMatchObject({ accepted: true });
+
+    const delayedJob = {
+      getState: jest.fn().mockResolvedValue("delayed"),
+      changeDelay: jest.fn().mockResolvedValue(undefined),
+    };
+    expiryQueue.getJob.mockResolvedValue(delayedJob);
+    await service.migrateLobbyMessages(
+      ChatLobbyType.Draft,
+      "draft-1",
+      ChatLobbyType.Match,
+      "match-1",
+    );
+
+    expect(delayedJob.changeDelay).toHaveBeenCalledWith(
+      37 * 1000 + 60 * 60 * 1000 + 1000,
+    );
+    expect(hashes.get("chat_match_match-1")?.has(session!.id)).toBe(true);
+    const media = JSON.parse(values.get(`chat_video_media:${uploaded!.mediaId}`)!);
+    expect(media).toMatchObject({
+      chatType: ChatLobbyType.Match,
+      roomId: "match-1",
+    });
+    await expect(
+      service.getVideoMediaForViewer(uploaded!.mediaId, owner),
+    ).resolves.toBeDefined();
+  });
+
+  it("does not let cancel delete a video while final send is in progress", async () => {
+    const session = await service.createVideoDraftSession(
+      ChatLobbyType.Global,
+      "global",
+      owner,
+    );
+    const webm = Buffer.concat([
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+      Buffer.alloc(256),
+    ]);
+    const uploaded = await service.uploadPhoneVideoDraft(
+      session!.token,
+      webm,
+      "video/webm",
+      10_000,
+    );
+    const draftKey = `chat_video_draft:${session!.id}`;
+    const draft = JSON.parse(values.get(draftKey)!);
+    draft.state = "sending";
+    values.set(draftKey, JSON.stringify(draft));
+
+    await expect(service.cancelPhoneVideoDraft(session!.token)).resolves.toBeUndefined();
+    expect(s3.remove).not.toHaveBeenCalled();
+    expect(values.has(`chat_video_media:${uploaded!.mediaId}`)).toBe(true);
   });
 
   it("rejects content whose magic bytes do not match the claimed MIME type", async () => {
