@@ -142,11 +142,16 @@ describe("ChatService temporary video drafts", () => {
   let service: ChatService;
   let s3: { put: jest.Mock; remove: jest.Mock };
   let redis: any;
+  let pipeline: any;
   let expiryQueue: { add: jest.Mock };
 
   beforeEach(() => {
     values.clear();
     hashes.clear();
+    pipeline = {
+      expire: jest.fn().mockReturnThis(),
+      exec: jest.fn().mockResolvedValue([]),
+    };
     redis = {
       get: jest.fn(async (key: string) => values.get(key) ?? null),
       set: jest.fn(async (key: string, value: string, ...args: any[]) => {
@@ -162,6 +167,7 @@ describe("ChatService temporary video drafts", () => {
         ),
       ),
       expire: jest.fn().mockResolvedValue(1),
+      pipeline: jest.fn(() => pipeline),
       hset: jest.fn(async (key: string, field: string, value: string) => {
         const hash = hashes.get(key) ?? new Map<string, string>();
         hash.set(field, value);
@@ -463,6 +469,13 @@ describe("ChatService temporary video drafts", () => {
       "1",
       session!.id,
     ]);
+    expect(pipeline.expire.mock.calls).toEqual(
+      ["thumbsup", "heart", "fire", "party"].map((reaction) => [
+        `chat:reaction:${session!.id}:${reaction}`,
+        matchChatTtlSeconds,
+      ]),
+    );
+    expect(pipeline.exec).toHaveBeenCalledTimes(1);
     expect(
       redis.set.mock.calls.some(
         ([key, , ...args]: [string, ...any[]]) =>

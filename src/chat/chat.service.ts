@@ -42,6 +42,46 @@ type WebsiteChatMuteStatus = {
 // notification-click routing both rely on that equality.
 export const ANNOUNCEMENTS_LOBBY_ID = "announcement";
 
+export const CHAT_REACTION_IDS = [
+  "thumbsup",
+  "heart",
+  "fire",
+  "party",
+] as const;
+
+export type ChatReactionId = (typeof CHAT_REACTION_IDS)[number];
+
+const CHAT_REACTION_TOGGLE_LUA = `
+  if redis.call('EXISTS', KEYS[3]) == 1 then return {0, 0, -2} end
+  local ttlMs = nil
+  if ARGV[4] ~= 'announcement' then
+    local stored = redis.call('HGET', KEYS[1], ARGV[1])
+    if not stored or stored ~= ARGV[2] then return {0, 0, -2} end
+    local fieldTtl = redis.call('HPTTL', KEYS[1], 'FIELDS', 1, ARGV[1])
+    ttlMs = tonumber(fieldTtl[1])
+    if not ttlMs or ttlMs <= 0 then return {0, 0, ttlMs or -1} end
+  else
+    redis.call('PERSIST', KEYS[2])
+  end
+
+  local removed = redis.call('SREM', KEYS[2], ARGV[3])
+  local active = 0
+  if removed == 0 then
+    redis.call('SADD', KEYS[2], ARGV[3])
+    active = 1
+  end
+  if ttlMs then redis.call('PEXPIRE', KEYS[2], ttlMs) end
+  local count = redis.call('SCARD', KEYS[2])
+  if count == 0 then redis.call('DEL', KEYS[2]) end
+  return {1, active, count, ttlMs or 0}
+`;
+
+const CHAT_REACTION_DELETE_LUA = `
+  redis.call('SET', KEYS[1], '1', 'EX', ARGV[1])
+  for i = 2, #KEYS do redis.call('DEL', KEYS[i]) end
+  return 1
+`;
+
 // Terminal match statuses -- same set MatchActions.vue (frontend) and
 // notifyMatchPlayersOfSanction already treat as "this match is over".
 // Used to gate the post-match admin chat-log bypass in joinMatchLobby.
@@ -96,6 +136,7 @@ export class ChatService {
     client: FiveStackWebSocketClient,
     type: ChatLobbyType,
     id: string,
+    historyRequestId?: number,
   ) {
     const user = await this.refreshClientUser(client);
     if (!user) {
@@ -369,11 +410,14 @@ export class ChatService {
       }
     }
 
+    messages = await this.addReactionStateToMessages(messages, user.steam_id);
+
     client.send(
       JSON.stringify({
         event: `lobby:${type}:${id}:messages`,
         data: {
           id,
+          ...(historyRequestId == null ? {} : { historyRequestId }),
           messages: messages.sort((a, b) => {
             return (
               new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
@@ -418,6 +462,262 @@ export class ChatService {
     };
 
     return client.user;
+  }
+
+  public async toggleChatMessageReaction(
+    client: FiveStackWebSocketClient,
+    type: ChatLobbyType,
+    roomId: string,
+    messageId: string,
+    reaction: string,
+  ): Promise<boolean> {
+    if (
+      !roomId ||
+      !messageId ||
+      !this.isUuid(messageId) ||
+      !CHAT_REACTION_IDS.includes(reaction as ChatReactionId) ||
+      !Object.values(ChatLobbyType).includes(type)
+    ) {
+      return false;
+    }
+
+    const user = await this.refreshClientUser(client);
+    if (!user) return false;
+    if ((await this.websiteRestrictions.getStatus(user.steam_id)).active)
+      return false;
+    if ((await this.getWebsiteChatMuteStatus(user.steam_id)).active)
+      return false;
+    if (!(await this.hasCurrentChatRoomAccess(client, type, roomId, user)))
+      return false;
+
+    let expectedStoredMessage: string | undefined;
+    if (type === ChatLobbyType.Announcement) {
+      if (roomId !== ANNOUNCEMENTS_LOBBY_ID) return false;
+      const rows = await this.postgres.query<Array<{ id: string }>>(
+        `SELECT id::text AS id
+           FROM public.announcements
+          WHERE id = $1::uuid AND deleted_at IS NULL
+          LIMIT 1`,
+        [messageId],
+      );
+      if (!rows[0]) return false;
+    } else {
+      const messageKey = `chat_${type}_${roomId}`;
+      expectedStoredMessage =
+        (await this.redis.hget(messageKey, messageId)) ?? undefined;
+      if (!expectedStoredMessage) return false;
+
+      let storedMessage: Record<string, any>;
+      try {
+        storedMessage = JSON.parse(expectedStoredMessage);
+      } catch {
+        return false;
+      }
+      if (
+        String(storedMessage?.id ?? "") !== messageId ||
+        !storedMessage?.from?.steam_id ||
+        !storedMessage?.timestamp ||
+        Number.isNaN(new Date(storedMessage.timestamp).getTime()) ||
+        (typeof storedMessage.message !== "string" &&
+          storedMessage.media?.type !== "video")
+      ) {
+        return false;
+      }
+
+      if ((await this.getDeletedMessageIds(type, roomId)).has(messageId))
+        return false;
+
+      if (type !== ChatLobbyType.Direct) {
+        const blockedSteamIds = await this.blocks.getMyBlockedSteamIds(
+          user.steam_id,
+        );
+        if (blockedSteamIds.has(String(storedMessage.from.steam_id)))
+          return false;
+      }
+    }
+
+    const messageKey = `chat_${type}_${roomId}`;
+    const reactionKey = this.chatReactionKey(messageId, reaction);
+    const deletedKey = this.chatReactionDeletedKey(messageId);
+    const result = (await this.redis.eval(
+      CHAT_REACTION_TOGGLE_LUA,
+      3,
+      messageKey,
+      reactionKey,
+      deletedKey,
+      messageId,
+      expectedStoredMessage ?? "",
+      String(user.steam_id),
+      type === ChatLobbyType.Announcement ? "announcement" : "chat",
+    )) as [number, number, number, number?];
+
+    if (Number(result?.[0]) !== 1) return false;
+    void this.to(type, roomId, "reaction", {
+      messageId,
+      reaction,
+      count: Number(result[2]),
+      active: Number(result[1]) === 1,
+      actorSteamId: String(user.steam_id),
+    });
+    return true;
+  }
+
+  private isUuid(value: string): boolean {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    );
+  }
+
+  private chatReactionKey(messageId: string, reaction: string) {
+    return `chat:reaction:${messageId}:${reaction}`;
+  }
+
+  private chatReactionDeletedKey(messageId: string) {
+    return `chat:reaction:deleted:${messageId}`;
+  }
+
+  private async hasCurrentChatRoomAccess(
+    client: FiveStackWebSocketClient,
+    type: ChatLobbyType,
+    id: string,
+    user: User,
+  ): Promise<boolean> {
+    if (
+      !(await this.getUserData(type, id, String(user.steam_id))) ||
+      !(await this.redis.sismember(
+        this.sessionsKey(type, id, String(user.steam_id)),
+        String(client.id),
+      ))
+    ) {
+      return false;
+    }
+
+    switch (type) {
+      case ChatLobbyType.Match: {
+        const { matches_by_pk } = await this.hasuraService.query(
+          {
+            matches_by_pk: {
+              __args: { id },
+              is_coach: true,
+              is_organizer: true,
+              is_in_lineup: true,
+            },
+          },
+          user.steam_id,
+        );
+        return Boolean(
+          matches_by_pk &&
+          (matches_by_pk.is_coach ||
+            matches_by_pk.is_organizer ||
+            matches_by_pk.is_in_lineup),
+        );
+      }
+      case ChatLobbyType.MatchTeam: {
+        const [matchId, lineupId] = id.split(":");
+        if (!matchId || !lineupId) return false;
+        const { match_lineups_by_pk } = await this.hasuraService.query(
+          {
+            match_lineups_by_pk: {
+              __args: { id: lineupId },
+              id: true,
+              match_id: true,
+              coach_steam_id: true,
+              is_on_lineup: true,
+              match: { status: true },
+            },
+          },
+          user.steam_id,
+        );
+        const isFinishedMatchAdmin =
+          MATCH_ENDED_STATUSES.includes(
+            match_lineups_by_pk?.match?.status as string,
+          ) && isRoleAbove(user.role, "administrator");
+        return Boolean(
+          match_lineups_by_pk &&
+          String(match_lineups_by_pk.match_id) === matchId &&
+          (match_lineups_by_pk.is_on_lineup ||
+            String(match_lineups_by_pk.coach_steam_id) ===
+              String(user.steam_id) ||
+            isFinishedMatchAdmin),
+        );
+      }
+      case ChatLobbyType.MatchMaking: {
+        const { lobby_players_by_pk } = await this.hasuraService.query({
+          lobby_players_by_pk: {
+            __args: { lobby_id: id, steam_id: user.steam_id },
+            status: true,
+          },
+        });
+        return lobby_players_by_pk?.status === "Accepted";
+      }
+      case ChatLobbyType.Tournament:
+        return this.canAccessTournamentChat(id, user.steam_id);
+      case ChatLobbyType.Draft: {
+        if (isRoleAbove(user.role, "match_organizer")) return true;
+        const { draft_games } = await this.hasuraService.query({
+          draft_games: {
+            __args: {
+              where: {
+                id: { _eq: id },
+                _or: [
+                  { access: { _eq: "Open" } },
+                  { host_steam_id: { _eq: user.steam_id } },
+                  { players: { steam_id: { _eq: user.steam_id } } },
+                ],
+              },
+            },
+            id: true,
+          },
+        });
+        return draft_games.length > 0;
+      }
+      case ChatLobbyType.Organizer:
+        return isRoleAbove(user.role, "match_organizer");
+      case ChatLobbyType.Global:
+        return isRoleAbove(user.role, "verified_user");
+      case ChatLobbyType.Direct: {
+        const parties = id.split(":");
+        if (parties.length !== 2 || !parties.includes(String(user.steam_id)))
+          return false;
+        const otherSteamId = parties.find(
+          (steamId) => steamId !== String(user.steam_id),
+        );
+        if (!otherSteamId) return false;
+        const { friends } = await this.hasuraService.query({
+          friends: {
+            __args: {
+              where: {
+                status: { _eq: "Accepted" },
+                _or: [
+                  {
+                    player_steam_id: { _eq: user.steam_id },
+                    other_player_steam_id: { _eq: otherSteamId },
+                  },
+                  {
+                    player_steam_id: { _eq: otherSteamId },
+                    other_player_steam_id: { _eq: user.steam_id },
+                  },
+                ],
+              },
+              limit: 1,
+            },
+            player_steam_id: true,
+          },
+        });
+        return (
+          friends.length > 0 &&
+          !(await this.blocks.isBlockedEitherDirection(
+            user.steam_id,
+            otherSteamId,
+          ))
+        );
+      }
+      case ChatLobbyType.Announcement:
+        return id === ANNOUNCEMENTS_LOBBY_ID;
+      case ChatLobbyType.Team:
+      default:
+        return false;
+    }
   }
 
   private async getCurrentUser(steamId: string): Promise<User | undefined> {
@@ -861,6 +1161,70 @@ export class ChatService {
       [type, id],
     );
     return new Set(rows.map((row) => row.message_id));
+  }
+
+  private async addReactionStateToMessages(
+    messages: Array<Record<string, any>>,
+    steamId: string,
+  ) {
+    if (!messages.length) return messages;
+
+    const visible = messages.filter(
+      (message) =>
+        this.isUuid(String(message?.id ?? "")) && !message.blocked,
+    );
+    const reactionsByMessage = new Map<
+      string,
+      Array<{ reaction: ChatReactionId; count: number; reacted: boolean }>
+    >();
+
+    if (visible.length) {
+      try {
+        const pipeline = this.redis.pipeline();
+        for (const message of visible) {
+          for (const reaction of CHAT_REACTION_IDS) {
+            const key = this.chatReactionKey(String(message.id), reaction);
+            pipeline.scard(key);
+            pipeline.sismember(key, String(steamId));
+          }
+        }
+
+        const result = await pipeline.exec();
+        let commandIndex = 0;
+        for (const message of visible) {
+          const reactions: Array<{
+            reaction: ChatReactionId;
+            count: number;
+            reacted: boolean;
+          }> = [];
+          for (const reaction of CHAT_REACTION_IDS) {
+            const [countError, countValue] = result?.[commandIndex++] ?? [];
+            const [memberError, memberValue] = result?.[commandIndex++] ?? [];
+            if (countError || memberError) continue;
+            const count = Number(countValue);
+            if (!Number.isFinite(count) || count <= 0) continue;
+            reactions.push({
+              reaction,
+              count,
+              reacted: Number(memberValue) === 1,
+            });
+          }
+          reactionsByMessage.set(String(message.id), reactions);
+        }
+      } catch (error) {
+        this.logger.warn(
+          `[chat] unable to load message reactions: ${(error as Error)?.message}`,
+        );
+      }
+    }
+
+    return messages.map((message) => ({
+      ...message,
+      reactions:
+        this.isUuid(String(message?.id ?? "")) && !message.blocked
+          ? (reactionsByMessage.get(String(message.id)) ?? [])
+          : [],
+    }));
   }
 
   // Replaces a message's content with a placeholder when its sender is in
@@ -1871,6 +2235,16 @@ export class ChatService {
         [messageId, currentActor.steam_id, roomId],
       );
       audited = rows.length > 0;
+      if (audited) {
+        try {
+          await this.clearChatMessageReactions(messageId);
+        } catch (error) {
+          this.logger.warn(
+            `[chat] unable to remove announcement reactions ${messageId}`,
+            error,
+          );
+        }
+      }
     } else {
       const messageKey = `chat_${type}_${roomId}`;
       const raw = await this.redis.hget(messageKey, messageId);
@@ -1920,6 +2294,14 @@ export class ChatService {
       audited = rows.length > 0;
 
       if (audited) {
+        try {
+          await this.clearChatMessageReactions(messageId);
+        } catch (error) {
+          this.logger.warn(
+            `[chat] unable to remove reactions for deleted message ${type}:${roomId}:${messageId}`,
+            error,
+          );
+        }
         if (stored.media?.id) {
           try {
             await this.removeVideoMedia(String(stored.media.id));
@@ -2395,7 +2777,8 @@ export class ChatService {
       // (see editAnnouncement/deleteAnnouncement) -- every other chat
       // type has no equivalent since nothing else persists messages.
       | "edited"
-      | "deleted",
+      | "deleted"
+      | "reaction",
     data: Record<string, any>,
     // Optional per-recipient override -- used only for live "chat" events
     // on shared rooms, so a viewer who blocked the sender gets a redacted
@@ -2655,6 +3038,32 @@ export class ChatService {
     return userData ? JSON.parse(userData) : null;
   }
 
+  private async clearChatMessageReactions(messageId: string) {
+    const keys = [
+      this.chatReactionDeletedKey(messageId),
+      ...CHAT_REACTION_IDS.map((reaction) =>
+        this.chatReactionKey(messageId, reaction),
+      ),
+    ];
+    await this.redis.eval(
+      CHAT_REACTION_DELETE_LUA,
+      keys.length,
+      ...keys,
+      60 * 60 * 24,
+    );
+  }
+
+  private async expireChatMessageReactions(
+    messageId: string,
+    ttlSeconds: number,
+  ) {
+    const pipeline = this.redis.pipeline();
+    for (const reaction of CHAT_REACTION_IDS) {
+      pipeline.expire(this.chatReactionKey(messageId, reaction), ttlSeconds);
+    }
+    await pipeline.exec();
+  }
+
   private async setUserData(
     type: ChatLobbyType,
     id: string,
@@ -2713,6 +3122,7 @@ export class ChatService {
           field,
         ]),
       );
+      await this.expireChatMessageReactions(field, messageTtlSeconds);
 
       const parsed = JSON.parse(message);
       if (parsed.media?.type === "video" && parsed.media.id) {

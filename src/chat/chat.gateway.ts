@@ -21,6 +21,7 @@ export class ChatGateway {
     data: {
       id: string;
       type: ChatLobbyType;
+      historyRequestId?: number;
     },
     @ConnectedSocket() client: FiveStackWebSocketClient,
   ) {
@@ -28,7 +29,12 @@ export class ChatGateway {
       return;
     }
 
-    await this.chat.joinMatchLobby(client, data.type, data.id);
+    await this.chat.joinMatchLobby(
+      client,
+      data.type,
+      data.id,
+      data.historyRequestId,
+    );
   }
 
   @SubscribeMessage("lobby:leave")
@@ -144,6 +150,36 @@ export class ChatGateway {
     }
 
     await this.chat.editAnnouncement(client.user, data.id, data.message);
+  }
+
+  @SubscribeMessage("lobby:chat:reaction")
+  async toggleReaction(
+    @MessageBody()
+    data: {
+      id: string;
+      type: ChatLobbyType;
+      messageId: string;
+      reaction: string;
+    },
+    @ConnectedSocket() client: FiveStackWebSocketClient,
+  ) {
+    if (
+      !client.user ||
+      !data.id ||
+      !data.type ||
+      !data.messageId ||
+      !data.reaction
+    ) {
+      return;
+    }
+
+    await this.chat.toggleChatMessageReaction(
+      client,
+      data.type,
+      data.id,
+      data.messageId,
+      data.reaction,
+    );
   }
 
   @SubscribeMessage("lobby:chat:delete")
