@@ -13,6 +13,7 @@ import { MatchmakingQueues } from "./enums/MatchmakingQueues";
 import { MatchmakingLobbyService } from "./matchmaking-lobby.service";
 import { RedisManagerService } from "../redis/redis-manager/redis-manager.service";
 import { MatchAssistantService } from "src/matches/match-assistant/match-assistant.service";
+import { PushNotificationsService } from "src/notifications/push/push-notifications.service";
 import {
   getMatchmakingQueueCacheKey,
   getMatchmakingConformationCacheKey,
@@ -30,6 +31,7 @@ export class MatchmakeService {
     public readonly redisManager: RedisManagerService,
     public readonly matchAssistant: MatchAssistantService,
     private matchmakingLobbyService: MatchmakingLobbyService,
+    private readonly pushNotifications: PushNotificationsService,
     @InjectQueue(MatchmakingQueues.Matchmaking) private queue: Queue,
   ) {
     this.redis = this.redisManager.getConnection();
@@ -679,6 +681,21 @@ export class MatchmakeService {
     }
 
     await this.cancelMatchMakingDueToReadyCheck(confirmationId);
+
+    const steamIds = [...team1.players, ...team2.players].map(
+      (p) => p.steam_id,
+    );
+    this.pushNotifications
+      .sendMatchFound(steamIds, {
+        title: "Match found",
+        body: "Tap to accept your match.",
+        entityId: confirmationId,
+      })
+      .catch((error) =>
+        this.logger.warn(
+          `[matchmaking] push match-found notification failed: ${(error as Error)?.message}`,
+        ),
+      );
   }
 
   public async cancelMatchMakingDueToReadyCheck(confirmationId: string) {

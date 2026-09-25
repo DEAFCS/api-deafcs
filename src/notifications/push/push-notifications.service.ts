@@ -221,9 +221,47 @@ export class PushNotificationsService {
       type: "AdminCall",
       entity_id: data.entityId,
       // Read by sw-push.js to apply the stronger, harder-to-miss
-      // treatment (vibration, requireInteraction) an incoming call
-      // deserves over an ordinary notification.
-      callRing: true,
+      // treatment (vibration, requireInteraction) a time-boxed event
+      // needing an immediate response deserves over an ordinary
+      // notification. Its own tag so an incoming call and a match-found
+      // ring (below) don't replace each other's OS notification if both
+      // happen to land at once.
+      urgent: true,
+      tag: "admin-call-ring",
+    });
+
+    await Promise.all(
+      filtered.map((row) => this.sendToSubscription(row, payload)),
+    );
+  }
+
+  // Match found, ready-check started (see MatchmakeService
+  // .createMatchConfirmation). Same reasoning as sendCallRing above: a
+  // live, ~30-second accept window, not a persistent notification, so
+  // this bypasses the notifications table and pushes directly to every
+  // player in the match instead of just one target.
+  public async sendMatchFound(
+    steamIds: string[],
+    data: { title: string; body: string; entityId: string },
+  ): Promise<void> {
+    if (!this.vapidConfigured || !steamIds.length) return;
+
+    const rows = await this.postgres.query<SubscriptionRow[]>(
+      `SELECT id, steam_id, endpoint, p256dh, auth FROM public.push_subscriptions WHERE steam_id = ANY($1)`,
+      [steamIds],
+    );
+    if (!rows.length) return;
+
+    const filtered = await this.filterByPreference(rows, "match_found");
+    if (!filtered.length) return;
+
+    const payload = JSON.stringify({
+      title: data.title,
+      body: data.body,
+      type: "MatchFound",
+      entity_id: data.entityId,
+      urgent: true,
+      tag: "match-found-ring",
     });
 
     await Promise.all(
