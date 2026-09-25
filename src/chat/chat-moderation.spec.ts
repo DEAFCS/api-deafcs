@@ -55,6 +55,10 @@ describe("ChatService website moderation", () => {
     );
   });
 
+  function client(user: User) {
+    return { id: `socket-${user.steam_id}`, user: { ...user } } as any;
+  }
+
   it("lets a current site administrator delete a Redis-backed message and broadcasts removal", async () => {
     hasura.query.mockResolvedValue({ players_by_pk: administrator });
     redis.hget.mockResolvedValue(
@@ -70,7 +74,7 @@ describe("ChatService website moderation", () => {
 
     await expect(
       service.deleteMessage(
-        administrator,
+        client(administrator),
         ChatLobbyType.Global,
         "global",
         "message-1",
@@ -106,14 +110,17 @@ describe("ChatService website moderation", () => {
 
     await expect(
       service.deleteMessage(
-        player,
+        client(player),
         ChatLobbyType.Global,
         "global",
         "message-1",
       ),
     ).resolves.toBe(false);
 
-    expect(redis.hget).not.toHaveBeenCalled();
+    expect(redis.hget).not.toHaveBeenCalledWith(
+      "chat_global_global",
+      "message-1",
+    );
     expect(postgres.query).not.toHaveBeenCalled();
     expect(service.to).not.toHaveBeenCalled();
   });
@@ -125,7 +132,7 @@ describe("ChatService website moderation", () => {
 
     await expect(
       service.deleteMessage(
-        administrator,
+        client(administrator),
         ChatLobbyType.Global,
         "global",
         "message-1",
@@ -141,7 +148,15 @@ describe("ChatService website moderation", () => {
     websiteRestrictions.getStatus.mockResolvedValue({ active: true });
     jest.spyOn(service, "to").mockResolvedValue(undefined);
 
-    await service.editAnnouncement(administrator, "announcement-1", "edited text");
+    hasura.query.mockResolvedValue({ players_by_pk: administrator });
+
+    await expect(
+      service.editAnnouncement(
+        client(administrator),
+        "323e4567-e89b-42d3-a456-426614174000",
+        "edited text",
+      ),
+    ).resolves.toBe(false);
 
     expect(postgres.query).not.toHaveBeenCalled();
     expect(service.to).not.toHaveBeenCalled();

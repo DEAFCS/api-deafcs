@@ -137,19 +137,42 @@ export class ChatGateway {
     );
   }
 
-  // Admin-only announcement editing -- ChatService re-checks the role
-  // itself rather than trusting this handler, same as every other
-  // permission check in chat living in the service, not the gateway.
+  // Author-only, time-limited editing -- ChatService re-checks ownership,
+  // age, room access, restriction and mute itself rather than trusting
+  // this handler, same as every other permission check in chat living in
+  // the service, not the gateway. Payloads without a type (older web
+  // builds) are announcement edits. Never relayed to a game server.
   @SubscribeMessage("lobby:chat:edit")
   async editMessage(
-    @MessageBody() data: { id: string; message: string },
+    @MessageBody()
+    data: {
+      id: string;
+      message: string;
+      type?: ChatLobbyType;
+      roomId?: string;
+    },
     @ConnectedSocket() client: FiveStackWebSocketClient,
   ) {
-    if (!client.user || !data.id || !data.message) {
+    if (!client.user || !data?.id || typeof data.message !== "string") {
       return;
     }
 
-    await this.chat.editAnnouncement(client.user, data.id, data.message);
+    if (!data.type || data.type === ChatLobbyType.Announcement) {
+      await this.chat.editAnnouncement(client, data.id, data.message);
+      return;
+    }
+
+    if (!data.roomId) {
+      return;
+    }
+
+    await this.chat.editChatMessage(
+      client,
+      data.type,
+      data.roomId,
+      data.id,
+      data.message,
+    );
   }
 
   @SubscribeMessage("lobby:chat:reaction")
@@ -192,6 +215,6 @@ export class ChatGateway {
       return;
     }
 
-    await this.chat.deleteMessage(client.user, data.type, data.roomId, data.id);
+    await this.chat.deleteMessage(client, data.type, data.roomId, data.id);
   }
 }

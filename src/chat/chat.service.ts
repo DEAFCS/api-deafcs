@@ -76,6 +76,38 @@ const CHAT_REACTION_TOGGLE_LUA = `
   return {1, active, count, ttlMs or 0}
 `;
 
+// Authors may edit/delete their own website chat message for this long
+// after it was sent (server clock, inclusive). Administrators keep
+// moderation delete at any age, but never edit someone else's message.
+export const CHAT_MESSAGE_SELF_SERVICE_WINDOW_MS = 10 * 60 * 1000;
+
+// Normal sending has no explicit length limit; edits are capped so the
+// edit path can't be used to grow an existing message without bound.
+export const CHAT_MESSAGE_EDIT_MAX_LENGTH = 2000;
+
+// Stored timestamps come from the API's own clock, so only a tiny skew
+// between pods is tolerated for a message that appears to be "from the
+// future".
+const CHAT_MESSAGE_CLOCK_SKEW_MS = 5000;
+
+// Compare-and-swap edit of one Redis hash field. HSET on an existing
+// field clears its field TTL, so the remaining HPTTL is read first and
+// restored afterwards -- an edit must never extend a message's lifetime.
+// Returns {1, ttlMs} on success, {0, reason} otherwise.
+const CHAT_MESSAGE_EDIT_LUA = `
+  if redis.call('EXISTS', KEYS[2]) == 1 then return {0, -3} end
+  local stored = redis.call('HGET', KEYS[1], ARGV[1])
+  if not stored or stored ~= ARGV[2] then return {0, -2} end
+  local fieldTtl = redis.call('HPTTL', KEYS[1], 'FIELDS', 1, ARGV[1])
+  local ttlMs = tonumber(fieldTtl[1])
+  if not ttlMs or ttlMs == -2 or ttlMs == 0 then return {0, -2} end
+  redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
+  if ttlMs > 0 then
+    redis.call('HPEXPIRE', KEYS[1], ttlMs, 'FIELDS', 1, ARGV[1])
+  end
+  return {1, ttlMs}
+`;
+
 const CHAT_REACTION_DELETE_LUA = `
   redis.call('SET', KEYS[1], '1', 'EX', ARGV[1])
   for i = 2, #KEYS do redis.call('DEL', KEYS[i]) end
@@ -2156,64 +2188,234 @@ export class ChatService {
     return rows.reverse().map((row) => this.formatAnnouncementRow(row));
   }
 
-  // Admin-only (re-checked here, not just trusted from the caller) --
-  // edits an announcement in place and pushes the new text to everyone
-  // currently viewing the channel. Announcements are the only chat type
-  // with persistence, so this has no equivalent for any other lobby type.
-  public async editAnnouncement(admin: User, id: string, _message: string) {
-    if (!isRoleAbove(admin.role, "administrator")) {
-      return;
-    }
+  private selfServiceCutoff(now = Date.now()) {
+    return new Date(now - CHAT_MESSAGE_SELF_SERVICE_WINDOW_MS);
+  }
 
-    if ((await this.websiteRestrictions.getStatus(admin.steam_id)).active) {
-      return;
+  private isWithinSelfServiceWindow(timestamp: unknown, now = Date.now()) {
+    if (typeof timestamp !== "string" && !(timestamp instanceof Date)) {
+      return false;
     }
+    const createdAt = new Date(timestamp).getTime();
+    if (Number.isNaN(createdAt)) return false;
+    const age = now - createdAt;
+    return (
+      age >= -CHAT_MESSAGE_CLOCK_SKEW_MS &&
+      age <= CHAT_MESSAGE_SELF_SERVICE_WINDOW_MS
+    );
+  }
 
+  // A stored Redis message the actor wrote on the website themselves,
+  // still inside the self-service window. Game-relayed lines (source
+  // "game") and anything without a real author never qualify, so no
+  // ownership is ever inferred for automatic/system messages.
+  private isOwnRecentWebsiteMessage(
+    stored: Record<string, any>,
+    messageId: string,
+    actorSteamId: string,
+  ) {
+    return (
+      String(stored?.id ?? "") === messageId &&
+      Boolean(stored?.from?.steam_id) &&
+      String(stored.from.steam_id) === String(actorSteamId) &&
+      stored?.source === "website" &&
+      this.isWithinSelfServiceWindow(stored?.timestamp)
+    );
+  }
+
+  private normalizeEditedMessage(_message: unknown): string | undefined {
+    if (typeof _message !== "string") return;
     const message = _message.trim();
-    if (!message) {
-      return;
-    }
+    if (!message || message.length > CHAT_MESSAGE_EDIT_MAX_LENGTH) return;
+    return message;
+  }
+
+  // Author-only, within CHAT_MESSAGE_SELF_SERVICE_WINDOW_MS of creation.
+  // Posting announcements stays administrator-only, so editing does too,
+  // but the administrator role grants no override over another author's
+  // announcement. Re-checked here, never trusted from the caller.
+  public async editAnnouncement(
+    client: FiveStackWebSocketClient,
+    id: string,
+    _message: string,
+  ): Promise<boolean> {
+    const message = this.normalizeEditedMessage(_message);
+    if (!message || !id || !this.isUuid(id)) return false;
+
+    const actor = await this.refreshClientUser(client);
+    if (!actor || !isRoleAbove(actor.role, "administrator")) return false;
+    if ((await this.websiteRestrictions.getStatus(actor.steam_id)).active)
+      return false;
+    if ((await this.getWebsiteChatMuteStatus(actor.steam_id)).active)
+      return false;
+    if (
+      !(await this.hasCurrentChatRoomAccess(
+        client,
+        ChatLobbyType.Announcement,
+        ANNOUNCEMENTS_LOBBY_ID,
+        actor,
+      ))
+    )
+      return false;
 
     const rows = await this.postgres.query<Array<{ id: string }>>(
       `UPDATE public.announcements
           SET message = $2, updated_at = now()
-        WHERE id = $1 AND deleted_at IS NULL
+        WHERE id = $1::uuid
+          AND deleted_at IS NULL
+          AND author_steam_id = $3::bigint
+          AND created_at >= $4::timestamptz
         RETURNING id`,
-      [id, message],
+      [id, message, actor.steam_id, this.selfServiceCutoff().toISOString()],
     );
 
     if (!rows[0]) {
-      return;
+      return false;
     }
 
     void this.to(ChatLobbyType.Announcement, ANNOUNCEMENTS_LOBBY_ID, "edited", {
       id,
       message,
     });
+    return true;
   }
 
+  // Author-only edit of an ordinary Redis-backed website text message,
+  // within CHAT_MESSAGE_SELF_SERVICE_WINDOW_MS. Only the text changes: id,
+  // timestamp, author, source and remaining TTL are preserved. This is a
+  // website-history edit only -- it is never relayed to a game server and
+  // creates no notification or new "chat" event.
+  public async editChatMessage(
+    client: FiveStackWebSocketClient,
+    type: ChatLobbyType,
+    roomId: string,
+    messageId: string,
+    _message: string,
+  ): Promise<boolean> {
+    if (
+      !roomId ||
+      !messageId ||
+      !Object.values(ChatLobbyType).includes(type) ||
+      type === ChatLobbyType.Announcement
+    ) {
+      return false;
+    }
+    const message = this.normalizeEditedMessage(_message);
+    if (!message) return false;
+
+    const actor = await this.refreshClientUser(client);
+    if (!actor) return false;
+    if ((await this.websiteRestrictions.getStatus(actor.steam_id)).active)
+      return false;
+    // A muted player must not be able to "post" new content by editing.
+    if ((await this.getWebsiteChatMuteStatus(actor.steam_id)).active)
+      return false;
+    if (!(await this.hasCurrentChatRoomAccess(client, type, roomId, actor)))
+      return false;
+
+    const messageKey = `chat_${type}_${roomId}`;
+    const raw = await this.redis.hget(messageKey, messageId);
+    if (!raw) return false;
+
+    let stored: Record<string, any>;
+    try {
+      stored = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+
+    if (
+      !this.isOwnRecentWebsiteMessage(stored, messageId, actor.steam_id) ||
+      typeof stored.message !== "string" ||
+      !stored.message.trim() ||
+      stored.media ||
+      stored.blocked
+    ) {
+      return false;
+    }
+
+    if ((await this.getDeletedMessageIds(type, roomId)).has(messageId))
+      return false;
+
+    const updated = { ...stored, message };
+    const result = (await this.redis.eval(
+      CHAT_MESSAGE_EDIT_LUA,
+      2,
+      messageKey,
+      this.chatReactionDeletedKey(messageId),
+      messageId,
+      raw,
+      JSON.stringify(updated),
+    )) as [number, number];
+    if (Number(result?.[0]) !== 1) return false;
+
+    const authorSteamId = String(stored.from.steam_id);
+    const payload = { id: messageId, message };
+    if (type === ChatLobbyType.Direct) {
+      void this.to(type, roomId, "edited", payload);
+    } else {
+      // Same per-recipient redaction as a live "chat" event: a viewer who
+      // blocked the author must not receive the new text via an edit.
+      void this.to(
+        type,
+        roomId,
+        "edited",
+        payload,
+        async (recipientSteamId) => {
+          if (recipientSteamId === authorSteamId) return undefined;
+          if (!(await this.blocks.hasBlocked(recipientSteamId, authorSteamId)))
+            return undefined;
+          const redacted = this.redactIfBlocked(
+            updated,
+            new Set([authorSteamId]),
+          );
+          return { id: messageId, message: redacted.message };
+        },
+      );
+    }
+    return true;
+  }
+
+  // Delete policy (re-checked here, never trusted from the caller):
+  //  - the author may delete their own website message within
+  //    CHAT_MESSAGE_SELF_SERVICE_WINDOW_MS, while still in the room
+  //    (allowed even while website-chat-muted: removal posts nothing new);
+  //  - an administrator may delete any auditable message at any age for
+  //    moderation, with the same reach as before.
+  // Both paths write the same chat_message_deletions audit row, recording
+  // who deleted it.
   public async deleteMessage(
-    actor: User,
+    client: FiveStackWebSocketClient,
     type: ChatLobbyType,
     roomId: string,
     messageId: string,
   ): Promise<boolean> {
-    const currentActor = await this.getCurrentUser(actor.steam_id);
-    if (!currentActor || !isRoleAbove(currentActor.role, "administrator")) {
+    if (!roomId || !messageId || !Object.values(ChatLobbyType).includes(type)) {
       return false;
     }
 
-    if ((await this.websiteRestrictions.getStatus(actor.steam_id)).active) {
+    const currentActor = await this.refreshClientUser(client);
+    if (!currentActor) {
       return false;
     }
 
-    if (!Object.values(ChatLobbyType).includes(type)) {
+    if (
+      (await this.websiteRestrictions.getStatus(currentActor.steam_id)).active
+    ) {
+      return false;
+    }
+
+    const isAdministrator = isRoleAbove(currentActor.role, "administrator");
+    if (
+      !isAdministrator &&
+      !(await this.hasCurrentChatRoomAccess(client, type, roomId, currentActor))
+    ) {
       return false;
     }
 
     let audited = false;
     if (type === ChatLobbyType.Announcement) {
-      if (roomId !== ANNOUNCEMENTS_LOBBY_ID) {
+      if (roomId !== ANNOUNCEMENTS_LOBBY_ID || !this.isUuid(messageId)) {
         return false;
       }
       const rows = await this.postgres.query<Array<{ message_id: string }>>(
@@ -2221,6 +2423,11 @@ export class ChatService {
            UPDATE public.announcements
               SET deleted_at = now(), deleted_by_steam_id = $2::bigint
             WHERE id = $1::uuid AND deleted_at IS NULL
+              AND (
+                $4::boolean
+                OR (author_steam_id = $2::bigint
+                    AND created_at >= $5::timestamptz)
+              )
             RETURNING id, author_steam_id, message, created_at, deleted_at
          )
          INSERT INTO public.chat_message_deletions (
@@ -2232,7 +2439,13 @@ export class ChatService {
            FROM target
          ON CONFLICT (room_type, room_id, message_id) DO NOTHING
          RETURNING message_id`,
-        [messageId, currentActor.steam_id, roomId],
+        [
+          messageId,
+          currentActor.steam_id,
+          roomId,
+          isAdministrator,
+          this.selfServiceCutoff().toISOString(),
+        ],
       );
       audited = rows.length > 0;
       if (audited) {
@@ -2271,6 +2484,17 @@ export class ChatService {
         this.logger.warn(
           `[chat] refusing to delete incomplete stored message ${type}:${roomId}:${messageId}`,
         );
+        return false;
+      }
+
+      if (
+        !isAdministrator &&
+        !this.isOwnRecentWebsiteMessage(
+          stored,
+          messageId,
+          currentActor.steam_id,
+        )
+      ) {
         return false;
       }
 
@@ -2773,9 +2997,8 @@ export class ChatService {
       | "call-joined"
       | "call-left"
       | "call-joining"
-      // Announcement-only: an admin edited/removed a persisted message
-      // (see editAnnouncement/deleteAnnouncement) -- every other chat
-      // type has no equivalent since nothing else persists messages.
+      // An already-delivered message was edited or removed (see
+      // editAnnouncement/editChatMessage/deleteMessage).
       | "edited"
       | "deleted"
       | "reaction",
