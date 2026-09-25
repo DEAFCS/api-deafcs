@@ -302,6 +302,7 @@ select_permissions:
         - auto_start
         - created_at
         - description
+        - finished_at
         - homepage
         - id
         - latitude
@@ -347,6 +348,7 @@ select_permissions:
         - auto_start
         - created_at
         - description
+        - finished_at
         - discord_guild_id
         - discord_notifications_enabled
         - discord_voice_enabled
@@ -412,6 +414,7 @@ select_permissions:
         - auto_start
         - created_at
         - description
+        - finished_at
         - homepage
         - id
         - latitude
