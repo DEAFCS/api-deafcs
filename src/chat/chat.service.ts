@@ -42,11 +42,29 @@ type WebsiteChatMuteStatus = {
 // notification-click routing both rely on that equality.
 export const ANNOUNCEMENTS_LOBBY_ID = "announcement";
 
+// Terminal match statuses -- same set MatchActions.vue (frontend) and
+// notifyMatchPlayersOfSanction already treat as "this match is over".
+// Used to gate the post-match admin chat-log bypass in joinMatchLobby.
+const MATCH_ENDED_STATUSES: string[] = [
+  "Finished",
+  "Forfeit",
+  "Surrendered",
+  "Tie",
+  "Canceled",
+];
+
 @Injectable()
 export class ChatService {
   private redis: Redis;
 
   private expiresIn = 60 * 60 * 24;
+
+  // Match and team chat get a much longer retention than the default
+  // (see expiresIn) so an admin can still pull up the post-match chat
+  // log (see joinMatchLobby's Finished-match admin bypass below) days
+  // after the match itself has already dropped off the match page for
+  // everyone else. Every other lobby type keeps the default.
+  private static readonly MATCH_CHAT_TTL_SECONDS = 60 * 60 * 24 * 7;
 
   constructor(
     private readonly logger: Logger,
@@ -122,17 +140,34 @@ export class ChatService {
               match_id: true,
               coach_steam_id: true,
               is_on_lineup: true,
+              match: {
+                status: true,
+              },
             },
           },
           user.steam_id,
         );
+
+        // An admin can read either team's private chat, but only once the
+        // match is actually over -- unlike the shared Match-type chat
+        // above (already effectively admin-visible any time, since
+        // is_match_organizer.sql treats every administrator as an
+        // organizer of every match), peeking at a *live* team's private
+        // strategy chat would be a real fairness problem, not just a
+        // formality. Reported: an admin reviewing a finished match for
+        // toxicity had no way to open the other team's chat at all.
+        const isFinishedMatchAdmin =
+          MATCH_ENDED_STATUSES.includes(
+            match_lineups_by_pk?.match?.status as string,
+          ) && isRoleAbove(user.role, "administrator");
 
         if (
           !match_lineups_by_pk ||
           match_lineups_by_pk.match_id !== matchId ||
           (!match_lineups_by_pk.is_on_lineup &&
             String(match_lineups_by_pk.coach_steam_id) !==
-              String(user.steam_id))
+              String(user.steam_id) &&
+            !isFinishedMatchAdmin)
         ) {
           return;
         }
@@ -504,6 +539,13 @@ export class ChatService {
     skipCheck = false,
     clientId?: string,
     videoDraftId?: string,
+    // "game" only ever comes from ChatMessageEvent.ts (a message relayed
+    // in from the live CS2/CSS server's own chat) -- every other caller
+    // is the normal website chat box. Stored on the message so the post-
+    // match chat log can visibly tell the two apart (reported: an admin
+    // reviewing Match-type chat couldn't tell whether a line was typed
+    // in-game or on the DEAFCS site itself).
+    source: "website" | "game" = "website",
   ): Promise<{
     accepted: boolean;
     muteStatus?: WebsiteChatMuteStatus;
@@ -581,7 +623,10 @@ export class ChatService {
       HasuraService.PLAYER_ROLE_CACHE_KEY(player.steam_id),
     )) as unknown as e_player_roles_enum;
 
-    const messageTtlSeconds = this.expiresIn;
+    const messageTtlSeconds =
+      type === ChatLobbyType.Match || type === ChatLobbyType.MatchTeam
+        ? ChatService.MATCH_CHAT_TTL_SECONDS
+        : this.expiresIn;
     const timestamp = new Date();
     const message: Record<string, unknown> = {
       message: _message,
@@ -597,6 +642,7 @@ export class ChatService {
       // own other sessions) -- see chat.gateway.ts's comment on why this
       // is needed alongside from.steam_id.
       clientId,
+      source,
     };
 
     let sentVideoMediaId: string | undefined;

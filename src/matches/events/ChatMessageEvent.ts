@@ -31,6 +31,9 @@ export default class ChatMessageEvent extends MatchEventProcessor<{
       players_by_pk,
       this.data.message,
       true,
+      undefined,
+      undefined,
+      "game",
     );
   }
 }
