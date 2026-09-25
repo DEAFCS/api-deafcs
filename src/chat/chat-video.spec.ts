@@ -452,9 +452,25 @@ describe("ChatService temporary video drafts", () => {
       "match-1",
     );
 
+    const matchChatTtlSeconds = 7 * 24 * 60 * 60;
     expect(delayedJob.changeDelay).toHaveBeenCalledWith(
-      37 * 1000 + 60 * 60 * 1000 + 1000,
+      matchChatTtlSeconds * 1000 + 60 * 60 * 1000 + 1000,
     );
+    expect(redis.sendCommand.mock.calls.at(-1)?.[0].args).toEqual([
+      "chat_match_match-1",
+      String(matchChatTtlSeconds),
+      "FIELDS",
+      "1",
+      session!.id,
+    ]);
+    expect(
+      redis.set.mock.calls.some(
+        ([key, , ...args]: [string, ...any[]]) =>
+          key === `chat_video_media:${uploaded!.mediaId}` &&
+          args.includes("EX") &&
+          args.includes(matchChatTtlSeconds),
+      ),
+    ).toBe(true);
     expect(hashes.get("chat_match_match-1")?.has(session!.id)).toBe(true);
     const media = JSON.parse(values.get(`chat_video_media:${uploaded!.mediaId}`)!);
     expect(media).toMatchObject({

@@ -79,6 +79,26 @@ export class TournamentsController {
       await this.tournamentVoice.removeTournamentVoice(tournamentId);
     }
 
+    // Records exactly when the tournament actually finished so the chat
+    // sidebar can keep its chat around for a grace period afterward
+    // (see MatchLobbyStore's subscribeToChatTournaments on the web side)
+    // instead of yanking it the instant status flips -- reported bug:
+    // players lost access to a tournament's chat the moment it ended,
+    // with no way to finish up conversation there. Guarded on the old
+    // status so the update this triggers (another tournament_events
+    // firing with old.status already "Finished") doesn't loop.
+    if (status === "Finished" && data.old.status !== "Finished") {
+      await this.hasura.mutation({
+        update_tournaments_by_pk: {
+          __args: {
+            pk_columns: { id: tournamentId },
+            _set: { finished_at: new Date().toISOString() },
+          },
+          id: true,
+        },
+      });
+    }
+
     // Cancelling resets the bracket: drop the matches (and their demos) so
     // they can be regenerated. The bracket rows are first detached (their
     // match_id set to NULL) rather than left in place for an FK cascade, then

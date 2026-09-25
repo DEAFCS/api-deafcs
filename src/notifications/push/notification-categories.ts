@@ -62,6 +62,12 @@ export const NOTIFICATION_CATEGORIES: Record<string, string[]> = {
   // preference row through the exact same getPreferences/setPreference
   // machinery as every other category.
   calls: [],
+  // Match found, ready-check started (PushNotificationsService
+  // .sendMatchFound). Same reasoning as `calls` above: this is a live,
+  // ~30-second accept window, not a persistent notification, so it
+  // bypasses the notifications-table path entirely and gets its own
+  // settings toggle through this same category machinery.
+  match_found: [],
   // Admin/system broadcasts (role: administrator) -- only ever reach admins
   // in practice since handleNotificationInsert's role-broadcast check
   // already gates on isRoleAbove, but still exposed as its own category so

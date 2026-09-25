@@ -100,7 +100,12 @@ export class AdminCallService {
 
     await this.redis.set(
       AdminCallService.ringingKey(targetSteamId),
-      JSON.stringify({ adminSteamId: String(user.steam_id) }),
+      JSON.stringify({
+        adminSteamId: String(user.steam_id),
+        adminName: user.name ?? null,
+        adminAvatarUrl: user.avatar_url ?? null,
+        ringingAt: Date.now(),
+      }),
       "EX",
       AdminCallService.RINGING_TTL_SECONDS,
     );
@@ -166,6 +171,41 @@ export class AdminCallService {
       playerName: null,
       timedOut: true,
     });
+  }
+
+  // Lets a freshly (re)loaded client ask "is anyone ringing me right
+  // now" instead of relying purely on the live "admin-call:ring" socket
+  // event, which it can only ever catch while its own connection is
+  // already up. Reported bug: tapping the OS push notification worked
+  // fine when the phone had merely locked its screen (the page stayed
+  // alive in the background, quietly received the live event, and the
+  // overlay was just hidden behind the lock screen) -- but if the OS had
+  // fully evicted the tab/PWA from memory instead (e.g. actively
+  // browsing something else when the call came in), tapping the
+  // notification cold-started the app well after the ring had already
+  // fired, and it had no way left to learn about it. GlobalAdminCallNotifier
+  // calls this once on mount to close that gap.
+  public async getActiveRing(targetSteamId: string): Promise<{
+    targetSteamId: string;
+    adminName: string | null;
+    adminAvatarUrl: string | null;
+    remainingMs: number;
+  } | null> {
+    const raw = await this.redis.get(
+      AdminCallService.ringingKey(targetSteamId),
+    );
+    if (!raw) return null;
+
+    const { adminName, adminAvatarUrl, ringingAt } = JSON.parse(raw) as {
+      adminName: string | null;
+      adminAvatarUrl: string | null;
+      ringingAt?: number;
+    };
+    const elapsed = Date.now() - (ringingAt ?? Date.now());
+    const remainingMs = AdminCallService.RINGING_TTL_SECONDS * 1000 - elapsed;
+    if (remainingMs <= 0) return null;
+
+    return { targetSteamId, adminName, adminAvatarUrl, remainingMs };
   }
 
   private async notifyRingResolved(

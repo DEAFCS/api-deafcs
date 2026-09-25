@@ -16,6 +16,7 @@ import { CancelMatchMaking } from "./jobs/CancelMatchMaking";
 import { MatchmakingController } from "./matchmaking.controller";
 import { MarkPlayerOffline } from "./jobs/MarkPlayerOffline";
 import { TermsModule } from "src/terms/terms.module";
+import { NotificationsModule } from "src/notifications/notifications.module";
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { TermsModule } from "src/terms/terms.module";
     HasuraModule,
     CacheModule,
     TermsModule,
+    NotificationsModule,
     forwardRef(() => MatchesModule),
     BullModule.registerQueue({
       name: MatchmakingQueues.Matchmaking,

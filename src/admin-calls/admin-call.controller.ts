@@ -73,6 +73,18 @@ export class AdminCallController {
 
   // --- Session-gated: the caller's own logged-in tab ---
 
+  // Checked once on mount by GlobalAdminCallNotifier.vue to catch a ring
+  // that fired before this client connection existed (e.g. the app was
+  // fully evicted from memory when the ring went out, so it missed the
+  // live "admin-call:ring" socket event entirely) -- see
+  // AdminCallService.getActiveRing.
+  @Get("ringing/active")
+  public async activeRing(@Req() request: Request) {
+    const user = this.requireUser(request);
+    const ring = await this.adminCall.getActiveRing(String(user.steam_id));
+    return { ring };
+  }
+
   @Post(":targetSteamId/join")
   public async join(
     @Param("targetSteamId") targetSteamId: string,
