@@ -1,6 +1,7 @@
 import {
-  CHAT_MESSAGE_EDIT_MAX_LENGTH,
+  CHAT_MESSAGE_MAX_LENGTH,
   CHAT_MESSAGE_SELF_SERVICE_WINDOW_MS,
+  CHAT_MESSAGE_TOO_LONG_ERROR,
   ChatService,
 } from "./chat.service";
 import { ChatLobbyType } from "./enums/ChatLobbyTypes";
@@ -36,6 +37,86 @@ const players = new Map(
 );
 
 const messageId = "123e4567-e89b-42d3-a456-426614174000";
+
+// Minimal fake of Redis 7.4+/8 hash-field expiry semantics: HSET on an
+// existing field clears that field's expiry (as real Redis does).
+type FakeHash = {
+  values: Map<string, string>;
+  expireAt: Map<string, number>;
+};
+
+// Runs the *actual* CHAT_MESSAGE_EDIT_LUA text line by line, translating
+// the small Lua subset it uses into JS. Any unrecognised line or Redis
+// command throws, so the test can never silently skip part of the script.
+function runEditLua(
+  script: string,
+  keys: string[],
+  argv: string[],
+  hashes: Map<string, FakeHash>,
+  existingKeys: Set<string>,
+) {
+  const hash = (key: string) => {
+    if (!hashes.has(key))
+      hashes.set(key, { values: new Map(), expireAt: new Map() });
+    return hashes.get(key)!;
+  };
+  const call = (command: string, key: string, ...args: any[]) => {
+    switch (command) {
+      case "EXISTS":
+        return existingKeys.has(key) ? 1 : 0;
+      case "HGET":
+        return hash(key).values.get(args[0]) ?? false;
+      case "HSET":
+        hash(key).values.set(args[0], args[1]);
+        hash(key).expireAt.delete(args[0]);
+        return 0;
+      case "HPEXPIRETIME": {
+        const field = args[2];
+        if (!hash(key).values.has(field)) return [undefined, -2];
+        return [undefined, hash(key).expireAt.get(field) ?? -1];
+      }
+      case "HPEXPIREAT": {
+        const [at, , , field] = args;
+        hash(key).expireAt.set(field, Number(at));
+        return [undefined, 1];
+      }
+      default:
+        throw new Error(`unsupported redis command in test: ${command}`);
+    }
+  };
+  const expr = (lua: string) =>
+    lua
+      .replace(/redis\.call\(/g, "call(")
+      .replace(/~=/g, "!==")
+      .replace(/ == /g, " === ")
+      .replace(/\bnot /g, "!")
+      .replace(/ or /g, " || ")
+      .replace(/ and /g, " && ")
+      .replace(/tonumber\(/g, "Number(")
+      .replace(/\{([^{}]*)\}/g, "[$1]");
+  const body = script
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      let m: RegExpMatchArray | null;
+      if ((m = line.match(/^if (.+) then return (.+) end$/)))
+        return `if (${expr(m[1])}) return ${expr(m[2])};`;
+      if ((m = line.match(/^if (.+) then$/))) return `if (${expr(m[1])}) {`;
+      if (line === "end") return "}";
+      if ((m = line.match(/^local (\w+) = (.+)$/)))
+        return `let ${m[1]} = ${expr(m[2])};`;
+      if ((m = line.match(/^return (.+)$/))) return `return ${expr(m[1])};`;
+      if (/^redis\.call\(.+\)$/.test(line)) return `${expr(line)};`;
+      throw new Error(`unsupported Lua line in test: ${line}`);
+    })
+    .join("\n");
+  return new Function("call", "KEYS", "ARGV", body)(
+    call,
+    [undefined, ...keys],
+    [undefined, ...argv],
+  );
+}
 const announcementId = "223e4567-e89b-42d3-a456-426614174000";
 
 function storedMessage(overrides: Record<string, unknown> = {}) {
@@ -119,12 +200,12 @@ describe("ChatService timed self edit/delete", () => {
       get: jest.fn().mockResolvedValue(null),
       publish: jest.fn().mockResolvedValue(1),
       eval: jest.fn(async (script: string, _keys: number, ...args: any[]) => {
-        if (script.includes("HPEXPIRE")) {
+        if (script.includes("HPEXPIREAT")) {
           const [messageKey, , field, expected, next] = args;
           const current = messages.get(messageKey)?.get(field);
           if (current !== expected) return [0, -2];
           messages.get(messageKey)!.set(field, next);
-          return [1, 5 * MINUTE];
+          return [1, NOW + 5 * MINUTE];
         }
         return 1;
       }),
@@ -292,27 +373,131 @@ describe("ChatService timed self edit/delete", () => {
       expectNoMessageSideEffects();
     });
 
-    it("preserves the remaining field TTL instead of restarting retention", async () => {
-      put(ChatLobbyType.Global, "global", storedMessage());
-      join(author, ChatLobbyType.Global, "global");
-      await edit(author);
+    describe("exact hash-field expiry preservation (real script text)", () => {
+      const luaKeys = [
+        "chat_global_global",
+        `chat:reaction:deleted:${messageId}`,
+      ];
 
-      const script: string = redis.eval.mock.calls[0][0];
-      const hpttl = script.indexOf("HPTTL");
-      const hset = script.indexOf("'HSET'");
-      const hpexpire = script.indexOf("HPEXPIRE");
-      // Remaining TTL is read before the overwrite and re-applied after it,
-      // with the same ttlMs value, never a fresh HEXPIRE lifetime.
-      expect(hpttl).toBeGreaterThan(-1);
-      expect(hset).toBeGreaterThan(hpttl);
-      expect(hpexpire).toBeGreaterThan(hset);
-      expect(script).toMatch(
-        /HPEXPIRE', KEYS\[1\], ttlMs, 'FIELDS', 1, ARGV\[1\]/,
-      );
-      expect(script).not.toMatch(/HEXPIRE'/);
-      // A field that has already expired/vanished (-2) or has 0ms left is
-      // never resurrected by an edit.
-      expect(script).toMatch(/ttlMs == -2 or ttlMs == 0 then return \{0, -2\}/);
+      async function editScript() {
+        put(ChatLobbyType.Global, "global", storedMessage());
+        join(author, ChatLobbyType.Global, "global");
+        await edit(author);
+        return redis.eval.mock.calls[0][0] as string;
+      }
+
+      function fakeHash(value: string, expireAt?: number) {
+        return new Map<string, FakeHash>([
+          [
+            "chat_global_global",
+            {
+              values: new Map([[messageId, value]]),
+              expireAt: new Map(
+                expireAt === undefined ? [] : [[messageId, expireAt]],
+              ),
+            },
+          ],
+        ]);
+      }
+
+      it("uses absolute expiry commands, never a relative or fresh lifetime", async () => {
+        const script = await editScript();
+        const read = script.indexOf("'HPEXPIRETIME'");
+        const write = script.indexOf("'HSET'");
+        const restore = script.indexOf("'HPEXPIREAT'");
+        expect(read).toBeGreaterThan(-1);
+        expect(write).toBeGreaterThan(read);
+        expect(restore).toBeGreaterThan(write);
+        expect(script).not.toMatch(/'HPTTL'|'HPEXPIRE'|'HEXPIRE'|'PEXPIRE'/);
+      });
+
+      it("restores the exact original expiry timestamp after HSET clears it", async () => {
+        const script = await editScript();
+        const original = JSON.stringify(storedMessage());
+        const next = JSON.stringify({ ...storedMessage(), message: "edited" });
+        const expireAt = 1790000000123;
+        const hashes = fakeHash(original, expireAt);
+
+        const result = runEditLua(
+          script,
+          luaKeys,
+          [messageId, original, next],
+          hashes,
+          new Set(),
+        );
+
+        expect(result).toEqual([1, expireAt]);
+        const hash = hashes.get("chat_global_global")!;
+        expect(hash.values.get(messageId)).toBe(next);
+        expect(hash.expireAt.get(messageId)).toBe(expireAt);
+      });
+
+      it("keeps a persistent field persistent (no new lifetime)", async () => {
+        const script = await editScript();
+        const original = JSON.stringify(storedMessage());
+        const hashes = fakeHash(original);
+
+        const result = runEditLua(
+          script,
+          luaKeys,
+          [messageId, original, "next"],
+          hashes,
+          new Set(),
+        );
+
+        expect(result).toEqual([1, -1]);
+        const hash = hashes.get("chat_global_global")!;
+        expect(hash.values.get(messageId)).toBe("next");
+        expect(hash.expireAt.has(messageId)).toBe(false);
+      });
+
+      it("refuses a missing field, a changed value, or a deleted message without writing", async () => {
+        const script = await editScript();
+        const original = JSON.stringify(storedMessage());
+
+        const missing = new Map<string, FakeHash>();
+        expect(
+          runEditLua(
+            script,
+            luaKeys,
+            [messageId, original, "x"],
+            missing,
+            new Set(),
+          ),
+        ).toEqual([0, -2]);
+        expect(missing.get("chat_global_global")?.values.size ?? 0).toBe(0);
+
+        const changed = fakeHash("something else", 1790000000000);
+        expect(
+          runEditLua(
+            script,
+            luaKeys,
+            [messageId, original, "x"],
+            changed,
+            new Set(),
+          ),
+        ).toEqual([0, -2]);
+        expect(changed.get("chat_global_global")!.values.get(messageId)).toBe(
+          "something else",
+        );
+
+        const deleted = fakeHash(original, 1790000000000);
+        expect(
+          runEditLua(
+            script,
+            luaKeys,
+            [messageId, original, "x"],
+            deleted,
+            new Set([luaKeys[1]]),
+          ),
+        ).toEqual([0, -3]);
+        expect(deleted.get("chat_global_global")!.values.get(messageId)).toBe(
+          original,
+        );
+        expect(deleted.get("chat_global_global")!.expireAt.get(messageId)).toBe(
+          1790000000000,
+        );
+      });
     });
 
     it("allows exactly 10 minutes and refuses one millisecond later", async () => {
@@ -440,11 +625,11 @@ describe("ChatService timed self edit/delete", () => {
       join(author, ChatLobbyType.Global, "global");
       await expect(edit(author, "   ")).resolves.toBe(false);
       await expect(
-        edit(author, "x".repeat(CHAT_MESSAGE_EDIT_MAX_LENGTH + 1)),
+        edit(author, "x".repeat(CHAT_MESSAGE_MAX_LENGTH + 1)),
       ).resolves.toBe(false);
       expect(redis.eval).not.toHaveBeenCalled();
       await expect(
-        edit(author, "x".repeat(CHAT_MESSAGE_EDIT_MAX_LENGTH)),
+        edit(author, "x".repeat(CHAT_MESSAGE_MAX_LENGTH)),
       ).resolves.toBe(true);
     });
 
@@ -865,6 +1050,198 @@ describe("ChatService timed self edit/delete", () => {
         ).resolves.toBe(false);
         expect(announcementRows[0].deleted_at).toBeNull();
       });
+    });
+  });
+
+  describe("2,000 character website chat limit", () => {
+    beforeEach(() => {
+      redis.hset = jest.fn(
+        async (key: string, field: string, value: string) => {
+          if (!messages.has(key)) messages.set(key, new Map());
+          messages.get(key)!.set(field, value);
+          return 1;
+        },
+      );
+      redis.sendCommand = jest.fn().mockResolvedValue([1]);
+      jest
+        .spyOn(service as any, "notifyLobbyMembers")
+        .mockResolvedValue(undefined);
+      join(author, ChatLobbyType.Global, "global");
+    });
+
+    const send = (text: string, source: "website" | "game" = "website") =>
+      service.sendMessageToChat(
+        ChatLobbyType.Global,
+        "global",
+        author,
+        text,
+        source === "game",
+        undefined,
+        undefined,
+        source,
+      );
+
+    const storedTexts = () =>
+      [...(messages.get("chat_global_global")?.values() ?? [])].map(
+        (raw) => JSON.parse(raw).message,
+      );
+
+    it("accepts exactly 2,000 characters and stores them untruncated", async () => {
+      const text = "a".repeat(CHAT_MESSAGE_MAX_LENGTH);
+      await expect(send(text)).resolves.toEqual({ accepted: true });
+      expect(storedTexts()).toEqual([text]);
+    });
+
+    it("refuses 2,001 characters without storing, truncating or notifying", async () => {
+      await expect(
+        send("a".repeat(CHAT_MESSAGE_MAX_LENGTH + 1)),
+      ).resolves.toEqual({
+        accepted: false,
+        tooLong: true,
+      });
+      expect(storedTexts()).toEqual([]);
+      expect(redis.hset).not.toHaveBeenCalled();
+      expect(service.to).not.toHaveBeenCalled();
+    });
+
+    it("applies to announcement posts too", async () => {
+      join(admin, ChatLobbyType.Announcement, "announcement");
+      await expect(
+        service.sendMessageToChat(
+          ChatLobbyType.Announcement,
+          "announcement",
+          admin,
+          "a".repeat(CHAT_MESSAGE_MAX_LENGTH + 1),
+        ),
+      ).resolves.toEqual({ accepted: false, tooLong: true });
+      expect(
+        postgres.query.mock.calls.some(([q]: [string]) =>
+          q.includes("INSERT INTO public.announcements"),
+        ),
+      ).toBe(false);
+    });
+
+    it("does not apply to game-relayed lines (not website text)", async () => {
+      const text = "g".repeat(CHAT_MESSAGE_MAX_LENGTH + 1);
+      await expect(send(text, "game")).resolves.toEqual({ accepted: true });
+      expect(storedTexts()).toEqual([text]);
+    });
+
+    it("edit: exactly 2,000 succeeds, 2,001 is refused and nothing is truncated", async () => {
+      put(ChatLobbyType.Global, "global", storedMessage());
+      const exact = "b".repeat(CHAT_MESSAGE_MAX_LENGTH);
+      await expect(
+        service.editChatMessage(
+          client(author),
+          ChatLobbyType.Global,
+          "global",
+          messageId,
+          exact,
+        ),
+      ).resolves.toBe(true);
+      expect(stored().message).toBe(exact);
+
+      await expect(
+        service.editChatMessage(
+          client(author),
+          ChatLobbyType.Global,
+          "global",
+          messageId,
+          "c".repeat(CHAT_MESSAGE_MAX_LENGTH + 1),
+        ),
+      ).resolves.toBe(false);
+      expect(stored().message).toBe(exact);
+    });
+
+    it("leaves an existing over-length message readable and deletable (author, recent)", async () => {
+      const legacy = "L".repeat(CHAT_MESSAGE_MAX_LENGTH + 500);
+      put(ChatLobbyType.Global, "global", storedMessage({ message: legacy }));
+      await expect(
+        service.deleteMessage(
+          client(author),
+          ChatLobbyType.Global,
+          "global",
+          messageId,
+        ),
+      ).resolves.toBe(true);
+      const audit = postgres.query.mock.calls.find(([q]: [string]) =>
+        q.includes("INSERT INTO public.chat_message_deletions"),
+      );
+      // Audited in full, not truncated.
+      expect(audit[1][4]).toBe(legacy);
+    });
+
+    it("leaves an existing over-length message deletable by an administrator at any age", async () => {
+      put(
+        ChatLobbyType.Global,
+        "global",
+        storedMessage({
+          message: "L".repeat(CHAT_MESSAGE_MAX_LENGTH + 1),
+          timestamp: ago(3 * 60 * MINUTE),
+        }),
+      );
+      await expect(
+        service.deleteMessage(
+          client(admin),
+          ChatLobbyType.Global,
+          "global",
+          messageId,
+        ),
+      ).resolves.toBe(true);
+    });
+  });
+
+  describe("ChatGateway 2,000 character feedback", () => {
+    it("tells the sender why an over-length message was refused and never relays it", async () => {
+      const chat = {
+        sendMessageToChat: jest
+          .fn()
+          .mockResolvedValue({ accepted: false, tooLong: true }),
+        sendChatToServer: jest.fn(),
+      };
+      const gateway = new ChatGateway(chat as any);
+      const socket = { ...client(author), send: jest.fn() };
+
+      await gateway.lobby(
+        {
+          id: "match-1",
+          type: ChatLobbyType.Match,
+          message: "a".repeat(CHAT_MESSAGE_MAX_LENGTH + 1),
+        },
+        socket,
+      );
+
+      expect(socket.send).toHaveBeenCalledWith(
+        JSON.stringify({
+          event: "chat:send:error",
+          data: { message: CHAT_MESSAGE_TOO_LONG_ERROR },
+        }),
+      );
+      expect(chat.sendChatToServer).not.toHaveBeenCalled();
+    });
+
+    it("refuses an over-length edit with the same message before reaching the service", async () => {
+      const chat = { editAnnouncement: jest.fn(), editChatMessage: jest.fn() };
+      const gateway = new ChatGateway(chat as any);
+      const socket = { ...client(author), send: jest.fn() };
+
+      await gateway.editMessage(
+        {
+          id: messageId,
+          type: ChatLobbyType.Global,
+          roomId: "global",
+          message: "a".repeat(CHAT_MESSAGE_MAX_LENGTH + 1),
+        },
+        socket,
+      );
+
+      expect(chat.editChatMessage).not.toHaveBeenCalled();
+      expect(socket.send).toHaveBeenCalledWith(
+        expect.stringContaining(CHAT_MESSAGE_TOO_LONG_ERROR),
+      );
+      expect(CHAT_MESSAGE_TOO_LONG_ERROR).toBe(
+        "Message can be up to 2,000 characters.",
+      );
     });
   });
 

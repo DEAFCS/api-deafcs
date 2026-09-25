@@ -81,9 +81,17 @@ const CHAT_REACTION_TOGGLE_LUA = `
 // moderation delete at any age, but never edit someone else's message.
 export const CHAT_MESSAGE_SELF_SERVICE_WINDOW_MS = 10 * 60 * 1000;
 
-// Normal sending has no explicit length limit; edits are capped so the
-// edit path can't be used to grow an existing message without bound.
-export const CHAT_MESSAGE_EDIT_MAX_LENGTH = 2000;
+// One product limit for website chat text, enforced on send and edit
+// (including announcements). Never applied by truncating: over-length
+// text is refused. Existing longer messages are left as they are.
+// Game-relayed lines and Short Video media are not website text.
+export const CHAT_MESSAGE_MAX_LENGTH = 2000;
+export const CHAT_MESSAGE_TOO_LONG_ERROR =
+  "Message can be up to 2,000 characters.";
+
+export function isChatMessageTooLong(message: string) {
+  return message.length > CHAT_MESSAGE_MAX_LENGTH;
+}
 
 // Stored timestamps come from the API's own clock, so only a tiny skew
 // between pods is tolerated for a message that appears to be "from the
@@ -91,21 +99,24 @@ export const CHAT_MESSAGE_EDIT_MAX_LENGTH = 2000;
 const CHAT_MESSAGE_CLOCK_SKEW_MS = 5000;
 
 // Compare-and-swap edit of one Redis hash field. HSET on an existing
-// field clears its field TTL, so the remaining HPTTL is read first and
-// restored afterwards -- an edit must never extend a message's lifetime.
-// Returns {1, ttlMs} on success, {0, reason} otherwise.
+// field clears its field expiry, so the field's original *absolute*
+// expiry (HPEXPIRETIME, unix ms) is read first and restored exactly with
+// HPEXPIREAT -- an edit can never extend a message's lifetime, not even
+// by the time the script takes. HPEXPIRETIME: -2 = no such field (refused),
+// -1 = persistent field (kept persistent), otherwise the expiry.
+// Returns {1, expireAtMs} on success, {0, reason} otherwise.
 const CHAT_MESSAGE_EDIT_LUA = `
   if redis.call('EXISTS', KEYS[2]) == 1 then return {0, -3} end
   local stored = redis.call('HGET', KEYS[1], ARGV[1])
   if not stored or stored ~= ARGV[2] then return {0, -2} end
-  local fieldTtl = redis.call('HPTTL', KEYS[1], 'FIELDS', 1, ARGV[1])
-  local ttlMs = tonumber(fieldTtl[1])
-  if not ttlMs or ttlMs == -2 or ttlMs == 0 then return {0, -2} end
+  local fieldExpiry = redis.call('HPEXPIRETIME', KEYS[1], 'FIELDS', 1, ARGV[1])
+  local expireAtMs = tonumber(fieldExpiry[1])
+  if not expireAtMs or expireAtMs == -2 then return {0, -2} end
   redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
-  if ttlMs > 0 then
-    redis.call('HPEXPIRE', KEYS[1], ttlMs, 'FIELDS', 1, ARGV[1])
+  if expireAtMs > 0 then
+    redis.call('HPEXPIREAT', KEYS[1], expireAtMs, 'FIELDS', 1, ARGV[1])
   end
-  return {1, ttlMs}
+  return {1, expireAtMs}
 `;
 
 const CHAT_REACTION_DELETE_LUA = `
@@ -886,9 +897,15 @@ export class ChatService {
     source: "website" | "game" = "website",
   ): Promise<{
     accepted: boolean;
+    tooLong?: boolean;
     muteStatus?: WebsiteChatMuteStatus;
     restrictionStatus?: WebsiteRestrictionStatus;
   }> {
+    // Website text only -- game-relayed lines keep their existing path.
+    if (source === "website" && isChatMessageTooLong(_message ?? "")) {
+      return { accepted: false, tooLong: true };
+    }
+
     let videoDraftSession: any;
     if (videoDraftId) {
       // Short Video is a standalone chat message. Its destination and author
@@ -2226,7 +2243,7 @@ export class ChatService {
   private normalizeEditedMessage(_message: unknown): string | undefined {
     if (typeof _message !== "string") return;
     const message = _message.trim();
-    if (!message || message.length > CHAT_MESSAGE_EDIT_MAX_LENGTH) return;
+    if (!message || isChatMessageTooLong(message)) return;
     return message;
   }
 

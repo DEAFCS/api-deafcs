@@ -4,7 +4,11 @@ import {
   SubscribeMessage,
   WebSocketGateway,
 } from "@nestjs/websockets";
-import { ChatService } from "./chat.service";
+import {
+  CHAT_MESSAGE_TOO_LONG_ERROR,
+  ChatService,
+  isChatMessageTooLong,
+} from "./chat.service";
 import { FiveStackWebSocketClient } from "src/sockets/types/FiveStackWebSocketClient";
 import { ChatLobbyType } from "./enums/ChatLobbyTypes";
 import { isRoleAbove } from "@utilities/isRoleAbove";
@@ -92,6 +96,9 @@ export class ChatGateway {
     );
 
     if (!result.accepted) {
+      if (result.tooLong) {
+        this.sendTooLongError(client);
+      }
       if (result.restrictionStatus) {
         client.send(
           JSON.stringify({
@@ -157,6 +164,12 @@ export class ChatGateway {
       return;
     }
 
+    // ChatService refuses it too; this only tells the editor why.
+    if (isChatMessageTooLong(data.message.trim())) {
+      this.sendTooLongError(client);
+      return;
+    }
+
     if (!data.type || data.type === ChatLobbyType.Announcement) {
       await this.chat.editAnnouncement(client, data.id, data.message);
       return;
@@ -216,5 +229,14 @@ export class ChatGateway {
     }
 
     await this.chat.deleteMessage(client, data.type, data.roomId, data.id);
+  }
+
+  private sendTooLongError(client: FiveStackWebSocketClient) {
+    client.send(
+      JSON.stringify({
+        event: "chat:send:error",
+        data: { message: CHAT_MESSAGE_TOO_LONG_ERROR },
+      }),
+    );
   }
 }
