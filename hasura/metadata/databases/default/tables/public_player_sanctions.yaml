@@ -56,19 +56,10 @@ update_permissions:
       columns:
         - remove_sanction_date
       filter:
-        _and:
-          - deleted_at:
-              _is_null: true
-          - type:
-              _in:
-                - website_chat_mute
-                - website_restriction
-      check:
-        type:
-          _in:
-            - website_chat_mute
-            - website_restriction
-    comment: Administrators can adjust the expiry of active website moderation sanctions.
+        deleted_at:
+          _is_null: true
+      check: {}
+    comment: Administrators can adjust the expiry of any active sanction.
   - role: match_organizer
     permission:
       columns:
