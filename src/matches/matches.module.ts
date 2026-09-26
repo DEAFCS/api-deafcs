@@ -78,6 +78,8 @@ import { CameraController } from "./camera/camera.controller";
 import { CameraService } from "./camera/camera.service";
 import { LobbyCallController } from "./camera/lobby-call.controller";
 import { LobbyCallService } from "./camera/lobby-call.service";
+import { TournamentCallController } from "./camera/tournament-call.controller";
+import { TournamentCallService } from "./camera/tournament-call.service";
 
 @Module({
   imports: [
@@ -166,6 +168,7 @@ import { LobbyCallService } from "./camera/lobby-call.service";
     MatchRelayController,
     CameraController,
     LobbyCallController,
+    TournamentCallController,
   ],
   exports: [MatchAssistantService, PlayerEloRecomputeService],
   providers: [
@@ -175,6 +178,7 @@ import { LobbyCallService } from "./camera/lobby-call.service";
     MatchRelayService,
     CameraService,
     LobbyCallService,
+    TournamentCallService,
     CheckOnDemandServerJob,
     CheckOnDemandServerJobEvents,
     CancelExpiredMatches,

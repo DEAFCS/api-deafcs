@@ -840,7 +840,8 @@ export class ChatService {
     );
   }
 
-  private async canAccessTournamentChat(
+  // Also the access gate for the tournament webcam room (TournamentCallService).
+  public async canAccessTournamentChat(
     id: string,
     steamId: string,
   ): Promise<boolean> {

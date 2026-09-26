@@ -17,7 +17,8 @@ import { User } from "../../auth/types/User";
 // already fans a single published stream out to any number of WHEP
 // viewers, so "group call" here is really just "everyone in the lobby
 // publishes their own path and WHEP-pulls everyone else's".
-const MAX_PARTICIPANTS = 5;
+// Shared with TournamentCallService (same 5-person cap for every webcam room).
+export const MAX_PARTICIPANTS = 5;
 
 export type LobbyCallParticipant = {
   steamId: string;
@@ -170,7 +171,14 @@ export class LobbyCallService {
   // tracked separately in our own DB/Redis -- mediamtx is already the
   // source of truth the rest of this feature relies on).
   public async getParticipants(lobbyId: string): Promise<LobbyCallParticipant[]> {
-    const prefix = `camera-lobby-${lobbyId}-`;
+    return this.participantsForPrefix(`camera-lobby-${lobbyId}-`);
+  }
+
+  // Shared with TournamentCallService: everyone publishing a ready
+  // `${prefix}${steamId}` path right now, resolved to player cards.
+  public async participantsForPrefix(
+    prefix: string,
+  ): Promise<LobbyCallParticipant[]> {
     let steamIds: string[] = [];
     try {
       const res = await fetch(
@@ -268,7 +276,7 @@ export class LobbyCallService {
     }
   }
 
-  private async proxySdp(targetPath: string, sdp: string): Promise<string> {
+  public async proxySdp(targetPath: string, sdp: string): Promise<string> {
     let res: Response;
     try {
       res = await fetch(
@@ -294,7 +302,7 @@ export class LobbyCallService {
     return text;
   }
 
-  private async getPathStatus(path: string): Promise<{ ready: boolean }> {
+  public async getPathStatus(path: string): Promise<{ ready: boolean }> {
     try {
       const res = await fetch(
         `http://${this.mediaMtxHost}:${this.apiPort}/v3/paths/get/${path}`,
@@ -308,7 +316,7 @@ export class LobbyCallService {
     }
   }
 
-  private async kickPath(path: string): Promise<void> {
+  public async kickPath(path: string): Promise<void> {
     try {
       const res = await fetch(
         `http://${this.mediaMtxHost}:${this.apiPort}/v3/webrtcsessions/list`,
