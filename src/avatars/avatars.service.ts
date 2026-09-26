@@ -270,7 +270,7 @@ export class AvatarsService {
     buffer: Buffer,
     mimetype: string,
   ): Promise<string> {
-    await this.assertTeamRosterEditor(teamId, user);
+    await this.assertTeamRosterEditor(teamId, steamId, user);
 
     const { team_roster } = await this.hasura.query({
       team_roster: {
@@ -314,7 +314,7 @@ export class AvatarsService {
     steamId: string,
     user: User,
   ): Promise<void> {
-    await this.assertTeamRosterEditor(teamId, user);
+    await this.assertTeamRosterEditor(teamId, steamId, user);
 
     const { team_roster } = await this.hasura.query({
       team_roster: {
@@ -632,24 +632,64 @@ export class AvatarsService {
 
   private async assertTeamRosterEditor(
     teamId: string,
+    targetSteamId: string,
     user: User,
   ): Promise<void> {
-    if (!isRoleAbove(user.role, "tournament_organizer")) {
-      throw new ForbiddenException(
-        "You do not have permission to manage this team's roster images",
-      );
+    // Site staff (tournament_organizer+) can manage any team's roster
+    // images, unchanged from before.
+    if (isRoleAbove(user.role, "tournament_organizer")) {
+      const { teams_by_pk } = await this.hasura.query({
+        teams_by_pk: {
+          __args: { id: teamId },
+          id: true,
+        },
+      });
+      if (!teams_by_pk) {
+        throw new ForbiddenException("Team not found");
+      }
+      return;
     }
 
-    const { teams_by_pk } = await this.hasura.query({
-      teams_by_pk: {
-        __args: { id: teamId },
-        id: true,
-      },
-    });
+    // Team owner, or a team_roster row with role 'Admin' for this team,
+    // can manage any player's roster image on their own team -- same
+    // authority as can_change_team_role (see
+    // hasura/functions/team/can_change_team_role.sql), which the frontend
+    // already surfaces as teams.can_change_role for everything else a
+    // team admin can do.
+    const rows = await this.postgres.query<
+      Array<{ is_owner: boolean; is_team_admin: boolean }>
+    >(
+      `SELECT
+         t.owner_steam_id = $2::bigint AS is_owner,
+         EXISTS (
+           SELECT 1 FROM public.team_roster
+           WHERE team_id = $1::uuid
+             AND player_steam_id = $2::bigint
+             AND role = 'Admin'
+         ) AS is_team_admin
+       FROM public.teams t
+       WHERE t.id = $1::uuid`,
+      [teamId, user.steam_id],
+    );
 
-    if (!teams_by_pk) {
+    if (!rows.length) {
       throw new ForbiddenException("Team not found");
     }
+
+    if (rows[0].is_owner || rows[0].is_team_admin) {
+      return;
+    }
+
+    // A verified_user+ can always edit their own roster image, even on a
+    // team they have no management role on.
+    const isSelf = String(targetSteamId) === String(user.steam_id);
+    if (isSelf && isRoleAbove(user.role, "verified_user")) {
+      return;
+    }
+
+    throw new ForbiddenException(
+      "You do not have permission to manage this team's roster images",
+    );
   }
 
   private guessContentType(filename: string): string {
