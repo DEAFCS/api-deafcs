@@ -43,6 +43,10 @@ export class NotificationsService {
     "GlobalChatMessage",
     "OrganizerChatMessage",
     "AnnouncementChatMessage",
+    // A warning's reason is a private note to that one player, same
+    // privacy rationale as the chat types above -- never post it to the
+    // Discord support webhook.
+    "PlayerWarning",
   ]);
 
   constructor(
@@ -291,6 +295,43 @@ export class NotificationsService {
     });
 
     this.logger.log(`notified banned player ${sanction.steamId}`);
+  }
+
+  async notifyWarnedPlayer(sanction: {
+    sanctionId: string;
+    steamId: string;
+    type: string;
+    reason?: string | null;
+  }): Promise<void> {
+    if (sanction.type !== "warning") {
+      return;
+    }
+
+    const reasonSuffix = sanction.reason
+      ? ` Reason: ${NotificationsService.escapeHtml(sanction.reason)}`
+      : "";
+
+    // Targets only this one steam_id, same as notifyBannedPlayer above --
+    // never broadcast to every player, only the one who got the warning.
+    await this.hasura.mutation({
+      insert_notifications: {
+        __args: {
+          objects: [
+            {
+              type: "PlayerWarning" as e_notification_types_enum,
+              title: "You got a warning from admin",
+              message: `You got a warning from admin.${reasonSuffix}`,
+              role: "user" as e_player_roles_enum,
+              steam_id: sanction.steamId,
+              entity_id: sanction.steamId,
+            },
+          ],
+        },
+        affected_rows: true,
+      },
+    });
+
+    this.logger.log(`notified warned player ${sanction.steamId}`);
   }
 
   // Like send(), but never posts to Discord -- for anything high-volume

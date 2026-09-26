@@ -27,7 +27,7 @@ export const NOTIFICATION_CATEGORIES: Record<string, string[]> = {
   news: ["NewsPublished"],
   tournaments: ["TournamentCreated", "TournamentReminder"],
   matches: ["MatchStatusChange", "MatchImported", "MatchSupport"],
-  sanctions: ["PlayerSanctioned"],
+  sanctions: ["PlayerSanctioned", "PlayerWarning"],
   scrims: [
     "ScrimAlertMatch",
     "ScrimMatchCanceled",

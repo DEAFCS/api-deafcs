@@ -13,7 +13,8 @@ export type SanctionType =
   | "gag"
   | "silence"
   | "website_chat_mute"
-  | "website_restriction";
+  | "website_restriction"
+  | "warning";
 
 export type WebsiteChatMuteStatus = {
   active: boolean;
@@ -39,6 +40,7 @@ export class SanctionsService {
     "silence",
     "website_chat_mute",
     "website_restriction",
+    "warning",
   ];
 
   public async getWebsiteChatMuteStatus(
@@ -197,6 +199,42 @@ export class SanctionsService {
         id: rows[0]?.id ?? null,
         enforced: true,
         message: "website chat mute saved and enforced",
+      };
+    }
+
+    if (type === "warning") {
+      const trimmedReason = reason?.trim();
+      if (!trimmedReason) {
+        throw Error("a reason is required for a warning");
+      }
+
+      // Purely informational -- never restricts the player on the game
+      // server or the website, so it never inspects the roster or syncs
+      // a server even if a crafted request includes serverId, and never
+      // expires (no remove_sanction_date).
+      await this.ensurePlayer(steamId);
+      const rows = await this.postgres.query<Array<{ id: string }>>(
+        `INSERT INTO public.player_sanctions (
+           type,
+           player_steam_id,
+           sanctioned_by_steam_id,
+           reason,
+           evidence_message_id
+         ) VALUES (
+           'warning',
+           $1::bigint,
+           $2::bigint,
+           $3,
+           $4
+         )
+         RETURNING id`,
+        [steamId, sanctionedBySteamId, trimmedReason, evidenceMessageId ?? null],
+      );
+
+      return {
+        id: rows[0]?.id ?? null,
+        enforced: true,
+        message: "warning saved",
       };
     }
 
