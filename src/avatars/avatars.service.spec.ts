@@ -481,5 +481,43 @@ describe("AvatarsService - roster image permissions", () => {
 
       expect(path).toMatch(/^avatars\/players\//);
     });
+
+    it.each(ALL_ROLES.filter((role) => role !== "administrator"))(
+      "rejects %s editing ANOTHER player's avatar or removing it",
+      async (role) => {
+        const caller = user(role, "76561190000000001");
+        await expect(
+          service.uploadPlayerAvatar(
+            "76561190000000002",
+            caller,
+            Buffer.from("x"),
+            "image/png",
+          ),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        await expect(
+          service.removePlayerAvatar("76561190000000002", caller),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(hasura.mutation).not.toHaveBeenCalled();
+      },
+    );
+
+    it("allows a moderator to upload their OWN avatar", async () => {
+      hasura.query.mockResolvedValueOnce({
+        players_by_pk: { custom_avatar_url: null },
+      });
+      hasura.mutation.mockResolvedValueOnce({
+        update_players_by_pk: { __typename: "players" },
+      });
+
+      const caller = user("moderator", "76561190000000003");
+      const path = await service.uploadPlayerAvatar(
+        caller.steam_id,
+        caller,
+        Buffer.from("x"),
+        "image/png",
+      );
+
+      expect(path).toMatch(/^avatars\/players\//);
+    });
   });
 });

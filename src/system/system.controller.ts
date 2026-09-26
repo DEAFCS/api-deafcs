@@ -251,7 +251,21 @@ export class SystemController {
   }
 
   @HasuraAction()
-  public async requestNameChange(data: { name: string; steam_id: string }) {
+  public async requestNameChange(data: {
+    user?: User;
+    name: string;
+    steam_id: string;
+  }) {
+    // A name change request is self-service only. Administrators rename
+    // other players directly through update_players_by_pk instead.
+    if (
+      !data.user ||
+      (data.user.steam_id !== data.steam_id &&
+        data.user.role !== "administrator")
+    ) {
+      throw new Error("You can only request a name change for yourself");
+    }
+
     SystemController.assertValidPlayerName(data.name);
 
     const { notifications } = await this.hasura.query({
