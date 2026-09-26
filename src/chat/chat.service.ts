@@ -2715,6 +2715,15 @@ export class ChatService {
       return;
     }
 
+    // Live match all-chat and team-chat are high-volume by nature (every
+    // in-game say/say_team gets relayed here) and players are expected to
+    // have the match page open while playing, so push notifications and
+    // the unread badge fallback ping just add distracting noise during a
+    // live match rather than surfacing something missed.
+    if (type === ChatLobbyType.Match || type === ChatLobbyType.MatchTeam) {
+      return;
+    }
+
     const members = await this.getLobbyMemberSteamIds(type, id);
     if (!members.length) return;
 
