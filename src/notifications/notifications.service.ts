@@ -307,9 +307,9 @@ export class NotificationsService {
       return;
     }
 
-    const reasonSuffix = sanction.reason
-      ? ` Reason: ${NotificationsService.escapeHtml(sanction.reason)}`
-      : "";
+    const message = sanction.reason
+      ? `Reason: ${NotificationsService.escapeHtml(sanction.reason)}`
+      : "No reason was given.";
 
     // Targets only this one steam_id, same as notifyBannedPlayer above --
     // never broadcast to every player, only the one who got the warning.
@@ -320,7 +320,7 @@ export class NotificationsService {
             {
               type: "PlayerWarning" as e_notification_types_enum,
               title: "You got a warning from admin",
-              message: `You got a warning from admin.${reasonSuffix}`,
+              message,
               role: "user" as e_player_roles_enum,
               steam_id: sanction.steamId,
               entity_id: sanction.steamId,
