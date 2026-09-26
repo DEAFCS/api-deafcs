@@ -2745,18 +2745,12 @@ export class ChatService {
 
     if (!targets.length) return;
 
-    // Match chat is its own notification type/push category, separate
-    // from every other lobby chat (matchmaking queue, draft,
-    // tournament, …) -- it fires far more often once a match is
-    // actually live (including in-game console chat relayed in via
-    // ChatMessageEvent), which players reported as distracting on
-    // their phone mid-match. Defaults to OFF (see
-    // notification-categories.ts) unlike the rest. (Organizer chat is
-    // handled in its own early-return branch above, not here.)
-    const notificationType =
-      type === ChatLobbyType.Match ? "MatchChatMessage" : "ChatMessage";
+    // Match and MatchTeam are handled by their own early-return above and
+    // never reach here anymore, so this is just the remaining lobby chats
+    // (matchmaking queue, draft, tournament, team, direct). (Organizer
+    // chat is handled in its own early-return branch above, not here.)
     await this.notifications.notifyPlayers(
-      notificationType as unknown as e_notification_types_enum,
+      "ChatMessage" as unknown as e_notification_types_enum,
       {
         title: this.notificationTitle(type, sender.name),
         message: message.length > 200 ? `${message.slice(0, 200)}…` : message,
