@@ -1,5 +1,1 @@
-disable_introspection:
-  global: false
-  disabled_for_roles:
-    - guest
-
+{}
