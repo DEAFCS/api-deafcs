@@ -1,7 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { HasuraService } from "../hasura/hasura.service";
-import { isRoleAbove } from "src/utilities/isRoleAbove";
-import { e_player_roles_enum } from "generated";
 import jwt from "jsonwebtoken";
 import { ConfigService } from "@nestjs/config";
 
@@ -22,7 +20,7 @@ export class ApiKeys {
         __args: {
           steam_id,
         },
-        role: true,
+        api_key_enabled: true,
       },
     });
 
@@ -30,18 +28,12 @@ export class ApiKeys {
       throw Error("Player not found");
     }
 
-    const { settings_by_pk } = await this.hasura.query({
-      settings_by_pk: {
-        __args: {
-          name: "public.create_api_key_role",
-        },
-        value: true,
-      },
-    });
-
-    const minRole = settings_by_pk?.value || "user";
-
-    if (!isRoleAbove(players_by_pk?.role, minRole as e_player_roles_enum)) {
+    // Per-player allowlist, set by an admin (players.api_key_enabled) --
+    // replaces the old blanket "any role above X" gate (the
+    // public.create_api_key_role setting). No role is automatically
+    // eligible; an admin has to turn this on for each player
+    // individually.
+    if (!players_by_pk.api_key_enabled) {
       throw Error("You are not authorized to create API keys");
     }
 

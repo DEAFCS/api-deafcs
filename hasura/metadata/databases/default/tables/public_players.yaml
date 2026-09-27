@@ -563,6 +563,7 @@ select_permissions:
         - vac_ban_count
         - game_ban_count
         - days_since_last_ban
+        - api_key_enabled
       computed_fields:
         - banned_until
         - current_lobby_id
@@ -603,6 +604,7 @@ update_permissions:
         - profile_url
         - role
         - show_match_ready_modal
+        - api_key_enabled
       filter: {}
       check: null
     comment: ""
