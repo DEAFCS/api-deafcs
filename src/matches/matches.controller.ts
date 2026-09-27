@@ -2212,13 +2212,17 @@ export class MatchesController {
             id: data.match_id,
           },
           is_in_lineup: true,
-          requested_organizer: true,
         },
       },
       data.user.steam_id,
     );
 
-    if (!match || match.requested_organizer) {
+    // No dedup on an unread MatchSupport notification still existing --
+    // that left the button (and this action) stuck disabled for the rest
+    // of a match once clicked once, until an admin happened to mark that
+    // one notification read, even if a new/different problem came up
+    // later in the same live match. Always re-notify.
+    if (!match) {
       return {
         success: true,
       };
