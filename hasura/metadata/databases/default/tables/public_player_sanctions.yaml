@@ -20,7 +20,6 @@ select_permissions:
       columns:
         - player_steam_id
         - sanctioned_by_steam_id
-        - reason
         - type
         - created_at
         - remove_sanction_date
@@ -34,7 +33,7 @@ select_permissions:
               _nin:
                 - website_chat_mute
                 - website_restriction
-    comment: ""
+    comment: "Public can see that a player is sanctioned (type/dates), not why -- reason text is meant for staff/the sanctioned player only."
   - role: administrator
     permission:
       columns:
