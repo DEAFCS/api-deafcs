@@ -2228,10 +2228,13 @@ export class MatchesController {
       };
     }
 
+    const requesterName = NotificationsService.escapeHtml(data.user.name);
+    const message = `${requesterName} requested support in <a href="${this.appConfig.webDomain}/matches/${data.match_id}">${data.match_id}</a>`;
+
     void this.notifications.send(
       "MatchSupport",
       {
-        message: `Match Assistanced Required <a href="${this.appConfig.webDomain}/matches/${data.match_id}">${data.match_id}</a>`,
+        message,
         title: "Match Assistanced Required",
         role: "match_organizer",
         entity_id: data.match_id,
@@ -2243,7 +2246,7 @@ export class MatchesController {
     // administrator broadcast, no steam_id involved above, so no duplicate
     // risk -- sendSilent so this doesn't also double-post to Discord.
     void this.notifications.sendSilent("MatchSupport", {
-      message: `Match Assistanced Required <a href="${this.appConfig.webDomain}/matches/${data.match_id}">${data.match_id}</a>`,
+      message,
       title: "Match Assistanced Required",
       role: "administrator",
       entity_id: data.match_id,
