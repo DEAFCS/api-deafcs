@@ -56,23 +56,25 @@ insert_permissions:
         - organizer_experience
         - organizer_languages
         - organizer_additional_info
+        - attachment_url
+        - attachment_content_type
     comment: A logged-in, verified player can create a support request only for themselves. Unverified players (role "user") must use the verification-application flow instead -- see public_verification_applications.yaml, whose insert permission deliberately stays on role "user".
 select_permissions:
   - role: user
     permission:
-      columns: [id, player_steam_id, category, subject, initial_message, status, reported_player_steam_id, reported_player_profile_url, related_match_reference, report_reason, report_details, report_evidence, organizer_motivation, organizer_experience, organizer_languages, organizer_additional_info, handled_by_steam_id, created_at, updated_at, closed_at]
+      columns: [id, player_steam_id, category, subject, initial_message, status, reported_player_steam_id, reported_player_profile_url, related_match_reference, report_reason, report_details, report_evidence, organizer_motivation, organizer_experience, organizer_languages, organizer_additional_info, handled_by_steam_id, created_at, updated_at, closed_at, attachment_url, attachment_content_type, attachment_removed_at]
       filter:
         player_steam_id:
           _eq: X-Hasura-User-Id
     comment: A player can see only their own support requests, including private player reports.
   - role: administrator
     permission:
-      columns: [id, player_steam_id, category, subject, initial_message, status, reported_player_steam_id, reported_player_profile_url, related_match_reference, report_reason, report_details, report_evidence, organizer_motivation, organizer_experience, organizer_languages, organizer_additional_info, handled_by_steam_id, created_at, updated_at, closed_at]
+      columns: [id, player_steam_id, category, subject, initial_message, status, reported_player_steam_id, reported_player_profile_url, related_match_reference, report_reason, report_details, report_evidence, organizer_motivation, organizer_experience, organizer_languages, organizer_additional_info, handled_by_steam_id, created_at, updated_at, closed_at, attachment_url, attachment_content_type, attachment_removed_at]
       filter: {}
     comment: Administrators can review every support request.
   - role: moderator
     permission:
-      columns: [id, player_steam_id, category, subject, initial_message, status, reported_player_steam_id, reported_player_profile_url, related_match_reference, report_reason, report_details, report_evidence, organizer_motivation, organizer_experience, organizer_languages, organizer_additional_info, handled_by_steam_id, created_at, updated_at, closed_at]
+      columns: [id, player_steam_id, category, subject, initial_message, status, reported_player_steam_id, reported_player_profile_url, related_match_reference, report_reason, report_details, report_evidence, organizer_motivation, organizer_experience, organizer_languages, organizer_additional_info, handled_by_steam_id, created_at, updated_at, closed_at, attachment_url, attachment_content_type, attachment_removed_at]
       filter: {}
     comment: Moderators can review every support request.
 update_permissions:

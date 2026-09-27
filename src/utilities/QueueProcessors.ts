@@ -33,7 +33,8 @@ type Modules =
   | "Scrims"
   | "AdminCalls"
   | "VerificationCalls"
-  | "ChatVideo";
+  | "ChatVideo"
+  | "SupportRequests";
 
 export type UseQueueOptions = {
   concurrency?: number;

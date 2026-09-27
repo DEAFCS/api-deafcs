@@ -1,4 +1,22 @@
-import { Controller } from "@nestjs/common";
+import {
+  Controller,
+  Post,
+  Get,
+  Query,
+  Req,
+  Res,
+  UploadedFile,
+  UseInterceptors,
+  ParseFilePipe,
+  MaxFileSizeValidator,
+  FileTypeValidator,
+  ForbiddenException,
+  NotFoundException,
+  BadRequestException,
+} from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
+import { Request, Response } from "express";
+import crypto from "crypto";
 import { HasuraEvent } from "../hasura/hasura.controller";
 import { HasuraEventData } from "../hasura/types/HasuraEventData";
 import { HasuraService } from "../hasura/hasura.service";
@@ -7,6 +25,21 @@ import { NotificationsService } from "../notifications/notifications.service";
 import { e_notification_types_enum } from "generated/schema";
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "src/configs/types/AppConfig";
+import { S3Service } from "../s3/s3.service";
+import { User } from "../auth/types/User";
+
+const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+const ALLOWED_ATTACHMENT_TYPE =
+  /^(image\/(png|jpeg|webp|gif)|video\/(mp4|webm|quicktime))$/;
+const EXTENSION_BY_MIMETYPE: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "video/mp4": "mp4",
+  "video/webm": "webm",
+  "video/quicktime": "mov",
+};
 
 // Bell/push notifications for the private support-request system (TricoN's
 // feature, Hasura-only otherwise). Modelled directly on
@@ -25,8 +58,133 @@ export class SupportRequestsController {
     private readonly postgres: PostgresService,
     private readonly notifications: NotificationsService,
     private readonly configService: ConfigService,
+    private readonly s3: S3Service,
   ) {
     this.appConfig = this.configService.get<AppConfig>("app");
+  }
+
+  private requireUser(request: Request): User {
+    const user = request.user as User | undefined;
+    if (!user) {
+      throw new ForbiddenException("Authentication required");
+    }
+    return user;
+  }
+
+  // Uploaded ahead of the actual insert_support_requests_one /
+  // insert_support_request_messages_one GraphQL mutation -- the request/
+  // message id doesn't exist yet at upload time, so the object key is
+  // scoped by the uploader's own steam_id instead and handed back for the
+  // client to include as attachment_url on whichever row it inserts next.
+  @Post("attachment")
+  @UseInterceptors(FileInterceptor("file"))
+  public async uploadAttachment(
+    @Req() request: Request,
+    @UploadedFile(
+      new ParseFilePipe({
+        validators: [
+          new MaxFileSizeValidator({ maxSize: MAX_ATTACHMENT_BYTES }),
+          new FileTypeValidator({ fileType: ALLOWED_ATTACHMENT_TYPE }),
+        ],
+      }),
+    )
+    file: Express.Multer.File,
+  ) {
+    const user = this.requireUser(request);
+    const ext = EXTENSION_BY_MIMETYPE[file.mimetype] || "bin";
+    const hash = crypto.randomBytes(8).toString("hex");
+    const path = `support-attachments/${user.steam_id}/${hash}.${ext}`;
+    await this.s3.put(path, file.buffer, file.mimetype);
+    return { success: true, path, contentType: file.mimetype };
+  }
+
+  // Streams the attachment back rather than exposing a public S3/bucket
+  // URL, since a private player report's attachment is exactly as
+  // sensitive as the report itself -- looks up whichever request or
+  // message actually references this key and re-checks the same
+  // ownership/staff rule the GraphQL select_permissions already enforce,
+  // so knowing the key alone (visible to the owner/staff via the normal
+  // query) never lets a third party fetch it.
+  @Get("attachment")
+  public async getAttachment(
+    @Query("key") key: string,
+    @Req() request: Request,
+    @Res() response: Response,
+  ) {
+    const user = this.requireUser(request);
+    if (!key) {
+      throw new BadRequestException("key is required");
+    }
+
+    const [row] = await this.postgres.query<
+      Array<{
+        content_type: string | null;
+        removed: boolean;
+        player_steam_id: string;
+      }>
+    >(
+      `SELECT attachment_content_type AS content_type,
+              attachment_removed_at IS NOT NULL AS removed,
+              player_steam_id::text AS player_steam_id
+         FROM public.support_requests
+        WHERE attachment_url = $1
+        UNION ALL
+       SELECT m.attachment_content_type AS content_type,
+              m.attachment_removed_at IS NOT NULL AS removed,
+              r.player_steam_id::text AS player_steam_id
+         FROM public.support_request_messages m
+         JOIN public.support_requests r ON r.id = m.request_id
+        WHERE m.attachment_url = $1
+        LIMIT 1`,
+      [key],
+    );
+
+    if (!row || row.removed) {
+      throw new NotFoundException("attachment not found");
+    }
+
+    const isOwner = row.player_steam_id === String(user.steam_id);
+    const isStaff = ["administrator", "moderator"].includes(user.role);
+    if (!isOwner && !isStaff) {
+      throw new ForbiddenException("you cannot view this attachment");
+    }
+
+    const stat = await this.s3.stat(key);
+    response.setHeader(
+      "Content-Type",
+      row.content_type || "application/octet-stream",
+    );
+    response.setHeader("Accept-Ranges", "bytes");
+    response.setHeader("Cache-Control", "private, no-store");
+
+    const range = request.headers.range;
+    if (!range) {
+      response.setHeader("Content-Length", String(stat.size));
+      (await this.s3.get(key)).pipe(response);
+      return;
+    }
+
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+    if (!match || (!match[1] && !match[2])) {
+      response.status(416).setHeader("Content-Range", `bytes */${stat.size}`).end();
+      return;
+    }
+    const startValue = match[1] ? Number(match[1]) : undefined;
+    const endValue = match[2] ? Number(match[2]) : undefined;
+    const start =
+      startValue === undefined ? Math.max(0, stat.size - endValue!) : startValue;
+    const end = Math.min(
+      startValue === undefined ? stat.size - 1 : (endValue ?? stat.size - 1),
+      stat.size - 1,
+    );
+    if (start > end || start >= stat.size) {
+      response.status(416).setHeader("Content-Range", `bytes */${stat.size}`).end();
+      return;
+    }
+    response.status(206);
+    response.setHeader("Content-Range", `bytes ${start}-${end}/${stat.size}`);
+    response.setHeader("Content-Length", String(end - start + 1));
+    (await this.s3.getPartial(key, start, end - start + 1)).pipe(response);
   }
 
   // Fires on every INSERT into support_requests -- notifies every
