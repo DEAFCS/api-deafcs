@@ -25,7 +25,7 @@ import { ChatLobbyType } from "./enums/ChatLobbyTypes";
 import { S3Service } from "../s3/s3.service";
 import { User } from "../auth/types/User";
 
-const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 200 * 1024 * 1024;
 const ALLOWED_ATTACHMENT_TYPE =
   /^(image\/(png|jpeg|webp|gif)|video\/(mp4|webm|quicktime))$/;
 const EXTENSION_BY_MIMETYPE: Record<string, string> = {
