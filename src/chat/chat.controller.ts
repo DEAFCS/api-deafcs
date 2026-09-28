@@ -8,13 +8,7 @@ import {
   Post,
   Req,
   Res,
-  UploadedFile,
-  UseInterceptors,
-  ParseFilePipe,
-  MaxFileSizeValidator,
-  FileTypeValidator,
 } from "@nestjs/common";
-import { FileInterceptor } from "@nestjs/platform-express";
 import { Request, Response } from "express";
 import crypto from "crypto";
 import { HasuraEvent } from "src/hasura/hasura.controller";
@@ -53,31 +47,44 @@ export class ChatController {
   // Uploaded ahead of the actual "lobby:chat" websocket send -- the chat
   // message doesn't exist yet at upload time, so this just stashes the
   // file in S3 under the uploader's own steam_id and hands back the key
-  // for the client to include as `attachment` on the socket send. Mirrors
-  // support-requests.controller.ts's attachment endpoint exactly.
+  // for the client to include as `attachment` on the socket send.
+  //
+  // Takes the file as a raw binary body (Content-Type: the file's own
+  // mimetype) rather than multipart/form-data like support-requests'
+  // equivalent endpoint does -- confirmed in production that a ~95MB
+  // video from an iPhone never even reached this server when sent as
+  // multipart: Safari appears to buffer the whole multipart body in
+  // memory before sending anything, which silently failed for a file
+  // that size. A raw body lets the browser stream the file directly.
+  // See chat.module.ts for the express.raw() body parser this route
+  // needs instead of the global json/urlencoded ones.
   @Post("attachment")
-  @UseInterceptors(FileInterceptor("file"))
-  public async uploadAttachment(
-    @Req() request: Request,
-    @UploadedFile(
-      new ParseFilePipe({
-        validators: [
-          new MaxFileSizeValidator({ maxSize: MAX_ATTACHMENT_BYTES }),
-          new FileTypeValidator({ fileType: ALLOWED_ATTACHMENT_TYPE }),
-        ],
-      }),
-    )
-    file: Express.Multer.File,
-  ) {
+  public async uploadAttachment(@Req() request: Request) {
     const user = request.user as User | undefined;
     if (!user?.steam_id) {
       throw new ForbiddenException("authentication required");
     }
-    const ext = EXTENSION_BY_MIMETYPE[file.mimetype] || "bin";
+
+    const contentType = (request.headers["content-type"] || "").split(";")[0].trim();
+    if (!ALLOWED_ATTACHMENT_TYPE.test(contentType)) {
+      throw new BadRequestException(
+        "unsupported file type, expected an image or video",
+      );
+    }
+
+    const buffer = request.body;
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+      throw new BadRequestException("file is required");
+    }
+    if (buffer.length > MAX_ATTACHMENT_BYTES) {
+      throw new BadRequestException("file is too large");
+    }
+
+    const ext = EXTENSION_BY_MIMETYPE[contentType] || "bin";
     const hash = crypto.randomBytes(8).toString("hex");
     const path = `chat-attachments/${user.steam_id}/${hash}.${ext}`;
-    await this.s3.put(path, file.buffer, file.mimetype);
-    return { success: true, path, contentType: file.mimetype };
+    await this.s3.put(path, buffer, contentType);
+    return { success: true, path, contentType };
   }
 
   // Streams a sent attachment back by its random id (never the raw S3 key,
