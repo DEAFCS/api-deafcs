@@ -16,6 +16,7 @@ export class SendSanctionNotifications extends WorkerHost {
       steamId: string;
       type: string;
       reason?: string | null;
+      notifyTeammates?: boolean;
     }>,
   ): Promise<void> {
     await this.notifications.notifyBannedPlayer(job.data);

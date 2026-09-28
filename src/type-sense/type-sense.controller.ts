@@ -128,6 +128,11 @@ export class TypeSenseController {
           steamId: data.new.player_steam_id as string,
           type: data.new.type as string,
           reason: data.new.reason as string | null,
+          // Not yet in the generated Zeus schema -- that's regenerated from
+          // live Hasura introspection, which only picks up the column once
+          // this migration has actually run against it.
+          notifyTeammates: (data.new as { notify_teammates?: boolean })
+            .notify_teammates,
         });
       } catch (error) {
         this.logger.error(

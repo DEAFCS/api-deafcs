@@ -65,6 +65,7 @@ export class NotificationsService {
     steamId: string;
     type: string;
     reason?: string | null;
+    notifyTeammates?: boolean;
   }): Promise<void> {
     await this.sanctionNotificationsQueue.add(
       "SendSanctionNotifications",
@@ -128,6 +129,7 @@ export class NotificationsService {
     steamId: string;
     type: string;
     reason?: string | null;
+    notifyTeammates?: boolean;
   }): Promise<void> {
     // Former teammates only ever need to hear about an actual ban -- a
     // website chat mute, in-game mute/gag, or silence is between the
@@ -139,6 +141,13 @@ export class NotificationsService {
     // co-players receiving what read to them as a ban notification when
     // an admin only issued a website_chat_mute).
     if (sanction.type !== "ban") {
+      return;
+    }
+
+    // Opt-in per the "Notify teammates" checkbox on the Ban dialog --
+    // defaults to off, since most bans shouldn't broadcast to every
+    // co-player from the last 6 months.
+    if (!sanction.notifyTeammates) {
       return;
     }
 

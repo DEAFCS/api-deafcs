@@ -28,6 +28,7 @@ export class SanctionsController {
     duration?: number | null;
     evidence_message_id?: string | null;
     also_restrict_website?: boolean;
+    notify_teammates?: boolean;
     user: User;
   }) {
     const {
@@ -38,6 +39,7 @@ export class SanctionsController {
       duration,
       evidence_message_id,
       also_restrict_website,
+      notify_teammates,
       user,
     } = data;
 
@@ -64,6 +66,7 @@ export class SanctionsController {
       sanctionedBySteamId: user.steam_id,
       evidenceMessageId: evidence_message_id,
       alsoRestrictWebsite: also_restrict_website,
+      notifyTeammates: notify_teammates,
     });
   }
 

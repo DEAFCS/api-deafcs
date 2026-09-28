@@ -125,6 +125,7 @@ export class SanctionsService {
     sanctionedBySteamId: string;
     evidenceMessageId?: string | null;
     alsoRestrictWebsite?: boolean;
+    notifyTeammates?: boolean;
   }): Promise<{ id: string | null; enforced: boolean; message: string }> {
     const {
       serverId,
@@ -135,6 +136,7 @@ export class SanctionsService {
       sanctionedBySteamId,
       evidenceMessageId,
       alsoRestrictWebsite,
+      notifyTeammates,
     } = params;
 
     if (!SanctionsService.SANCTION_TYPES.includes(type)) {
@@ -331,17 +333,17 @@ export class SanctionsService {
         }>(
           `INSERT INTO public.player_sanctions (
              type, player_steam_id, sanctioned_by_steam_id, reason,
-             remove_sanction_date, evidence_message_id
+             remove_sanction_date, evidence_message_id, notify_teammates
            )
            VALUES
              ('ban', $1::bigint, $2::bigint, $3,
               CASE WHEN $4::double precision > 0
                 THEN now() + ($4::double precision * interval '1 millisecond')
-                ELSE NULL END, $5),
+                ELSE NULL END, $5, $6),
              ('website_restriction', $1::bigint, $2::bigint, $3,
               CASE WHEN $4::double precision > 0
                 THEN now() + ($4::double precision * interval '1 millisecond')
-                ELSE NULL END, $5)
+                ELSE NULL END, $5, false)
            RETURNING id, type, remove_sanction_date`,
           [
             steamId,
@@ -349,6 +351,7 @@ export class SanctionsService {
             trimmedReason,
             duration ?? 0,
             evidenceMessageId ?? null,
+            notifyTeammates ?? false,
           ],
         );
         return result.rows;
@@ -381,6 +384,7 @@ export class SanctionsService {
               sanctioned_by_steam_id: sanctionedBySteamId,
               reason: reason ?? null,
               remove_sanction_date: removeSanctionDate,
+              notify_teammates: type === "ban" ? (notifyTeammates ?? false) : false,
             },
           },
           id: true,
