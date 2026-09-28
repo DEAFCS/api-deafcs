@@ -155,6 +155,31 @@ export class ProcessTournamentAttendance extends WorkerHost {
       );
 
       closedRegistration = closed.rows.length > 0;
+
+      if (closedRegistration && tournament.individual_registration_enabled) {
+        // Solo Random no-shows: a Registered player who never checked in is
+        // finalized as Removed at the cutoff, in the same transaction as the
+        // close, so nobody who skipped attendance is left looking like a
+        // final participant. Same marker ProcessTournamentCheckInExpiry uses
+        // for the manual flow. Unchecked Waitlisted players never held a
+        // spot and simply stay Waitlisted (sitting out); checked-in players
+        // are untouched and go to team generation below, which leaves any
+        // checked-in overflow Waitlisted rather than Removed.
+        const noShows = await client.query<{ id: string }>(
+          `UPDATE public.tournament_individual_signups
+           SET status = 'Removed'
+           WHERE tournament_id = $1
+             AND status = 'Registered'
+             AND checked_in_at IS NULL
+           RETURNING id`,
+          [tournamentId],
+        );
+        if (noShows.rows.length > 0) {
+          this.logger.log(
+            `[${tournamentId}] marked ${noShows.rows.length} unchecked Solo Random signup(s) Removed at tournament attendance cutoff`,
+          );
+        }
+      }
     });
 
     if (!closedRegistration) {

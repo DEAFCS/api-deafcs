@@ -676,3 +676,96 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
     expect(demoMetadata.deleteDemosForMatch).not.toHaveBeenCalled();
   });
 });
+
+// Player self check-in for Solo Random. Which signup statuses may check in
+// depends on the window: the automatic attendance window (tournament still
+// RegistrationOpen) accepts Registered and Waitlisted, because team
+// generation selects from every checked-in signup against the current
+// capacity; the manual multi-round window (RegistrationClosed) keeps asking
+// only Registered players. Real SQL behavior is covered in
+// test/tournament-individual-participant-management.spec.ts.
+describe("TournamentsController.checkIntoTournament", () => {
+  const steamId = "76561199000000042";
+  const user = { steam_id: steamId, role: "user" } as any;
+  const futureWindow = new Date(Date.now() + 60_000).toISOString();
+  const pastWindow = new Date(Date.now() - 60_000).toISOString();
+
+  let controller: TournamentsController;
+  let hasura: { query: jest.Mock; mutation: jest.Mock };
+  let postgres: { query: jest.Mock };
+
+  beforeEach(() => {
+    hasura = { query: jest.fn(), mutation: jest.fn() };
+    postgres = { query: jest.fn().mockResolvedValue([{ id: "signup-1" }]) };
+    controller = new TournamentsController(
+      { log: jest.fn(), error: jest.fn() } as any,
+      hasura as any,
+      {} as any, // demoMetadata
+      {} as any, // clips
+      {} as any, // tournamentVoice
+      postgres as any,
+      {} as any, // awards
+      {} as any, // notifications
+      {} as any, // teamGeneration
+      { assertAccepted: jest.fn().mockResolvedValue(undefined) } as any,
+    );
+  });
+
+  const tournament = (status: string, endsAt: string | null = futureWindow) =>
+    hasura.query.mockResolvedValueOnce({
+      tournaments_by_pk: {
+        id: "tid",
+        status,
+        individual_check_in_ends_at: endsAt,
+      },
+    });
+
+  it("automatic window (RegistrationOpen): Registered and Waitlisted may check in", async () => {
+    tournament("RegistrationOpen");
+    await expect(
+      controller.checkIntoTournament({ user, tournament_id: "tid" }),
+    ).resolves.toEqual({ success: true });
+
+    const [sql, params] = postgres.query.mock.calls[0];
+    expect(sql).toContain("status = ANY($3::text[])");
+    expect(params).toEqual(["tid", steamId, ["Registered", "Waitlisted"]]);
+  });
+
+  it("manual window (RegistrationClosed): only Registered, as before", async () => {
+    tournament("RegistrationClosed");
+    await controller.checkIntoTournament({ user, tournament_id: "tid" });
+    expect(postgres.query.mock.calls[0][1]).toEqual([
+      "tid",
+      steamId,
+      ["Registered"],
+    ]);
+  });
+
+  it("keeps the first check-in time on a repeated click", async () => {
+    tournament("RegistrationOpen");
+    await controller.checkIntoTournament({ user, tournament_id: "tid" });
+    expect(postgres.query.mock.calls[0][0]).toContain(
+      "checked_in_at = COALESCE(checked_in_at, now())",
+    );
+  });
+
+  it("rejects when no eligible signup matched", async () => {
+    tournament("RegistrationClosed");
+    postgres.query.mockResolvedValueOnce([]);
+    await expect(
+      controller.checkIntoTournament({ user, tournament_id: "tid" }),
+    ).rejects.toThrow(/not currently eligible/);
+  });
+
+  it("rejects outside the window, for Waitlisted and Registered alike", async () => {
+    tournament("RegistrationOpen", pastWindow);
+    await expect(
+      controller.checkIntoTournament({ user, tournament_id: "tid" }),
+    ).rejects.toThrow(/check-in is not currently open/);
+    tournament("RegistrationOpen", null);
+    await expect(
+      controller.checkIntoTournament({ user, tournament_id: "tid" }),
+    ).rejects.toThrow(/check-in is not currently open/);
+    expect(postgres.query).not.toHaveBeenCalled();
+  });
+});

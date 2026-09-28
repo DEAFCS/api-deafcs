@@ -2,6 +2,59 @@ import { Injectable, Logger } from "@nestjs/common";
 import { HasuraService } from "../hasura/hasura.service";
 import { PostgresService } from "../postgres/postgres.service";
 
+// A signup may be placed on a generated team only if it confirmed
+// attendance: Registered or Waitlisted, AND checked in. Being Registered is
+// not enough on its own -- a Registered player who never checked in is a
+// no-show and must never land on a roster. Waitlisted is allowed because the
+// waitlist is only a snapshot of the capacity at sign-up time; if the
+// current max_teams now has room, a checked-in waitlisted player qualifies
+// by registration priority like anyone else. Assigned (already on a team)
+// and Removed (finalized no-show) are never selected.
+export const TEAM_GENERATION_STATUSES: Array<"Registered" | "Waitlisted"> = [
+  "Registered",
+  "Waitlisted",
+];
+
+export function isEligibleForTeamGeneration(signup: {
+  status?: string | null;
+  checked_in_at?: unknown;
+}): boolean {
+  return (
+    TEAM_GENERATION_STATUSES.includes(signup?.status as "Registered") &&
+    signup?.checked_in_at != null
+  );
+}
+
+// Step 1 of selection (see generateTournamentTeamsForTournament): WHO plays.
+// Pure so the capacity/priority rule is unit-testable on its own. Uses the
+// CURRENT first-stage max_teams passed in, never the capacity that was in
+// force when a player signed up, so raising max_teams before generation
+// lets earlier-waitlisted checked-in players in.
+export function selectTeamGenerationPool<T extends { created_at?: unknown }>(
+  eligible: Array<T>,
+  teamSize: number,
+  maxTeams: number | null,
+): { teamCount: number; selected: Array<T>; overflow: Array<T> } {
+  const byPriority = [...eligible].sort(
+    (a, b) =>
+      new Date(a.created_at as string).getTime() -
+      new Date(b.created_at as string).getTime(),
+  );
+  const teamCountByHeadcount = Math.floor(byPriority.length / teamSize);
+  const teamCount = Math.max(
+    maxTeams != null
+      ? Math.min(maxTeams, teamCountByHeadcount)
+      : teamCountByHeadcount,
+    0,
+  );
+  const assignedCount = teamCount * teamSize;
+  return {
+    teamCount,
+    selected: byPriority.slice(0, assignedCount),
+    overflow: byPriority.slice(assignedCount),
+  };
+}
+
 // Individual sign-up (match_options.individual_registration_enabled):
 // ELO-balances everyone eligible in tournament_individual_signups into
 // fresh, ad-hoc tournament_teams (team_id left NULL, same as a brand-new
@@ -28,11 +81,11 @@ export class TournamentTeamGenerationService {
   // collide with tournament_teams_tournament_id_name_key.
   //
   // Selection is two separate steps, deliberately in this order:
-  //  1. WHO participates: every eligible signup (Registered, or Waitlisted
-  //     with checked_in_at set -- a checked-in waitlisted player can still
-  //     earn a spot), sorted by ORIGINAL registration time (created_at)
-  //     ascending, capped at min(tournament max_teams, floor(eligible /
-  //     teamSize)) full teams' worth. Registration priority decides this,
+  //  1. WHO participates: every eligible signup (Registered or Waitlisted,
+  //     and checked in -- see isEligibleForTeamGeneration), sorted by
+  //     ORIGINAL registration time (created_at) ascending, capped at
+  //     min(current first-stage max_teams, floor(eligible / teamSize)) full
+  //     teams' worth. Registration priority decides this,
   //     never ELO -- an earlier low-ELO signup is never bumped by a later
   //     high-ELO one.
   //  2. WHICH TEAM: only the selected pool from step 1 is shuffled (for
@@ -52,22 +105,19 @@ export class TournamentTeamGenerationService {
       return { teamsCreated: 0, waitlisted: 0 };
     }
 
-    const { tournament_individual_signups: signups } = await this.hasura.query({
+    const { tournament_individual_signups: rows } = await this.hasura.query({
       tournament_individual_signups: {
         __args: {
           where: {
             tournament_id: { _eq: tournamentId },
-            _or: [
-              { status: { _eq: "Registered" } },
-              {
-                status: { _eq: "Waitlisted" },
-                checked_in_at: { _is_null: false },
-              },
-            ],
+            status: { _in: TEAM_GENERATION_STATUSES },
+            checked_in_at: { _is_null: false },
           },
         },
         id: true,
         player_steam_id: true,
+        status: true,
+        checked_in_at: true,
         created_at: true,
         player: {
           name: true,
@@ -76,8 +126,11 @@ export class TournamentTeamGenerationService {
       },
     });
 
-    if (!signups?.length) {
-      throw Error("no eligible individually-registered players to generate teams from");
+    // Re-applied in code so the rule never rests on the query filter alone.
+    const signups = (rows ?? []).filter(isEligibleForTeamGeneration);
+
+    if (!signups.length) {
+      throw Error("no checked-in individually-registered players to generate teams from");
     }
 
     const maxTeamsRows = await this.postgres.query<Array<{ max_teams: number }>>(
@@ -86,24 +139,17 @@ export class TournamentTeamGenerationService {
     );
     const maxTeams = maxTeamsRows[0]?.max_teams ?? null;
 
-    const byPriority = [...signups].sort(
-      (a, b) =>
-        new Date(a.created_at as string).getTime() -
-        new Date(b.created_at as string).getTime(),
-    );
-
-    const teamCountByHeadcount = Math.floor(byPriority.length / teamSize);
-    const teamCount =
-      maxTeams != null ? Math.min(maxTeams, teamCountByHeadcount) : teamCountByHeadcount;
+    const {
+      teamCount,
+      selected,
+      overflow: waitlisted,
+    } = selectTeamGenerationPool(signups, teamSize, maxTeams);
     if (teamCount < 1) {
       throw Error(
-        `not enough eligible players (${byPriority.length}) for a single ${teamSize}-player team`,
+        `not enough checked-in players (${signups.length}) for a single ${teamSize}-player team`,
       );
     }
-
-    const assignedCount = teamCount * teamSize;
-    const waitlisted = byPriority.slice(assignedCount);
-    const selected = byPriority.slice(0, assignedCount);
+    const assignedCount = selected.length;
 
     // wingman = 2v2, everything else (competitive 5v5, etc.) uses the
     // competitive ladder -- there's no third team-size bracket today.

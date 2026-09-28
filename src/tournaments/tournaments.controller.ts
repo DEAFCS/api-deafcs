@@ -600,6 +600,7 @@ export class TournamentsController {
       tournaments_by_pk: {
         __args: { id: tournament_id },
         id: true,
+        status: true,
         individual_check_in_ends_at: true,
       },
     });
@@ -615,12 +616,27 @@ export class TournamentsController {
       throw Error("check-in is not currently open for this tournament");
     }
 
+    // Which signups may check themselves in depends on which window this is,
+    // and the tournament status tells them apart (see
+    // ProcessTournamentCheckInExpiry's guards):
+    //  - RegistrationOpen: the automatic single-shot attendance window.
+    //    Waitlisted players check in too, because team generation selects
+    //    from every checked-in Registered/Waitlisted signup against the
+    //    CURRENT capacity. Checking in never promises a team spot.
+    //  - RegistrationClosed: the manual multi-round window. Only Registered
+    //    players are asked; waitlisted players get their own fresh window
+    //    when promoted, so their semantics are unchanged.
+    const allowedStatuses =
+      tournament.status === "RegistrationOpen"
+        ? ["Registered", "Waitlisted"]
+        : ["Registered"];
+
     const updated = await this.postgres.query<Array<{ id: string }>>(
       `UPDATE public.tournament_individual_signups
-       SET checked_in_at = now()
-       WHERE tournament_id = $1 AND player_steam_id = $2 AND status = 'Registered'
+       SET checked_in_at = COALESCE(checked_in_at, now())
+       WHERE tournament_id = $1 AND player_steam_id = $2 AND status = ANY($3::text[])
        RETURNING id`,
-      [tournament_id, data.user.steam_id],
+      [tournament_id, data.user.steam_id, allowedStatuses],
     );
 
     if (!updated.length) {

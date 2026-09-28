@@ -36,26 +36,35 @@ describe("tournament attendance check-in (SQL-driven)", () => {
     // generateTournamentTeamsForTournament actually makes (the eligible
     // signups lookup) needs a fake; everything else it does is raw SQL
     // against the same real postgres instance.
+    //
+    // Deliberately returns EVERY signup of the tournament, ignoring the
+    // query's status/checked_in_at filter, so these tests prove the
+    // service's own attendance rule (isEligibleForTeamGeneration) rather
+    // than a filter re-implemented here.
     const hasuraStub = {
       query: async (queryObj: any) => {
         const args = queryObj.tournament_individual_signups.__args.where;
         const tournamentId = args.tournament_id._eq;
         const rows = await postgres.query<
-          Array<{ id: string; player_steam_id: string; created_at: string }>
+          Array<{
+            id: string;
+            player_steam_id: string;
+            status: string;
+            checked_in_at: string | null;
+            created_at: string;
+          }>
         >(
-          `SELECT id, player_steam_id, created_at
+          `SELECT id, player_steam_id, status, checked_in_at, created_at
            FROM tournament_individual_signups
-           WHERE tournament_id = $1
-             AND (
-               status = 'Registered'
-               OR (status = 'Waitlisted' AND checked_in_at IS NOT NULL)
-             )`,
+           WHERE tournament_id = $1`,
           [tournamentId],
         );
         return {
           tournament_individual_signups: rows.map((row) => ({
             id: row.id,
             player_steam_id: row.player_steam_id,
+            status: row.status,
+            checked_in_at: row.checked_in_at,
             created_at: row.created_at,
             player: {
               name: `player-${row.player_steam_id}`,
@@ -253,14 +262,15 @@ describe("tournament attendance check-in (SQL-driven)", () => {
 
       // 7 signups, strictly increasing created_at (p1 earliest .. p7 latest).
       // Cap is 6, so the trigger lands p1..p6 Registered and p7 Waitlisted
-      // at insert time.
+      // at insert time. Everyone is checked in: attendance is required for
+      // generation, so this test isolates priority vs ELO.
       const steamIds: Array<string> = [];
       for (let i = 0; i < 7; i++) {
         const player = await fx.player();
         steamIds.push(player);
         await postgres.query(
-          `INSERT INTO tournament_individual_signups (tournament_id, player_steam_id, created_at)
-           VALUES ($1, $2, now() + ($3 || ' seconds')::interval)`,
+          `INSERT INTO tournament_individual_signups (tournament_id, player_steam_id, created_at, checked_in_at)
+           VALUES ($1, $2, now() + ($3 || ' seconds')::interval, now())`,
           [t.id, player, i],
         );
       }
@@ -333,8 +343,8 @@ describe("tournament attendance check-in (SQL-driven)", () => {
         const player = await fx.player();
         steamIds.push(player);
         await postgres.query(
-          `INSERT INTO tournament_individual_signups (tournament_id, player_steam_id, created_at)
-           VALUES ($1, $2, now() + ($3 || ' seconds')::interval)`,
+          `INSERT INTO tournament_individual_signups (tournament_id, player_steam_id, created_at, checked_in_at)
+           VALUES ($1, $2, now() + ($3 || ' seconds')::interval, now())`,
           [t.id, player, i],
         );
       }
@@ -368,8 +378,8 @@ describe("tournament attendance check-in (SQL-driven)", () => {
       for (let i = 0; i < 4; i++) {
         const player = await fx.player();
         await postgres.query(
-          `INSERT INTO tournament_individual_signups (tournament_id, player_steam_id, created_at)
-           VALUES ($1, $2, now() + ($3 || ' seconds')::interval)`,
+          `INSERT INTO tournament_individual_signups (tournament_id, player_steam_id, created_at, checked_in_at)
+           VALUES ($1, $2, now() + ($3 || ' seconds')::interval, now())`,
           [t.id, player, i],
         );
       }
@@ -386,6 +396,413 @@ describe("tournament attendance check-in (SQL-driven)", () => {
         [t.id],
       );
       expect(Number(count)).toBe(2);
+    });
+  });
+
+  // --- Solo Random: attendance is required (real-world regressions) ---
+  //
+  // A Registered player who never checked in used to be eligible for team
+  // generation. The rule now is (Registered OR Waitlisted) AND checked in,
+  // against the CURRENT first-stage max_teams, in created_at priority order.
+  // 5v5 (Competitive) so the numbers match the live tournaments.
+
+  describe("Solo Random attendance-required generation (5v5)", () => {
+    const makeAttendanceJob = () =>
+      new ProcessTournamentAttendance(
+        { log: jest.fn(), error: jest.fn(), warn: jest.fn() } as any,
+        postgres,
+        generation,
+      );
+    const makeExpiryJob = () =>
+      new ProcessTournamentCheckInExpiry(
+        { log: jest.fn(), error: jest.fn(), warn: jest.fn() } as any,
+        postgres,
+      );
+
+    const soloRandom = async (maxTeams: number, matchType = "Competitive") => {
+      const t = await tfx.createTournament(
+        [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams }],
+        matchType,
+      );
+      await tfx.setStatus(t.id, t.organizer, "RegistrationOpen");
+      await postgres.query(
+        "UPDATE match_options SET individual_registration_enabled = true WHERE id = (SELECT match_options_id FROM tournaments WHERE id = $1)",
+        [t.id],
+      );
+      return t;
+    };
+
+    // Signs up `count` players in strictly increasing created_at order
+    // (continuing from `offset`), through the real insert trigger so the
+    // capacity cap decides Registered vs Waitlisted. The attendance window
+    // is not open yet, so nobody is auto-checked-in.
+    const signUpMany = async (
+      tournamentId: string,
+      count: number,
+      offset = 0,
+    ): Promise<Array<string>> => {
+      const steamIds: Array<string> = [];
+      for (let i = 0; i < count; i++) {
+        const player = await fx.player();
+        steamIds.push(player);
+        await postgres.query(
+          `INSERT INTO tournament_individual_signups (tournament_id, player_steam_id, created_at)
+           VALUES ($1, $2, now() + ($3 || ' seconds')::interval)`,
+          [tournamentId, player, offset + i],
+        );
+      }
+      return steamIds;
+    };
+
+    const checkIn = (tournamentId: string, steamIds: Array<string>) =>
+      postgres.query(
+        `UPDATE tournament_individual_signups SET checked_in_at = now()
+         WHERE tournament_id = $1 AND player_steam_id = ANY($2::bigint[])`,
+        [tournamentId, steamIds],
+      );
+
+    // Automatic attendance window has reached its close_before cutoff.
+    const windowDue = (tournamentId: string) =>
+      postgres.query(
+        `UPDATE tournaments
+         SET start = now() + interval '10 minutes',
+             individual_check_in_ends_at = now() - interval '1 minute'
+         WHERE id = $1`,
+        [tournamentId],
+      );
+
+    const statusOf = async (tournamentId: string) => {
+      const rows = await postgres.query<
+        Array<{ player_steam_id: string; status: string; checked_in: boolean }>
+      >(
+        `SELECT player_steam_id::text, status, checked_in_at IS NOT NULL AS checked_in
+         FROM tournament_individual_signups WHERE tournament_id = $1`,
+        [tournamentId],
+      );
+      return new Map(rows.map((row) => [row.player_steam_id, row]));
+    };
+
+    const countBy = async (tournamentId: string) => {
+      const rows = await postgres.query<
+        Array<{ status: string; checked_in: boolean; count: number }>
+      >(
+        `SELECT status, checked_in_at IS NOT NULL AS checked_in, COUNT(*)::int AS count
+         FROM tournament_individual_signups WHERE tournament_id = $1
+         GROUP BY 1, 2`,
+        [tournamentId],
+      );
+      const key = (status: string, checkedIn: boolean) =>
+        rows.find((r) => r.status === status && r.checked_in === checkedIn)
+          ?.count ?? 0;
+      return {
+        assigned: key("Assigned", true) + key("Assigned", false),
+        assignedUnchecked: key("Assigned", false),
+        waitlistedChecked: key("Waitlisted", true),
+        waitlistedUnchecked: key("Waitlisted", false),
+        registered: key("Registered", true) + key("Registered", false),
+        removed: key("Removed", true) + key("Removed", false),
+        // Same definitions the WEB attendance summary uses.
+        signedUp: rows.reduce((sum, r) => sum + r.count, 0),
+        checkedIn: rows
+          .filter((r) => r.checked_in)
+          .reduce((sum, r) => sum + r.count, 0),
+      };
+    };
+
+    const rosterOf = async (tournamentId: string) =>
+      new Set(
+        (
+          await postgres.query<Array<{ player_steam_id: string }>>(
+            `SELECT player_steam_id::text FROM tournament_team_roster WHERE tournament_id = $1`,
+            [tournamentId],
+          )
+        ).map((row) => row.player_steam_id),
+      );
+
+    const teamCount = async (tournamentId: string) => {
+      const [{ count }] = await postgres.query<Array<{ count: number }>>(
+        `SELECT COUNT(*)::int AS count FROM tournament_teams WHERE tournament_id = $1`,
+        [tournamentId],
+      );
+      return Number(count);
+    };
+
+    it("A) 44 signups, 39 checked in, max 8 (automatic flow): 7 teams, 35 Assigned, 4 sit out, 5 no-shows Removed, zero unchecked assigned", async () => {
+      const t = await soloRandom(8); // cap 8 * 5 = 40
+      const players = await signUpMany(t.id, 44);
+      const statuses = await statusOf(t.id);
+      expect(
+        players.filter((p) => statuses.get(p)!.status === "Registered"),
+      ).toHaveLength(40);
+
+      // 5 Registered players (spread through priority, including the very
+      // first signup) never check in; everyone else does.
+      const unchecked = [players[0], players[7], players[15], players[22], players[39]];
+      const checked = players.filter((p) => !unchecked.includes(p));
+      expect(checked).toHaveLength(39);
+      await checkIn(t.id, checked);
+
+      await windowDue(t.id);
+      await makeAttendanceJob().process();
+
+      expect(await tfx.tournamentStatus(t.id)).toBe("RegistrationClosed");
+      expect(await teamCount(t.id)).toBe(7);
+      const counts = await countBy(t.id);
+      expect(counts.assigned).toBe(35);
+      expect(counts.assignedUnchecked).toBe(0);
+      expect(counts.waitlistedChecked).toBe(4);
+      expect(counts.removed).toBe(5);
+      expect(counts.registered).toBe(0);
+
+      const roster = await rosterOf(t.id);
+      expect(roster.size).toBe(35);
+      const after = await statusOf(t.id);
+      for (const p of unchecked) {
+        expect(roster.has(p)).toBe(false);
+        expect(after.get(p)!.status).toBe("Removed");
+      }
+      // The 4 latest checked-in signups (the original waitlist) sit out as
+      // Waitlisted, not Removed.
+      for (const p of players.slice(40)) {
+        expect(after.get(p)!.status).toBe("Waitlisted");
+        expect(roster.has(p)).toBe(false);
+      }
+
+      expect(counts.signedUp).toBe(44);
+      expect(counts.checkedIn).toBe(39);
+    });
+
+    it("B) 40 checked in, max 8: 8 teams, 40 Assigned, nobody sits out", async () => {
+      const t = await soloRandom(8);
+      const players = await signUpMany(t.id, 40);
+      await checkIn(t.id, players);
+
+      await windowDue(t.id);
+      await makeAttendanceJob().process();
+
+      expect(await teamCount(t.id)).toBe(8);
+      const counts = await countBy(t.id);
+      expect(counts.assigned).toBe(40);
+      expect(counts.waitlistedChecked).toBe(0);
+      expect(counts.removed).toBe(0);
+    });
+
+    it("C) stale cap: waitlisted under max 7, all 40 check in, max raised to 8 before generation => 8 teams, all 40 assigned", async () => {
+      const t = await soloRandom(7); // cap 7 * 5 = 35
+      const players = await signUpMany(t.id, 40);
+      const before = await statusOf(t.id);
+      const waitlisted = players.filter(
+        (p) => before.get(p)!.status === "Waitlisted",
+      );
+      expect(waitlisted).toEqual(players.slice(35));
+
+      await checkIn(t.id, players);
+      await postgres.query(
+        `UPDATE tournament_stages SET max_teams = 8 WHERE tournament_id = $1 AND "order" = 1`,
+        [t.id],
+      );
+
+      await windowDue(t.id);
+      await makeAttendanceJob().process();
+
+      expect(await teamCount(t.id)).toBe(8);
+      const counts = await countBy(t.id);
+      expect(counts.assigned).toBe(40);
+      const roster = await rosterOf(t.id);
+      for (const p of waitlisted) {
+        expect(roster.has(p)).toBe(true);
+      }
+    });
+
+    it("44 / 40 attendance example is coherent with final statuses: 35 Assigned, 5 checked-in sit out, 4 Removed", async () => {
+      const t = await soloRandom(7);
+      const players = await signUpMany(t.id, 44);
+      // 4 Registered no-shows; the other 40 (including all 9 waitlisted)
+      // check in. Capacity still allows only 7 teams.
+      const unchecked = players.slice(0, 4);
+      await checkIn(t.id, players.slice(4));
+
+      await windowDue(t.id);
+      await makeAttendanceJob().process();
+
+      const counts = await countBy(t.id);
+      expect(counts.assigned).toBe(35);
+      expect(counts.waitlistedChecked).toBe(5);
+      expect(counts.removed).toBe(4);
+      expect(counts.signedUp).toBe(44);
+      expect(counts.checkedIn).toBe(40);
+      const roster = await rosterOf(t.id);
+      for (const p of unchecked) expect(roster.has(p)).toBe(false);
+    });
+
+    it("E) an unchecked Waitlisted player is never assigned, and stays Waitlisted (not Removed)", async () => {
+      const t = await soloRandom(8);
+      const players = await signUpMany(t.id, 11);
+      const lateWaitlisted = players[10];
+      await postgres.query(
+        `UPDATE tournament_individual_signups SET status = 'Waitlisted'
+         WHERE tournament_id = $1 AND player_steam_id = $2`,
+        [t.id, lateWaitlisted],
+      );
+      await checkIn(t.id, players.slice(0, 10));
+
+      await windowDue(t.id);
+      await makeAttendanceJob().process();
+
+      expect((await rosterOf(t.id)).has(lateWaitlisted)).toBe(false);
+      expect((await statusOf(t.id)).get(lateWaitlisted)!.status).toBe(
+        "Waitlisted",
+      );
+      expect((await countBy(t.id)).assigned).toBe(10);
+    });
+
+    it("F) an unchecked Registered player is never assigned, even via manual Generate Teams", async () => {
+      const t = await soloRandom(8);
+      const players = await signUpMany(t.id, 11);
+      const firstButAbsent = players[0];
+      await checkIn(t.id, players.slice(1));
+      await tfx.setStatus(t.id, t.organizer, "RegistrationClosed");
+
+      const result = await generation.generateTournamentTeamsForTournament(
+        t.id,
+        5,
+      );
+      expect(result).toEqual({ teamsCreated: 2, waitlisted: 0 });
+      expect((await rosterOf(t.id)).has(firstButAbsent)).toBe(false);
+      expect((await statusOf(t.id)).get(firstButAbsent)!.status).not.toBe(
+        "Assigned",
+      );
+    });
+
+    it("manual Generate Teams refuses when nobody checked in", async () => {
+      const t = await soloRandom(8);
+      await signUpMany(t.id, 10);
+      await tfx.setStatus(t.id, t.organizer, "RegistrationClosed");
+
+      await expect(
+        generation.generateTournamentTeamsForTournament(t.id, 5),
+      ).rejects.toThrow(/checked-in/);
+      expect(await teamCount(t.id)).toBe(0);
+    });
+
+    it("G) priority: more checked-in than capacity, earliest created_at wins, high ELO cannot bump an earlier signup", async () => {
+      const t = await soloRandom(2); // 10 seats
+      const players = await signUpMany(t.id, 12);
+      await checkIn(t.id, players);
+      for (const p of players.slice(0, 10)) eloOverrides.set(p, 100);
+      eloOverrides.set(players[10], 30000);
+      eloOverrides.set(players[11], 30000);
+
+      await windowDue(t.id);
+      await makeAttendanceJob().process();
+
+      const roster = await rosterOf(t.id);
+      for (const p of players.slice(0, 10)) expect(roster.has(p)).toBe(true);
+      expect(roster.has(players[10])).toBe(false);
+      expect(roster.has(players[11])).toBe(false);
+    });
+
+    it("I) idempotent: the scheduler ticking again and a manual Generate after it are clean no-ops", async () => {
+      const t = await soloRandom(8);
+      const players = await signUpMany(t.id, 10);
+      await checkIn(t.id, players);
+      await windowDue(t.id);
+
+      const job = makeAttendanceJob();
+      await job.process();
+      expect(await teamCount(t.id)).toBe(2);
+
+      const second = await job.process();
+      expect(second.finalized).toBe(0);
+      expect(
+        await generation.generateTournamentTeamsForTournament(t.id, 5),
+      ).toEqual({ teamsCreated: 0, waitlisted: 0 });
+      expect(await teamCount(t.id)).toBe(2);
+      expect((await countBy(t.id)).assigned).toBe(10);
+    });
+
+    it("H) manual RegistrationClosed flow: no-show Removed, waitlist promoted with a fresh window, promoted player must check in, then generation", async () => {
+      const t = await soloRandom(2, "Wingman"); // cap 2 * 2 = 4
+      const players = await signUpMany(t.id, 5);
+      const [p1, p2, p3, p4, p5] = players;
+      expect((await statusOf(t.id)).get(p5)!.status).toBe("Waitlisted");
+
+      await tfx.setStatus(t.id, t.organizer, "RegistrationClosed");
+      // What startTournamentIndividualCheckIn does.
+      await postgres.query(
+        `UPDATE tournaments
+         SET individual_check_in_ends_at = now() - interval '1 minute',
+             individual_check_in_duration_minutes = 5
+         WHERE id = $1`,
+        [t.id],
+      );
+      await checkIn(t.id, [p1, p2, p3]); // p4 no-shows
+
+      expect(await makeExpiryJob().process()).toBe(1);
+      let statuses = await statusOf(t.id);
+      expect(statuses.get(p4)!.status).toBe("Removed");
+      expect(statuses.get(p5)!.status).toBe("Registered");
+      expect(statuses.get(p5)!.checked_in).toBe(false);
+      const [{ ends_at }] = await postgres.query<Array<{ ends_at: Date | null }>>(
+        `SELECT individual_check_in_ends_at AS ends_at FROM tournaments WHERE id = $1`,
+        [t.id],
+      );
+      expect(ends_at).not.toBeNull();
+      expect(new Date(ends_at!).getTime()).toBeGreaterThan(Date.now());
+
+      // The promoted player gets no free pass: they check in during their
+      // own fresh window (the no-check-in case is the next test).
+      await checkIn(t.id, [p5]);
+      await postgres.query(
+        `UPDATE tournaments SET individual_check_in_ends_at = now() - interval '1 minute' WHERE id = $1`,
+        [t.id],
+      );
+      expect(await makeExpiryJob().process()).toBe(1); // nobody removed -> window cleared
+
+      const result = await generation.generateTournamentTeamsForTournament(
+        t.id,
+        2,
+      );
+      expect(result).toEqual({ teamsCreated: 2, waitlisted: 0 });
+      const roster = await rosterOf(t.id);
+      expect(roster).toEqual(new Set([p1, p2, p3, p5]));
+      statuses = await statusOf(t.id);
+      expect(statuses.get(p4)!.status).toBe("Removed");
+    });
+
+    it("H) manual flow: a promoted player who never checks in is Removed, not assigned", async () => {
+      const t = await soloRandom(2, "Wingman");
+      const players = await signUpMany(t.id, 5);
+      const [p1, p2, p3, p4, p5] = players;
+
+      await tfx.setStatus(t.id, t.organizer, "RegistrationClosed");
+      await postgres.query(
+        `UPDATE tournaments
+         SET individual_check_in_ends_at = now() - interval '1 minute',
+             individual_check_in_duration_minutes = 5
+         WHERE id = $1`,
+        [t.id],
+      );
+      await checkIn(t.id, [p1, p2, p3]);
+      await makeExpiryJob().process(); // p4 Removed, p5 promoted
+
+      await postgres.query(
+        `UPDATE tournaments SET individual_check_in_ends_at = now() - interval '1 minute' WHERE id = $1`,
+        [t.id],
+      );
+      await makeExpiryJob().process(); // p5 no-show -> Removed, waitlist empty
+
+      const statuses = await statusOf(t.id);
+      expect(statuses.get(p5)!.status).toBe("Removed");
+
+      const result = await generation.generateTournamentTeamsForTournament(
+        t.id,
+        2,
+      );
+      expect(result).toEqual({ teamsCreated: 1, waitlisted: 1 });
+      const roster = await rosterOf(t.id);
+      expect(roster.has(p4)).toBe(false);
+      expect(roster.has(p5)).toBe(false);
     });
   });
 

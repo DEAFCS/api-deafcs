@@ -330,6 +330,108 @@ describe("Solo Random participant management (SQL-driven)", () => {
 
   // --- organizer removal ----------------------------------------------------
 
+  // --- player self check-in -------------------------------------------------
+
+  describe("checkIntoTournament (self)", () => {
+    const selfCheckIn = (tournamentId: string, steamId: string) =>
+      controller.checkIntoTournament({
+        user: user(steamId),
+        tournament_id: tournamentId,
+      });
+
+    it("D) automatic window (RegistrationOpen): a Waitlisted player checks themselves in", async () => {
+      const t = await createSoloRandom();
+      const player = await fx.player();
+      await signUp(t.id, player, { status: "Waitlisted" });
+      await openWindow(t.id);
+
+      await expect(selfCheckIn(t.id, player)).resolves.toEqual({
+        success: true,
+      });
+      const signup = (await signupOf(t.id, player))!;
+      expect(signup.checked_in_at).not.toBeNull();
+      // Checking in does not promote anyone; the waitlist is resolved at
+      // team generation against the current capacity.
+      expect(signup.status).toBe("Waitlisted");
+    });
+
+    it("automatic window: a Registered player checks themselves in", async () => {
+      const t = await createSoloRandom();
+      const player = await fx.player();
+      await signUp(t.id, player);
+      await openWindow(t.id);
+
+      await selfCheckIn(t.id, player);
+      expect((await signupOf(t.id, player))!.checked_in_at).not.toBeNull();
+    });
+
+    it("a repeated click keeps the first check-in time", async () => {
+      const t = await createSoloRandom();
+      const player = await fx.player();
+      await signUp(t.id, player);
+      await openWindow(t.id);
+
+      await selfCheckIn(t.id, player);
+      const first = (await signupOf(t.id, player))!.checked_in_at;
+      await selfCheckIn(t.id, player);
+      expect((await signupOf(t.id, player))!.checked_in_at).toEqual(first);
+    });
+
+    it("manual window (RegistrationClosed): a Waitlisted player is still not asked to check in", async () => {
+      const t = await createSoloRandom();
+      const player = await fx.player();
+      await signUp(t.id, player, { status: "Waitlisted" });
+      await postgres.query(`UPDATE tournaments SET status = 'RegistrationClosed' WHERE id = $1`, [t.id]);
+      await openWindow(t.id);
+
+      await expect(selfCheckIn(t.id, player)).rejects.toThrow(
+        /not currently eligible/i,
+      );
+      expect((await signupOf(t.id, player))!.checked_in_at).toBeNull();
+    });
+
+    it("manual window: a Registered (or promoted) player checks in as before", async () => {
+      const t = await createSoloRandom();
+      const player = await fx.player();
+      await signUp(t.id, player);
+      await postgres.query(`UPDATE tournaments SET status = 'RegistrationClosed' WHERE id = $1`, [t.id]);
+      await openWindow(t.id);
+
+      await selfCheckIn(t.id, player);
+      expect((await signupOf(t.id, player))!.checked_in_at).not.toBeNull();
+    });
+
+    it("rejects Removed and Assigned signups", async () => {
+      const t = await createSoloRandom();
+      const removed = await fx.player();
+      const assigned = await fx.player();
+      await signUp(t.id, removed, { status: "Removed" });
+      await signUp(t.id, assigned, { status: "Assigned" });
+      await openWindow(t.id);
+
+      await expect(selfCheckIn(t.id, removed)).rejects.toThrow(
+        /not currently eligible/i,
+      );
+      await expect(selfCheckIn(t.id, assigned)).rejects.toThrow(
+        /not currently eligible/i,
+      );
+    });
+
+    it("rejects a Waitlisted player once the window has closed", async () => {
+      const t = await createSoloRandom();
+      const player = await fx.player();
+      await signUp(t.id, player, { status: "Waitlisted" });
+      await postgres.query(
+        `UPDATE tournaments SET individual_check_in_ends_at = now() - interval '1 minute' WHERE id = $1`,
+        [t.id],
+      );
+
+      await expect(selfCheckIn(t.id, player)).rejects.toThrow(
+        /check-in is not currently open/i,
+      );
+    });
+  });
+
   describe("removeTournamentIndividualPlayer (organizer)", () => {
     it("organizer removes a Registered player", async () => {
       const t = await createSoloRandom();
