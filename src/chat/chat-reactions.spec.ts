@@ -279,18 +279,21 @@ describe("ChatService message reactions", () => {
     expect(redis.eval.mock.calls[0][8]).toBe("announcement");
 
     await (service as any).clearChatMessageReactions(announcementId);
-    expect(redis.eval.mock.calls[1][1]).toBe(5);
-    expect(redis.eval.mock.calls[1].slice(2, 7)).toEqual([
+    expect(redis.eval.mock.calls[1][1]).toBe(6);
+    expect(redis.eval.mock.calls[1].slice(2, 8)).toEqual([
       `chat:reaction:deleted:${announcementId}`,
       `chat:reaction:${announcementId}:thumbsup`,
       `chat:reaction:${announcementId}:heart`,
       `chat:reaction:${announcementId}:fire`,
       `chat:reaction:${announcementId}:party`,
+      `chat:reaction:${announcementId}:laugh`,
     ]);
     expect(redis.eval.mock.calls[1][0]).toContain("DEL");
   });
 
   it("loads only positive reaction counts and viewer-specific state for visible messages", async () => {
+    // Pairs are [scard, sismember] per CHAT_REACTION_IDS entry, in order:
+    // thumbsup, heart, fire, party, laugh.
     pipeline.exec.mockResolvedValue([
       [null, 2],
       [null, 1],
@@ -300,7 +303,7 @@ describe("ChatService message reactions", () => {
       [null, 0],
       [null, 0],
       [null, 0],
-      [null, 3],
+      [null, 0],
       [null, 0],
       [null, 0],
       [null, 0],
@@ -328,7 +331,7 @@ describe("ChatService message reactions", () => {
       { ...message, id: "blocked", blocked: true, reactions: [] },
       { ...message, id: "legacy-message-id", reactions: [] },
     ]);
-    expect(pipeline.scard).toHaveBeenCalledTimes(4);
-    expect(pipeline.sismember).toHaveBeenCalledTimes(4);
+    expect(pipeline.scard).toHaveBeenCalledTimes(5);
+    expect(pipeline.sismember).toHaveBeenCalledTimes(5);
   });
 });

@@ -41,6 +41,7 @@ export const CHAT_REACTION_IDS = [
   "heart",
   "fire",
   "party",
+  "laugh",
 ] as const;
 
 export type ChatReactionId = (typeof CHAT_REACTION_IDS)[number];
