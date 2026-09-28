@@ -702,6 +702,65 @@ describe("tournament attendance check-in (SQL-driven)", () => {
       expect(roster.has(players[11])).toBe(false);
     });
 
+    it("signup time beats check-in time: B signed up before C, C checked in first with far higher ELO, one seat left => B plays, C sits out", async () => {
+      // Wingman (2 per team). Seven earlier fillers, then B, then C, all
+      // signed up while max_teams was 5 so everyone lands Registered (status
+      // plays no part here). Capacity then drops to 4 teams = 8 seats: the
+      // fillers take 7, leaving exactly ONE seat for B or C.
+      const t = await soloRandom(5, "Wingman");
+      const signed = await signUpMany(t.id, 9); // created_at ascending
+      const fillers = signed.slice(0, 7);
+      const [b, c] = signed.slice(7);
+      const statusesAtSignup = await statusOf(t.id);
+      for (const p of signed) {
+        expect(statusesAtSignup.get(p)!.status).toBe("Registered");
+      }
+      await postgres.query(
+        `UPDATE tournament_stages SET max_teams = 4 WHERE tournament_id = $1 AND "order" = 1`,
+        [t.id],
+      );
+
+      // Check-in order is the reverse of signup order for B and C: C first,
+      // B last. Everyone is checked in before the cutoff (now - 1 minute).
+      const setCheckedIn = (steamId: string, minutesAgo: number) =>
+        postgres.query(
+          `UPDATE tournament_individual_signups
+           SET checked_in_at = now() - ($3 || ' minutes')::interval
+           WHERE tournament_id = $1 AND player_steam_id = $2`,
+          [t.id, steamId, minutesAgo],
+        );
+      await setCheckedIn(c, 10); // C first
+      for (const p of fillers) await setCheckedIn(p, 6);
+      await setCheckedIn(b, 2); // B last, still before the cutoff
+
+      // C is by far the strongest player; ELO must not matter for selection.
+      for (const p of fillers) eloOverrides.set(p, 5000);
+      eloOverrides.set(b, 100);
+      eloOverrides.set(c, 30000);
+
+      await windowDue(t.id);
+      await makeAttendanceJob().process();
+
+      expect(await teamCount(t.id)).toBe(4);
+      const roster = await rosterOf(t.id);
+      expect(roster).toEqual(new Set([...fillers, b]));
+      expect(roster.has(b)).toBe(true);
+      expect(roster.has(c)).toBe(false);
+
+      const after = await statusOf(t.id);
+      expect(after.get(b)!.status).toBe("Assigned");
+      expect(after.get(c)!.status).not.toBe("Assigned");
+      // Checked-in overflow sits out as Waitlisted, never Removed.
+      expect(after.get(c)!.status).toBe("Waitlisted");
+      expect(after.get(c)!.checked_in).toBe(true);
+      // Nobody unchecked was involved.
+      for (const p of signed) expect(after.get(p)!.checked_in).toBe(true);
+      const counts = await countBy(t.id);
+      expect(counts.removed).toBe(0);
+      expect(counts.assigned).toBe(8);
+      expect(counts.waitlistedChecked).toBe(1);
+    });
+
     it("I) idempotent: the scheduler ticking again and a manual Generate after it are clean no-ops", async () => {
       const t = await soloRandom(8);
       const players = await signUpMany(t.id, 10);
