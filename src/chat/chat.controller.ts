@@ -6,6 +6,7 @@ import {
   NotFoundException,
   Param,
   Post,
+  Query,
   Req,
   Res,
 } from "@nestjs/common";
@@ -18,6 +19,7 @@ import { HasuraEventData } from "src/hasura/types/HasuraEventData";
 import { ChatLobbyType } from "./enums/ChatLobbyTypes";
 import { S3Service } from "../s3/s3.service";
 import { User } from "../auth/types/User";
+import { GiphyService } from "../giphy/giphy.service";
 
 const MAX_ATTACHMENT_BYTES = 200 * 1024 * 1024;
 const ALLOWED_ATTACHMENT_TYPE =
@@ -37,11 +39,29 @@ export class ChatController {
   constructor(
     private readonly chatService: ChatService,
     private readonly s3: S3Service,
+    private readonly giphy: GiphyService,
   ) {}
 
   @HasuraEvent()
   public async chat_lobbies_removed(data: HasuraEventData<lobbies_set_input>) {
     await this.chatService.removeLobby(ChatLobbyType.MatchMaking, data.old.id);
+  }
+
+  // Proxies GIPHY's search so the API key never reaches the browser (it
+  // would otherwise be trivial to lift from a network request and burn
+  // through the free Beta key's 100 requests/hour limit). An empty `q`
+  // returns trending GIFs, matching the picker's default view before the
+  // user types anything.
+  @Get("gif-search")
+  public async searchGifs(
+    @Req() request: Request,
+    @Query("q") query: string | undefined,
+  ) {
+    const user = request.user as User | undefined;
+    if (!user?.steam_id) {
+      throw new ForbiddenException("authentication required");
+    }
+    return { results: await this.giphy.search(query ?? "") };
   }
 
   // Uploaded ahead of the actual "lobby:chat" websocket send -- the chat

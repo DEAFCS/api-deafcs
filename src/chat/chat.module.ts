@@ -16,6 +16,7 @@ import { loggerFactory } from "src/utilities/LoggerFactory";
 import { ChatController } from "./chat.controller";
 import { NotificationsModule } from "../notifications/notifications.module";
 import { S3Module } from "../s3/s3.module";
+import { GiphyModule } from "../giphy/giphy.module";
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { S3Module } from "../s3/s3.module";
     forwardRef(() => RconModule),
     NotificationsModule,
     S3Module,
+    GiphyModule,
   ],
   providers: [ChatService, ChatGateway, loggerFactory()],
   exports: [ChatService],

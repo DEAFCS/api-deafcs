@@ -64,6 +64,7 @@ export class ChatGateway {
       id: string;
       message: string;
       attachment?: { url: string; contentType: string };
+      gifUrl?: string;
       type: ChatLobbyType;
       // Per-browser-session id (see web-sockets/Socket.ts) -- echoed back
       // in the broadcast so a *different* session for the same account
@@ -75,13 +76,13 @@ export class ChatGateway {
     },
     @ConnectedSocket() client: FiveStackWebSocketClient,
   ) {
-    if (!client.user || (!data.message && !data.attachment)) {
+    if (!client.user || (!data.message && !data.attachment && !data.gifUrl)) {
       return;
     }
 
     data.message = (data.message ?? "").trim();
 
-    if (data.message.length === 0 && !data.attachment) {
+    if (data.message.length === 0 && !data.attachment && !data.gifUrl) {
       return;
     }
 
@@ -93,6 +94,8 @@ export class ChatGateway {
       false,
       data.clientId,
       data.attachment,
+      "website",
+      data.gifUrl,
     );
 
     if (!result.accepted) {

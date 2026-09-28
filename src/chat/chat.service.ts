@@ -554,7 +554,8 @@ export class ChatService {
         !storedMessage?.timestamp ||
         Number.isNaN(new Date(storedMessage.timestamp).getTime()) ||
         (typeof storedMessage.message !== "string" &&
-          !storedMessage.attachment)
+          !storedMessage.attachment &&
+          !storedMessage.gifUrl)
       ) {
         return false;
       }
@@ -886,6 +887,13 @@ export class ChatService {
     return tournaments.length > 0;
   }
 
+  // Only GIPHY's own CDN hosts are accepted -- gifUrl comes straight from
+  // a socket payload, so without this a client could make sendMessageToChat
+  // embed an arbitrary external image URL as a "GIF" (tracking pixel,
+  // offensive content hosted elsewhere, etc), bypassing every check the
+  // real attachment upload path applies.
+  private static readonly GIPHY_CDN_HOST = /^(i|media\d*)\.giphy\.com$/;
+
   public async sendMessageToChat(
     type: ChatLobbyType,
     id: string,
@@ -901,6 +909,11 @@ export class ChatService {
     // reviewing Match-type chat couldn't tell whether a line was typed
     // in-game or on the DEAFCS site itself).
     source: "website" | "game" = "website",
+    // A GIPHY GIF, sent by full URL rather than through the attachment
+    // upload pipeline -- GIPHY's own CDN serves it directly, so there is
+    // nothing for us to store in S3 or gate behind our own viewer-access
+    // endpoint the way a real attachment is.
+    gifUrl?: string,
   ): Promise<{
     accepted: boolean;
     tooLong?: boolean;
@@ -912,17 +925,30 @@ export class ChatService {
       return { accepted: false, tooLong: true };
     }
 
+    if (gifUrl) {
+      let host: string;
+      try {
+        host = new URL(gifUrl).hostname;
+      } catch {
+        return { accepted: false };
+      }
+      if (!ChatService.GIPHY_CDN_HOST.test(host)) {
+        return { accepted: false };
+      }
+    }
+
     // Match (all-chat) and MatchTeam (in-game team chat) sync live with
     // the CS2/CSS server, which has no way to render an image or video --
-    // an attachment can never be sent into either of those two lobby types.
+    // an attachment/GIF can never be sent into either of those two lobby
+    // types.
     if (
-      attachment &&
+      (attachment || gifUrl) &&
       (type === ChatLobbyType.Match || type === ChatLobbyType.MatchTeam)
     ) {
       return { accepted: false };
     }
 
-    if (!_message.trim() && !attachment) {
+    if (!_message.trim() && !attachment && !gifUrl) {
       return { accepted: false };
     }
 
@@ -1037,6 +1063,10 @@ export class ChatService {
         messageTtlSeconds,
       );
       message.attachment = { id: attachmentId, contentType: attachment.contentType };
+    }
+
+    if (gifUrl) {
+      message.gifUrl = gifUrl;
     }
 
     if (type === ChatLobbyType.Announcement) {
@@ -1217,6 +1247,7 @@ export class ChatService {
       ...message,
       message: "Message from blocked player",
       attachment: undefined,
+      gifUrl: undefined,
       blocked: true,
     };
   }
@@ -1456,6 +1487,7 @@ export class ChatService {
       typeof stored.message !== "string" ||
       !stored.message.trim() ||
       stored.attachment ||
+      stored.gifUrl ||
       stored.blocked
     ) {
       return false;
@@ -2471,12 +2503,15 @@ export class ChatService {
       const parsed = JSON.parse(message);
       const attachmentId = parsed.attachment?.id as string | undefined;
 
-      // The destination may not support attachments (Match/MatchTeam sync
-      // live with the CS2/CSS server, which can't render one) -- strip it
-      // from the carried-over message rather than leaving a dangling
-      // reference nothing will ever render.
+      // The destination may not support attachments/GIFs (Match/MatchTeam
+      // sync live with the CS2/CSS server, which can't render either) --
+      // strip them from the carried-over message rather than leaving a
+      // dangling reference nothing will ever render.
       if (attachmentId && attachmentIncompatibleDestination) {
         delete parsed.attachment;
+      }
+      if (parsed.gifUrl && attachmentIncompatibleDestination) {
+        delete parsed.gifUrl;
       }
 
       const storedMessage = JSON.stringify(parsed);
