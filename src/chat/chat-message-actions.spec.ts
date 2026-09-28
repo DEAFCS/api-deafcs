@@ -565,8 +565,8 @@ describe("ChatService timed self edit/delete", () => {
 
     it.each([
       [
-        "a Short Video message",
-        storedMessage({ message: "", media: { type: "video", id: "media-1" } }),
+        "a message with an attachment",
+        storedMessage({ message: "", attachment: { id: "attachment-1" } }),
       ],
       ["a game-relayed (automatic) line", storedMessage({ source: "game" })],
       [
@@ -926,31 +926,34 @@ describe("ChatService timed self edit/delete", () => {
       ).resolves.toBe(false);
     });
 
-    it("lets the author delete their own recent Short Video and cleans its media", async () => {
+    it("lets the author delete their own recent message with an attachment and cleans it up", async () => {
       put(
         ChatLobbyType.Global,
         "global",
-        storedMessage({ message: "", media: { type: "video", id: "media-1" } }),
+        storedMessage({ message: "", attachment: { id: "attachment-1" } }),
       );
       join(author, ChatLobbyType.Global, "global");
-      const removeVideoMedia = jest
-        .spyOn(service, "removeVideoMedia")
+      const removeChatAttachment = jest
+        .spyOn(service as any, "removeChatAttachment")
         .mockResolvedValue(undefined);
 
       await expect(remove(author)).resolves.toBe(true);
-      expect(removeVideoMedia).toHaveBeenCalledWith("media-1");
+      expect(removeChatAttachment).toHaveBeenCalledWith("attachment-1");
     });
 
-    it("does not let an ordinary player delete someone else's Short Video", async () => {
+    it("does not let an ordinary player delete someone else's message with an attachment", async () => {
       put(
         ChatLobbyType.Global,
         "global",
-        storedMessage({ message: "", media: { type: "video", id: "media-1" } }),
+        storedMessage({ message: "", attachment: { id: "attachment-1" } }),
       );
       join(other, ChatLobbyType.Global, "global");
-      const removeVideoMedia = jest.spyOn(service, "removeVideoMedia");
+      const removeChatAttachment = jest.spyOn(
+        service as any,
+        "removeChatAttachment",
+      );
       await expect(remove(other)).resolves.toBe(false);
-      expect(removeVideoMedia).not.toHaveBeenCalled();
+      expect(removeChatAttachment).not.toHaveBeenCalled();
     });
 
     it("allows a muted author to delete their own recent message (removal posts nothing new)", async () => {

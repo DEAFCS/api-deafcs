@@ -33,7 +33,6 @@ type Modules =
   | "Scrims"
   | "AdminCalls"
   | "VerificationCalls"
-  | "ChatVideo"
   | "SupportRequests";
 
 export type UseQueueOptions = {
