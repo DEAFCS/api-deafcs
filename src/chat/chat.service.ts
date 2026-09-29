@@ -8,6 +8,10 @@ import { RconService } from "../rcon/rcon.service";
 import { FiveStackWebSocketClient } from "src/sockets/types/FiveStackWebSocketClient";
 import { ChatLobbyType } from "./enums/ChatLobbyTypes";
 import {
+  CAPTAIN_PICK_TEAM_CHAT_TTL_SECONDS,
+  canAccessCaptainPickTeamChat,
+} from "src/matchmaking/captain-pick/captain-pick-team-chat";
+import {
   e_player_roles_enum,
   e_notification_types_enum,
 } from "generated/schema";
@@ -163,6 +167,10 @@ export class ChatService {
   }
 
   private getChatMessageTtlSeconds(type: ChatLobbyType) {
+    // Draft talk only matters while the draft does.
+    if (type === ChatLobbyType.CaptainPickTeam) {
+      return CAPTAIN_PICK_TEAM_CHAT_TTL_SECONDS;
+    }
     return type === ChatLobbyType.Match || type === ChatLobbyType.MatchTeam
       ? ChatService.MATCH_CHAT_TTL_SECONDS
       : this.expiresIn;
@@ -257,6 +265,19 @@ export class ChatService {
 
         break;
       }
+      case ChatLobbyType.CaptainPickTeam:
+        // Only your own side of the committed draft; no admin bypass while
+        // the teams are still being drafted.
+        if (
+          !(await canAccessCaptainPickTeamChat(
+            this.redis,
+            id,
+            String(user.steam_id),
+          ))
+        ) {
+          return;
+        }
+        break;
       case ChatLobbyType.MatchMaking:
         const { lobby_players_by_pk } = await this.hasuraService.query({
           lobby_players_by_pk: {
@@ -700,6 +721,12 @@ export class ChatService {
         });
         return lobby_players_by_pk?.status === "Accepted";
       }
+      case ChatLobbyType.CaptainPickTeam:
+        return canAccessCaptainPickTeamChat(
+          this.redis,
+          id,
+          String(user.steam_id),
+        );
       case ChatLobbyType.Tournament:
         return this.canAccessTournamentChat(id, user.steam_id);
       case ChatLobbyType.Draft: {
@@ -984,6 +1011,19 @@ export class ChatService {
       if (
         type === ChatLobbyType.Draft &&
         !(await this.canSendDraftMessage(id, player))
+      ) {
+        return { accepted: false };
+      }
+
+      // Re-checked on every send against the committed draft, not just at
+      // join time.
+      if (
+        type === ChatLobbyType.CaptainPickTeam &&
+        !(await canAccessCaptainPickTeamChat(
+          this.redis,
+          id,
+          String(player.steam_id),
+        ))
       ) {
         return { accepted: false };
       }
@@ -1741,6 +1781,7 @@ export class ChatService {
       [ChatLobbyType.Tournament]: "TOURNAMENT",
       [ChatLobbyType.Match]: "MATCH",
       [ChatLobbyType.MatchTeam]: "TEAM",
+      [ChatLobbyType.CaptainPickTeam]: "TEAM",
       [ChatLobbyType.Announcement]: "ANNOUNCEMENT",
     };
 

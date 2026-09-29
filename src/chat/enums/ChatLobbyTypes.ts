@@ -11,6 +11,12 @@ export enum ChatLobbyType {
   // in-game CS2 server is already hard-scoped to ChatLobbyType.Match only,
   // so this never reaches the game server.
   MatchTeam = "match_team",
+  // Private team chat during a matchmaking Captain Pick draft, before any
+  // match (and so any match_team lineup) exists. id is
+  // `${draftId}:${lineup}` (lineup 1 or 2). Access comes only from the
+  // committed draft state in Redis (see captain-pick-team-chat.ts), never
+  // from the client, and messages expire with the draft.
+  CaptainPickTeam = "captain_pick_team",
   // Single site-wide room, open to every verified_user+ player. Fixed id
   // "global" -- there's only ever one, see joinMatchLobby's Global case.
   Global = "global",
