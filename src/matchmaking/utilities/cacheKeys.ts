@@ -48,6 +48,17 @@ export function getMatchmakingRankCacheKey(
   return `matchmaking:${version}:${region}:${type}${getQueueVariantSuffix(type, variant)}:ranks`;
 }
 
+// Committed Captain Pick draft state, keyed by its ready-check confirmation.
+export function getCaptainPickDraftCacheKey(confirmationId: string) {
+  return `matchmaking:${version}:captain-pick:draft:${confirmationId}`;
+}
+
+// Reverse lookup: which committed draft a player belongs to. Lives apart from
+// lobby details, which offline/party cleanup is free to remove.
+export function getCaptainPickPlayerCacheKey(steamId: string) {
+  return `matchmaking:${version}:captain-pick:player:${steamId}`;
+}
+
 // Captain Pick gets its own region lock so a Captain Pick pass can never make
 // a Standard pass bail out with "another matchmaking process is running".
 export function getMatchmakingRegionLockKey(

@@ -1567,6 +1567,9 @@ export class MatchAssistantService {
       timeout_setting?: e_timeout_settings_enum;
       region?: string;
       maps?: Array<string>;
+      // Pre-generated match id, so a caller retrying after a crash can find
+      // the match it already created instead of inserting a second one.
+      id?: string;
     },
   ) {
     let map_pool_id;
@@ -1603,6 +1606,7 @@ export class MatchAssistantService {
       insert_matches_one: {
         __args: {
           object: {
+            ...(options.id ? { id: options.id } : {}),
             region: options.region,
             options: {
               data: {
