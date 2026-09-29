@@ -21,6 +21,15 @@ import { SocketsService } from "src/sockets/sockets.service";
 import { TermsService } from "src/terms/terms.service";
 import { WebsiteRestrictionsService } from "src/website-restrictions/website-restrictions.service";
 import { resolveMatchmakingQueueVariant } from "./types/MatchmakingQueueVariant";
+import {
+  CaptainPickActionError,
+  CaptainPickService,
+} from "./captain-pick/captain-pick.service";
+import { CaptainPickSettingsService } from "./captain-pick/captain-pick-settings.service";
+import {
+  CAPTAIN_PICK_COMMITTED_ERROR,
+  getCaptainPickJoinError,
+} from "./captain-pick/captain-pick-queue-rules";
 
 @WebSocketGateway({
   path: "/ws/web",
@@ -37,6 +46,8 @@ export class MatchmakingGateway {
     private readonly cache: CacheService,
     private readonly terms: TermsService,
     private readonly websiteRestrictions: WebsiteRestrictionsService,
+    private readonly captainPick: CaptainPickService,
+    private readonly captainPickSettings: CaptainPickSettingsService,
   ) {
     this.redis = this.redisManager.getConnection();
   }
@@ -94,12 +105,16 @@ export class MatchmakingGateway {
       },
     });
 
+    const variant = resolveMatchmakingQueueVariant(data.variant);
+
     const matchmakingAllowed = settings.find(
       (setting) =>
         setting.name === `public.matchmaking_${data.type.toLowerCase()}`,
     );
 
-    if (matchmakingAllowed?.value === "false") {
+    // Captain Pick has its own switch (checked below), independent of the
+    // Standard 5v5 toggle.
+    if (variant !== "CaptainPick" && matchmakingAllowed?.value === "false") {
       throw new JoinQueueError("Matchmaking is not allowed");
     }
 
@@ -185,7 +200,9 @@ export class MatchmakingGateway {
     });
 
     try {
-      this.assertStandardQueueVariant(data.variant);
+      if (!variant) {
+        throw new JoinQueueError("Unknown matchmaking queue");
+      }
 
       const latencyResults = await this.getLatencyResults(client);
 
@@ -244,6 +261,27 @@ export class MatchmakingGateway {
         throw new JoinQueueError("Unable to find Player Lobby");
       }
 
+      // A committed Captain Pick player belongs to that match until it is
+      // over; no other queue (Captain Pick included) until then.
+      for (const player of lobby.players) {
+        if (await this.captainPick.getActiveDraftId(player.steam_id)) {
+          throw new JoinQueueError(CAPTAIN_PICK_COMMITTED_ERROR, lobby.id);
+        }
+      }
+
+      if (variant === "CaptainPick") {
+        const { enabled } = await this.captainPickSettings.getSettings();
+        const captainPickError = getCaptainPickJoinError({
+          type,
+          enabled,
+          partySize: lobby.players.length,
+        });
+
+        if (captainPickError) {
+          throw new JoinQueueError(captainPickError, lobby.id);
+        }
+      }
+
       // Every party member must have accepted the current Terms, not just
       // the caller -- otherwise an accepted leader could bring an
       // unaccepted party member into matchmaking with them. lobby.id is
@@ -271,6 +309,7 @@ export class MatchmakingGateway {
             regions,
             type,
             lobby,
+            variant,
           );
           await this.matchmakeService.addLobbyToQueue(lobby.id);
           return true;
@@ -288,7 +327,7 @@ export class MatchmakingGateway {
       await this.matchmakeService.sendRegionStats();
 
       for (const region of regions) {
-        void this.matchmakeService.matchmake(type, region);
+        void this.matchmakeService.matchmakeQueue(type, region, variant);
       }
     } catch (error) {
       if (error instanceof JoinQueueError) {
@@ -322,6 +361,13 @@ export class MatchmakingGateway {
     const user = client.user;
 
     if (!user) {
+      return;
+    }
+
+    // After 10/10 Ready the group is committed: leaving would let one player
+    // dodge a drafted team and throw the other nine back into the queue.
+    if (await this.captainPick.getActiveDraftId(user.steam_id)) {
+      await this.sendError(user.steam_id, CAPTAIN_PICK_COMMITTED_ERROR);
       return;
     }
 
@@ -392,20 +438,78 @@ export class MatchmakingGateway {
     );
   }
 
-  // Captain Pick has no draft engine yet, so it is refused outright, whatever
-  // the feature setting says. Without this, a client sending a variant would
-  // be queued as Standard and auto-balanced. Requests without a variant (all
-  // current clients) are unaffected.
-  private assertStandardQueueVariant(variant: unknown) {
-    const resolved = resolveMatchmakingQueueVariant(variant);
-
-    if (!resolved) {
-      throw new JoinQueueError("Unknown matchmaking queue");
+  /**
+   * A captain picking a player. Only the target and the pick index the
+   * client was looking at come from the client; who is picking is always the
+   * authenticated socket user, and the draft service decides whether it is
+   * their turn. The pick index is required so a double click can never turn
+   * into the same captain's next (consecutive) pick.
+   */
+  @SubscribeMessage("matchmaking:captain-pick")
+  async captainPickPlayer(
+    @MessageBody()
+    data: {
+      confirmationId?: unknown;
+      steamId?: unknown;
+      pickIndex?: unknown;
+    },
+    @ConnectedSocket() client: FiveStackWebSocketClient,
+  ) {
+    const user = client.user;
+    if (!user) {
+      return;
     }
 
-    if (resolved === "CaptainPick") {
-      throw new JoinQueueError("5v5 Captain Pick is not available yet.");
+    const { confirmationId, steamId, pickIndex } = data ?? {};
+
+    if (
+      typeof confirmationId !== "string" ||
+      (typeof steamId !== "string" && typeof steamId !== "number") ||
+      !Number.isInteger(pickIndex)
+    ) {
+      await this.sendError(user.steam_id, "Invalid pick.");
+      return;
     }
+
+    // Only the draft this player actually belongs to can be acted on.
+    if (
+      (await this.captainPick.getActiveDraftId(user.steam_id)) !==
+      confirmationId
+    ) {
+      await this.sendError(user.steam_id, "You are not in this draft.");
+      return;
+    }
+
+    try {
+      await this.captainPick.pick(
+        confirmationId,
+        String(user.steam_id),
+        String(steamId),
+        pickIndex as number,
+      );
+    } catch (error) {
+      if (error instanceof CaptainPickActionError) {
+        await this.sendError(user.steam_id, error.message);
+        // Resync whatever screen sent a stale or invalid pick.
+        await this.captainPick.publishState(confirmationId, [
+          String(user.steam_id),
+        ]);
+        return;
+      }
+      this.logger.error(`unable to apply captain pick`, error);
+      await this.sendError(user.steam_id, "Unable to make that pick.");
+    }
+  }
+
+  private async sendError(steamId: string, message: string) {
+    await this.redis.publish(
+      "send-message-to-steam-id",
+      JSON.stringify({
+        steamId,
+        event: "matchmaking:error",
+        data: { message },
+      }),
+    );
   }
 
   private async getLatencyResults(client: FiveStackWebSocketClient) {

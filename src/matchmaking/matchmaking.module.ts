@@ -18,6 +18,9 @@ import { MarkPlayerOffline } from "./jobs/MarkPlayerOffline";
 import { TermsModule } from "src/terms/terms.module";
 import { NotificationsModule } from "src/notifications/notifications.module";
 import { CaptainPickSettingsService } from "./captain-pick/captain-pick-settings.service";
+import { CaptainPickService } from "./captain-pick/captain-pick.service";
+import { CaptainPickTimeout } from "./jobs/CaptainPickTimeout";
+import { CaptainPickFinalize } from "./jobs/CaptainPickFinalize";
 
 @Module({
   imports: [
@@ -39,14 +42,18 @@ import { CaptainPickSettingsService } from "./captain-pick/captain-pick-settings
     MatchmakeService,
     MatchmakingLobbyService,
     CaptainPickSettingsService,
+    CaptainPickService,
   ],
   providers: [
     MatchmakingGateway,
     MatchmakeService,
     MatchmakingLobbyService,
     CaptainPickSettingsService,
+    CaptainPickService,
     CancelMatchMaking,
     MarkPlayerOffline,
+    CaptainPickTimeout,
+    CaptainPickFinalize,
     ...getQueuesProcessors("Matchmaking"),
     loggerFactory(),
   ],

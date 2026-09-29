@@ -98,6 +98,7 @@ describe("MatchmakingLobbyService.verifyLobby", () => {
       mockHasura,
       mockRedisManager,
       {} as MatchmakeService,
+      {} as any,
     );
   });
 

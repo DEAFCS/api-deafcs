@@ -16,6 +16,8 @@ import {
 } from "./utilities/cacheKeys";
 import { JoinQueueError } from "./utilities/joinQueueError";
 import { ExpectedPlayers } from "src/discord-bot/enums/ExpectedPlayers";
+import { MatchmakingQueueVariant } from "./types/MatchmakingQueueVariant";
+import { CaptainPickService } from "./captain-pick/captain-pick.service";
 
 @Injectable()
 export class MatchmakingLobbyService {
@@ -27,6 +29,7 @@ export class MatchmakingLobbyService {
     public readonly redisManager: RedisManagerService,
     @Inject(forwardRef(() => MatchmakeService))
     private matchmaking: MatchmakeService,
+    private readonly captainPick: CaptainPickService,
   ) {
     this.redis = this.redisManager.getConnection();
   }
@@ -145,6 +148,7 @@ export class MatchmakingLobbyService {
         matchmaking_cooldown: boolean;
       }>;
     },
+    variant: MatchmakingQueueVariant = "Standard",
   ) {
     const { players } = await this.hasura.query({
       players: {
@@ -175,6 +179,8 @@ export class MatchmakingLobbyService {
 
     const matchmakingLobby: MatchmakingLobby = {
       type,
+      // Standard lobbies are stored exactly as before (no variant field).
+      ...(variant !== "Standard" ? { variant } : {}),
       regions,
       joinedAt: new Date(),
       lobbyId: lobby.id,
@@ -208,6 +214,13 @@ export class MatchmakingLobbyService {
 
     // notify players in the lobby that they have been removed from the queue
     for (const player of lobbyDetails.players) {
+      // A committed Captain Pick player is not leaving anything: their
+      // lobby record can go (offline/party cleanup), the draft stays, and
+      // an empty update would blank their draft screen.
+      if (await this.captainPick.getActiveDraftId(player.steam_id)) {
+        continue;
+      }
+
       await this.redis.publish(
         "send-message-to-steam-id",
         JSON.stringify({
@@ -295,6 +308,15 @@ export class MatchmakingLobbyService {
 
   // TODO - extermly inefficient
   public async sendQueueDetailsToPlayer(steamId: string) {
+    // Reconnect/F5 of a committed Captain Pick player: the draft is found
+    // from its own reverse key, not the lobby records offline cleanup may
+    // already have removed.
+    const draftId = await this.captainPick.getActiveDraftId(steamId);
+    if (draftId && (await this.captainPick.hasDraft(draftId))) {
+      await this.captainPick.publishState(draftId, [steamId]);
+      return;
+    }
+
     const lobby = await this.getPlayerLobby(steamId);
 
     if (!lobby) {
@@ -312,6 +334,8 @@ export class MatchmakingLobbyService {
     );
 
     if (confirmationId) {
+      const details =
+        await this.matchmaking.getMatchConfirmationDetails(confirmationId);
       const {
         matchId,
         confirmed,
@@ -321,16 +345,20 @@ export class MatchmakingLobbyService {
         team2,
         expiresAt,
         lobbyIds,
-      } = await this.matchmaking.getMatchConfirmationDetails(confirmationId);
+        variant,
+        participants,
+      } = details;
 
       confirmationDetails = {
         type,
+        // Only Captain Pick adds a field; the Standard payload is unchanged.
+        ...(variant !== "Standard" ? { variant } : {}),
         region,
         matchId,
         expiresAt,
         confirmationId,
         confirmed,
-        players: team1.length + team2.length,
+        players: this.matchmaking.getConfirmationPlayerCount(details),
       };
 
       if (matchId) {
@@ -359,7 +387,33 @@ export class MatchmakingLobbyService {
               }),
             );
           }
+
+          for (const participant of participants) {
+            await this.redis.publish(
+              "send-message-to-steam-id",
+              JSON.stringify({
+                steamId: participant.steam_id,
+                event: "matchmaking:details",
+                data: {},
+              }),
+            );
+          }
         }
+      }
+
+      // A committed draft is delivered from its own state, so it reaches the
+      // player even when their lobby record is gone.
+      if (
+        variant === "CaptainPick" &&
+        (await this.captainPick.hasDraft(confirmationId))
+      ) {
+        await this.captainPick.publishState(
+          confirmationId,
+          participants
+            .filter((participant) => participant.lobbyId === lobbyId)
+            .map((participant) => participant.steam_id),
+        );
+        return;
       }
     }
 

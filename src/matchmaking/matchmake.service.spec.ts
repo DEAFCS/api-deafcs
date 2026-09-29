@@ -20,6 +20,8 @@ import { MatchmakingLobbyService } from "./matchmaking-lobby.service";
 import { RedisManagerService } from "../redis/redis-manager/redis-manager.service";
 import { MatchmakingQueues } from "./enums/MatchmakingQueues";
 import { PushNotificationsService } from "../notifications/push/push-notifications.service";
+import { CaptainPickService } from "./captain-pick/captain-pick.service";
+import { CaptainPickSettingsService } from "./captain-pick/captain-pick-settings.service";
 
 describe("MatchmakeService", () => {
   let service: MatchmakeService;
@@ -30,6 +32,12 @@ describe("MatchmakeService", () => {
   let mockRedisManager: jest.Mocked<RedisManagerService>;
   let mockQueue: jest.Mocked<Queue>;
   let logger: Logger;
+  let mockCaptainPick: {
+    startDraft: jest.Mock;
+    hasDraft: jest.Mock;
+    cleanup: jest.Mock;
+  };
+  let captainPickEnabled: boolean;
 
   beforeEach(async () => {
     // Create mock Redis instance
@@ -81,6 +89,13 @@ describe("MatchmakeService", () => {
 
     logger = new Logger("Test");
 
+    captainPickEnabled = true;
+    mockCaptainPick = {
+      startDraft: jest.fn().mockResolvedValue(undefined),
+      hasDraft: jest.fn().mockResolvedValue(false),
+      cleanup: jest.fn().mockResolvedValue(undefined),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         {
@@ -108,6 +123,19 @@ describe("MatchmakeService", () => {
           provide: PushNotificationsService,
           useValue: {
             sendMatchFound: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+        {
+          provide: CaptainPickService,
+          useValue: mockCaptainPick,
+        },
+        {
+          provide: CaptainPickSettingsService,
+          useValue: {
+            getSettings: jest.fn(async () => ({
+              enabled: captainPickEnabled,
+              pickSeconds: 30,
+            })),
           },
         },
         {

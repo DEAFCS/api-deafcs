@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 import { Logger } from "@nestjs/common";
 import { User } from "../auth/types/User";
 import { Injectable } from "@nestjs/common";
-import { e_map_pool_types_enum, e_match_types_enum } from "generated";
+import { e_match_types_enum } from "generated";
 import { InjectQueue } from "@nestjs/bullmq";
 import { MatchmakingTeam } from "./types/MatchmakingTeam";
 import { HasuraService } from "src/hasura/hasura.service";
@@ -26,6 +26,14 @@ import {
   MatchmakingQueueVariant,
   resolveMatchmakingQueueVariant,
 } from "./types/MatchmakingQueueVariant";
+import { getMatchmakingMatchSetup } from "./utilities/matchmakingMatchSetup";
+import { CaptainPickService } from "./captain-pick/captain-pick.service";
+import { CaptainPickSettingsService } from "./captain-pick/captain-pick-settings.service";
+import {
+  CAPTAIN_PICK_DISABLED_ERROR,
+  CAPTAIN_PICK_SOLO_ONLY_ERROR,
+} from "./captain-pick/captain-pick-queue-rules";
+import { CAPTAIN_PICK_PLAYER_COUNT } from "./captain-pick/captain-pick-rules";
 
 @Injectable()
 export class MatchmakeService {
@@ -38,6 +46,8 @@ export class MatchmakeService {
     public readonly matchAssistant: MatchAssistantService,
     private matchmakingLobbyService: MatchmakingLobbyService,
     private readonly pushNotifications: PushNotificationsService,
+    private readonly captainPick: CaptainPickService,
+    private readonly captainPickSettings: CaptainPickSettingsService,
     @InjectQueue(MatchmakingQueues.Matchmaking) private queue: Queue,
   ) {
     this.redis = this.redisManager.getConnection();
@@ -260,6 +270,147 @@ export class MatchmakeService {
       },
       10000 + Math.floor(Math.random() * 10000),
     );
+  }
+
+  /** Runs the matchmaker for one queue: Standard or Captain Pick. */
+  public async matchmakeQueue(
+    type: e_match_types_enum,
+    region: string,
+    variant: MatchmakingQueueVariant = "Standard",
+  ): Promise<void> {
+    if (variant === "CaptainPick") {
+      await this.matchmakeCaptainPick(region);
+      return;
+    }
+
+    await this.matchmake(type, region);
+  }
+
+  /**
+   * Captain Pick queue: ten solo players in queue order become one ready
+   * check. No team split happens here; teams are drafted after 10/10 Ready.
+   * Runs under its own region lock and only ever reads Captain Pick keys.
+   */
+  public async matchmakeCaptainPick(region: string): Promise<void> {
+    const lock = await this.aquireMatchmakeRegionLock(region, "CaptainPick");
+    if (!lock) {
+      this.logger.warn(
+        `Unable to acquire captain pick region lock for ${region} - another matchmaking process is running`,
+      );
+      return;
+    }
+
+    try {
+      const lobbyIds = await this.redis.zrange(
+        getMatchmakingRankCacheKey("Competitive", region, "CaptainPick"),
+        0,
+        -1,
+      );
+
+      const lobbies: Array<MatchmakingLobby> = [];
+      for (const lobbyId of lobbyIds) {
+        const details =
+          await this.matchmakingLobbyService.getLobbyDetails(lobbyId);
+        if (details) {
+          lobbies.push(details);
+        }
+      }
+
+      if (lobbies.length === 0) {
+        return;
+      }
+
+      // Turning the feature off stops new drafts from forming. Anyone still
+      // waiting is taken out of the queue and told why, rather than left
+      // searching forever. Drafts already committed are unaffected.
+      if (!(await this.captainPickSettings.getSettings()).enabled) {
+        for (const lobby of lobbies) {
+          await this.removeLobbyWithError(
+            lobby.lobbyId,
+            CAPTAIN_PICK_DISABLED_ERROR,
+          );
+        }
+        return;
+      }
+
+      const eligible: Array<MatchmakingLobby> = [];
+      for (const lobby of lobbies) {
+        if (
+          resolveMatchmakingQueueVariant(lobby.variant) === "CaptainPick" &&
+          lobby.type === "Competitive" &&
+          lobby.players.length === 1
+        ) {
+          eligible.push(lobby);
+        } else {
+          this.logger.warn(
+            `Removing lobby ${lobby.lobbyId} from the captain pick queue - not a solo captain pick lobby`,
+          );
+          await this.removeLobbyWithError(
+            lobby.lobbyId,
+            CAPTAIN_PICK_SOLO_ONLY_ERROR,
+          );
+        }
+      }
+
+      eligible.sort(
+        (a, b) =>
+          new Date(a.joinedAt).getTime() - new Date(b.joinedAt).getTime(),
+      );
+
+      while (eligible.length >= CAPTAIN_PICK_PLAYER_COUNT) {
+        const claimed: Array<MatchmakingLobby> = [];
+
+        while (
+          claimed.length < CAPTAIN_PICK_PLAYER_COUNT &&
+          eligible.length > 0
+        ) {
+          const lobby = eligible.shift();
+          if (await this.claimLobby(lobby.lobbyId, lobby)) {
+            claimed.push(lobby);
+          }
+        }
+
+        if (claimed.length < CAPTAIN_PICK_PLAYER_COUNT) {
+          for (const lobby of claimed) {
+            await this.releaseLobbyAndRequeue(lobby.lobbyId);
+          }
+          break;
+        }
+
+        try {
+          await this.createCaptainPickConfirmation(region, claimed);
+        } catch (error) {
+          this.logger.error(
+            `Error creating captain pick confirmation in ${region}:`,
+            error,
+          );
+          for (const lobby of claimed) {
+            await this.releaseLobbyAndRequeue(lobby.lobbyId);
+          }
+          break;
+        }
+      }
+    } finally {
+      await this.releaseMatchmakeRegionLock(region, "CaptainPick");
+    }
+  }
+
+  private async removeLobbyWithError(lobbyId: string, message: string) {
+    const lobby = await this.matchmakingLobbyService.getLobbyDetails(lobbyId);
+
+    await this.matchmakingLobbyService.removeLobbyFromQueue(lobbyId);
+    await this.matchmakingLobbyService.removeLobbyDetails(lobbyId);
+
+    for (const player of lobby?.players ?? []) {
+      await this.redis.publish(
+        "send-message-to-steam-id",
+        JSON.stringify({
+          steamId: player.steam_id,
+          event: "matchmaking:error",
+          data: { message },
+        }),
+      );
+    }
   }
 
   private async processLobbyData(
@@ -732,6 +883,68 @@ export class MatchmakeService {
       );
   }
 
+  /**
+   * Same ready check as Standard, but for ten individual candidates: no
+   * teams are assigned. Everything the draft (or a failed-ready requeue)
+   * needs is stored on the confirmation itself.
+   */
+  private async createCaptainPickConfirmation(
+    region: string,
+    lobbies: Array<MatchmakingLobby>,
+  ) {
+    if (!region) {
+      throw new Error("Region is required");
+    }
+
+    for (const lobby of lobbies) {
+      void this.releaseLobbyLock(lobby.lobbyId, 30);
+    }
+
+    const confirmationId = uuidv4();
+    const lobbyIds = lobbies.map((lobby) => lobby.lobbyId);
+    const participants = lobbies.map((lobby) => ({
+      steam_id: lobby.players[0].steam_id,
+      lobbyId: lobby.lobbyId,
+      joinedAt: new Date(lobby.joinedAt).toISOString(),
+    }));
+
+    await this.redis.hset(getMatchmakingConformationCacheKey(confirmationId), {
+      type: "Competitive",
+      variant: "CaptainPick",
+      region,
+      expiresAt: new Date(Date.now() + 30 * 1000).toISOString(),
+      lobbyIds: JSON.stringify(lobbyIds),
+      participants: JSON.stringify(participants),
+      team1: "[]",
+      team2: "[]",
+    });
+
+    for (const lobbyId of lobbyIds) {
+      await this.matchmakingLobbyService.setMatchConformationIdForLobby(
+        lobbyId,
+        confirmationId,
+      );
+      await this.matchmakingLobbyService.sendQueueDetailsToLobby(lobbyId);
+    }
+
+    await this.cancelMatchMakingDueToReadyCheck(confirmationId);
+
+    this.pushNotifications
+      .sendMatchFound(
+        participants.map(({ steam_id }) => steam_id),
+        {
+          title: "Match found",
+          body: "Tap to accept your match.",
+          entityId: confirmationId,
+        },
+      )
+      .catch((error) =>
+        this.logger.warn(
+          `[matchmaking] push match-found notification failed: ${(error as Error)?.message}`,
+        ),
+      );
+  }
+
   public async cancelMatchMakingDueToReadyCheck(confirmationId: string) {
     await this.queue.add(
       "CancelMatchMaking",
@@ -775,22 +988,37 @@ export class MatchmakeService {
     await this.redis.del(confirmedKey);
 
     await this.redis.del(getMatchmakingConformationCacheKey(confirmationId));
+
+    // A Captain Pick confirmation only ends with its match (or its ready
+    // check failing), so the draft and its player keys go with it.
+    await this.captainPick.cleanup(confirmationId);
   }
 
   public async getMatchConfirmationDetails(confirmationId: string): Promise<{
     type: e_match_types_enum;
+    variant: MatchmakingQueueVariant;
     region: string;
     lobbyIds: string[];
     team1: { steam_id: string; rank: number }[];
     team2: { steam_id: string; rank: number }[];
+    participants: { steam_id: string; lobbyId: string; joinedAt: string }[];
     matchId: string;
     expiresAt: string;
     confirmed: string[];
   }> {
-    const { type, region, lobbyIds, team1, team2, matchId, expiresAt } =
-      await this.redis.hgetall(
-        getMatchmakingConformationCacheKey(confirmationId),
-      );
+    const {
+      type,
+      variant,
+      region,
+      lobbyIds,
+      team1,
+      team2,
+      participants,
+      matchId,
+      expiresAt,
+    } = await this.redis.hgetall(
+      getMatchmakingConformationCacheKey(confirmationId),
+    );
 
     const confirmed = await this.redis.hgetall(
       `${getMatchmakingConformationCacheKey(confirmationId)}:confirmed`,
@@ -801,11 +1029,26 @@ export class MatchmakeService {
       matchId,
       expiresAt,
       type: type as e_match_types_enum,
+      variant: resolveMatchmakingQueueVariant(variant) ?? "Standard",
       team1: JSON.parse(team1 || "[]"),
       team2: JSON.parse(team2 || "[]"),
+      participants: JSON.parse(participants || "[]"),
       lobbyIds: JSON.parse(lobbyIds || "[]"),
       confirmed: Object.keys(confirmed),
     };
+  }
+
+  // Players the ready check is waiting on: the two pre-balanced teams for
+  // Standard, the ten undrafted candidates for Captain Pick.
+  public getConfirmationPlayerCount(details: {
+    variant: MatchmakingQueueVariant;
+    team1: unknown[];
+    team2: unknown[];
+    participants: unknown[];
+  }): number {
+    return details.variant === "CaptainPick"
+      ? details.participants.length
+      : details.team1.length + details.team2.length;
   }
 
   public async cancelMatchMakingByMatchId(matchId: string) {
@@ -822,8 +1065,24 @@ export class MatchmakeService {
 
   public async cancelMatchMaking(confirmationId: string, hasMatch = false) {
     let shouldMatchmake = false;
-    const { lobbyIds, type, region } =
-      await this.getMatchConfirmationDetails(confirmationId);
+    const details = await this.getMatchConfirmationDetails(confirmationId);
+    const { lobbyIds, type, region, variant } = details;
+
+    // Once all ten accepted, a Captain Pick group is committed: the ready
+    // check can no longer cancel it. A late (stale) ready-check job either
+    // finds the draft already running, or finds a 10/10 group whose draft
+    // never got started (crash right after the claim) and starts it.
+    if (!hasMatch && variant === "CaptainPick") {
+      if (await this.captainPick.hasDraft(confirmationId)) {
+        return;
+      }
+
+      const total = this.getConfirmationPlayerCount(details);
+      if (total > 0 && details.confirmed.length >= total) {
+        await this.captainPick.startDraft(confirmationId);
+        return;
+      }
+    }
 
     for (const lobbyId of lobbyIds) {
       const lobby = await this.matchmakingLobbyService.getLobbyDetails(lobbyId);
@@ -867,7 +1126,7 @@ export class MatchmakeService {
       // randomize the time to prevent all regions from matchingmake at the same time
       setTimeout(
         () => {
-          void this.matchmake(type, region);
+          void this.matchmakeQueue(type, region, variant);
         },
         Math.floor(Math.random() * 10000),
       );
@@ -884,10 +1143,10 @@ export class MatchmakeService {
       1,
     );
 
-    const { lobbyIds, team1, team2, confirmed } =
-      await this.getMatchConfirmationDetails(confirmationId);
+    const details = await this.getMatchConfirmationDetails(confirmationId);
+    const { lobbyIds, confirmed } = details;
 
-    if (confirmed.length != team1.length + team2.length) {
+    if (confirmed.length != this.getConfirmationPlayerCount(details)) {
       for (const lobbyId of lobbyIds) {
         void this.matchmakingLobbyService.sendQueueDetailsToLobby(lobbyId);
       }
@@ -912,31 +1171,37 @@ export class MatchmakeService {
       return;
     }
 
+    // 10/10 is the Captain Pick commitment point: the ready check is over
+    // for this group and the draft takes it from here.
+    // If starting the draft throws, the ready-check job is still there and
+    // will start it (see cancelMatchMaking); only remove it once it's done.
+    if (details.variant === "CaptainPick") {
+      await this.captainPick.startDraft(confirmationId);
+      await this.removeCancelMatchMakingJob(confirmationId);
+      return;
+    }
+
     await this.createMatch(confirmationId);
   }
 
   private async createMatch(confirmationId: string) {
-    const { team1, team2, type, region, lobbyIds } =
+    const { team1, team2, type, region, lobbyIds, variant } =
       await this.getMatchConfirmationDetails(confirmationId);
+
+    // Captain Pick teams come from the draft, never from here.
+    if (variant !== "Standard") {
+      throw new Error(
+        `refusing to auto-create a ${variant} match for ${confirmationId}`,
+      );
+    }
 
     await this.removeCancelMatchMakingJob(confirmationId);
 
-    // e_map_pool_types_enum doesn't include Premier/Faceit (imports only).
-    const mapPoolType: e_map_pool_types_enum =
-      type === "Premier" || type === "Faceit" ? "Competitive" : type;
+    const { mapPoolType, options } = getMatchmakingMatchSetup(type, region);
     const match = await this.matchAssistant.createMatchBasedOnType(
       type,
       mapPoolType,
-      {
-        mr: type === "Competitive" ? 12 : 8,
-        best_of: 1,
-        knife: true,
-        overtime: true,
-        // Any player on the team may call .tac/.timeout, not just the
-        // captain or coach.
-        timeout_setting: "CoachAndPlayers",
-        region,
-      },
+      options,
     );
 
     // The match_lineup_players trigger (tbid_match_lineup_players) makes

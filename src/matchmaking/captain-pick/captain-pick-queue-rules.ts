@@ -4,6 +4,8 @@ export const CAPTAIN_PICK_NOT_COMPETITIVE_ERROR =
   "Captain Pick is only available for 5v5.";
 export const CAPTAIN_PICK_DISABLED_ERROR =
   "5v5 Captain Pick is currently unavailable.";
+export const CAPTAIN_PICK_COMMITTED_ERROR =
+  "You are in a 5v5 Captain Pick match and can't leave or join another queue until it's over.";
 export const CAPTAIN_PICK_SOLO_ONLY_ERROR =
   "5v5 Captain Pick is solo queue only. Leave your party to join.";
 
