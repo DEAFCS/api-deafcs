@@ -85,6 +85,24 @@ export class CaptainPickActionError extends Error {
   }
 }
 
+interface InspectedMatch {
+  id: string;
+  status: string;
+  lineupIds: Record<CaptainPickLineup, string>;
+}
+
+export type MatchInspection =
+  | { kind: "missing" }
+  | { kind: "complete"; match: InspectedMatch }
+  | {
+      kind: "partial";
+      match: InspectedMatch;
+      lineupsComplete: boolean;
+      reason: string;
+    }
+  | { kind: "canceled"; match: InspectedMatch; reason: string }
+  | { kind: "foreign"; match: InspectedMatch; reason: string };
+
 export class CaptainPickFinalizeBusyError extends Error {
   constructor(confirmationId: string) {
     super(`captain pick ${confirmationId} match creation is already running`);
@@ -111,6 +129,10 @@ const CAPTAIN_PICK_STALL_MS = 5000;
 const CAPTAIN_PICK_FINALIZE_STALL_MS = 60 * 1000;
 
 const FINALIZE_LOCK_SECONDS = 120;
+
+// How long to wait before trying again to resolve a failed match creation
+// that could not be resolved safely yet.
+export const FINALIZE_RECOVERY_DELAY_MS = 60 * 1000;
 
 export const CAPTAIN_PICK_FINALIZE_ATTEMPTS = 8;
 
@@ -169,7 +191,20 @@ export class CaptainPickService {
   `;
 
   public async getActiveDraftId(steamId: string): Promise<string | null> {
-    return this.redis.get(getCaptainPickPlayerCacheKey(steamId));
+    const draftId = await this.redis.get(getCaptainPickPlayerCacheKey(steamId));
+
+    if (!draftId) {
+      return null;
+    }
+
+    // A draft whose match could not be created has released its players,
+    // even if a crash left their keys behind.
+    const state = await this.getState(draftId);
+    if (!state || state.phase === "Failed") {
+      return null;
+    }
+
+    return draftId;
   }
 
   public async hasDraft(confirmationId: string): Promise<boolean> {
@@ -370,11 +405,201 @@ export class CaptainPickService {
   }
 
   /**
-   * Creates the ordinary Competitive match for locked teams. Every step is
-   * idempotent (fixed match id, per-lineup inserts), so a retry after any
-   * crash converges on the same single match.
+   * Creates the ordinary Competitive match for locked teams.
+   *
+   * Write sequence (each numbered step is its own Postgres transaction):
+   *   1. insert_matches_one: match_options + match (+ its two empty lineups
+   *      via tbi_match/tai_match) with the pre-generated id
+   *   2. lineup 1 players, one insert   3. lineup 2 players, one insert
+   *   4. captain flag per lineup        5. status Live (-> map veto)
+   *   6. Redis: confirmation matchId, matches:confirmation key, MatchCreated
+   * So a crash can leave: nothing, a match with no/one filled lineup, a
+   * filled match still in PickingPlayers, or a started match Redis doesn't
+   * know about yet. Every step checks what exists first, so a retry resumes
+   * from wherever it stopped and always converges on the one fixed-id match.
    */
   public async finalize(confirmationId: string): Promise<void> {
+    await this.withFinalizeLock(confirmationId, async () => {
+      const state = await this.getState(confirmationId);
+
+      if (!state || state.phase !== "CreatingMatch" || !state.matchId) {
+        return;
+      }
+
+      assertFinalTeams(state);
+
+      let inspection = await this.inspectMatch(state);
+
+      if (inspection.kind === "missing") {
+        await this.createMatch(state);
+        inspection = await this.inspectMatch(state);
+      }
+
+      if (inspection.kind === "missing") {
+        throw new Error(
+          `captain pick ${confirmationId} match ${state.matchId} was not created`,
+        );
+      }
+
+      if (inspection.kind === "foreign" || inspection.kind === "canceled") {
+        throw new Error(
+          `captain pick ${confirmationId} match ${state.matchId} cannot be completed: ${inspection.reason}`,
+        );
+      }
+
+      await this.ensureLineups(state, inspection.match);
+
+      inspection = await this.inspectMatch(state);
+
+      if (
+        inspection.kind === "partial" &&
+        inspection.lineupsComplete &&
+        inspection.match.status === "PickingPlayers"
+      ) {
+        // The same transition Standard matchmaking uses: with no map yet the
+        // matches trigger turns this into the normal map veto.
+        await this.matchAssistant.updateMatchStatus(state.matchId, "Live");
+        inspection = await this.inspectMatch(state);
+      }
+
+      if (inspection.kind !== "complete") {
+        throw new Error(
+          `captain pick ${confirmationId} match ${state.matchId} is incomplete: ${
+            "reason" in inspection ? inspection.reason : inspection.kind
+          }`,
+        );
+      }
+
+      await this.recordMatchCreated(state);
+    });
+  }
+
+  /**
+   * Every normal attempt at creating the match failed. What happens next
+   * depends on what actually exists under the fixed match id:
+   *   - a complete, started match: that IS the match; record it (success)
+   *   - nothing: release everyone with a "please queue again" message
+   *   - an incomplete match: cancel it first, confirm it is Canceled, and
+   *     only then release everyone
+   *   - anything unexpected, or a step that fails: keep everyone committed
+   *     and throw, so the caller retries later. Players are never released
+   *     while a real match could still exist.
+   * No penalty and no automatic requeue in any case.
+   */
+  public async resolveFinalizeFailure(
+    confirmationId: string,
+    reason: unknown,
+  ): Promise<void> {
+    await this.withFinalizeLock(confirmationId, async () => {
+      const state = await this.getState(confirmationId);
+
+      if (!state || state.phase !== "CreatingMatch" || !state.matchId) {
+        return;
+      }
+
+      const inspection = await this.inspectMatch(state);
+
+      switch (inspection.kind) {
+        case "complete":
+          await this.ensureLineups(state, inspection.match);
+          await this.recordMatchCreated(state);
+          this.logger.warn(
+            `[captain-pick] ${confirmationId} recovered existing match ${state.matchId} after failed attempts`,
+          );
+          return;
+        case "missing":
+        case "canceled":
+          await this.releaseAfterFailure(state, reason);
+          return;
+        case "partial": {
+          this.logger.warn(
+            `[captain-pick] ${confirmationId} canceling incomplete match ${state.matchId}: ${inspection.reason}`,
+          );
+          await this.matchAssistant.updateMatchStatus(
+            state.matchId,
+            "Canceled",
+          );
+
+          const after = await this.inspectMatch(state);
+          if (after.kind !== "canceled") {
+            throw new Error(
+              `captain pick ${confirmationId} match ${state.matchId} is still ${after.kind} after canceling`,
+            );
+          }
+
+          await this.releaseAfterFailure(state, reason);
+          return;
+        }
+        case "foreign":
+          throw new Error(
+            `captain pick ${confirmationId} match ${state.matchId} does not look like this draft's match (${inspection.reason}); leaving it and the players untouched`,
+          );
+      }
+    });
+  }
+
+  /**
+   * Called when the finalize job has used up its attempts. Resolves the
+   * failure if it safely can; otherwise keeps the draft (and its players)
+   * alive and tries again later instead of releasing anyone.
+   */
+  public async handleFinalizeExhausted(
+    confirmationId: string,
+    reason: unknown,
+  ): Promise<void> {
+    try {
+      await this.resolveFinalizeFailure(confirmationId, reason);
+    } catch (error) {
+      this.logger.error(
+        `[captain-pick] ${confirmationId} could not resolve failed match creation yet, retrying in ${FINALIZE_RECOVERY_DELAY_MS / 1000}s`,
+        error,
+      );
+      await this.keepAlive(confirmationId);
+      await this.queue.add(
+        "CaptainPickFinalize",
+        { confirmationId, recovery: true },
+        {
+          delay: FINALIZE_RECOVERY_DELAY_MS,
+          jobId: `${getCaptainPickFinalizeJobId(confirmationId)}.recovery-${Date.now()}`,
+        },
+      );
+    }
+  }
+
+  private async recordMatchCreated(state: CaptainPickState) {
+    const { confirmationId, matchId } = state;
+
+    await this.redis.hset(
+      getMatchmakingConformationCacheKey(confirmationId),
+      "matchId",
+      matchId,
+    );
+    await this.redis.set(`matches:confirmation:${matchId}`, confirmationId);
+
+    const result = await this.transition(confirmationId, (current) => {
+      if (current.phase !== "CreatingMatch") {
+        return null;
+      }
+      return {
+        ...current,
+        phase: "MatchCreated",
+        updatedAt: new Date().toISOString(),
+      };
+    });
+
+    if (result.changed) {
+      this.logger.log(
+        `[captain-pick] ${confirmationId} created match ${matchId}`,
+      );
+    }
+
+    await this.afterTransition(result);
+  }
+
+  private async withFinalizeLock(
+    confirmationId: string,
+    run: () => Promise<void>,
+  ) {
     const lockKey = `${getCaptainPickDraftCacheKey(confirmationId)}:finalize-lock`;
     const locked = await this.redis.set(
       lockKey,
@@ -389,85 +614,45 @@ export class CaptainPickService {
     }
 
     try {
-      const state = await this.getState(confirmationId);
-
-      if (!state || state.phase !== "CreatingMatch" || !state.matchId) {
-        return;
-      }
-
-      assertFinalTeams(state);
-
-      const matchId = state.matchId;
-      const lineupIds = await this.ensureMatch(state);
-
-      for (const lineup of [1, 2] as const) {
-        await this.ensureLineup(
-          lineupIds[lineup],
-          state.draft.lineups[lineup],
-          state.draft.captains[lineup].steam_id,
-        );
-      }
-
-      const { matches_by_pk } = await this.hasura.query({
-        matches_by_pk: {
-          __args: { id: matchId },
-          status: true,
-        },
-      });
-
-      if (matches_by_pk?.status === "PickingPlayers") {
-        // The same transition Standard matchmaking uses: with no map yet the
-        // matches trigger turns this into the normal map veto.
-        await this.matchAssistant.updateMatchStatus(matchId, "Live");
-      }
-
-      await this.redis.hset(
-        getMatchmakingConformationCacheKey(confirmationId),
-        "matchId",
-        matchId,
-      );
-      await this.redis.set(`matches:confirmation:${matchId}`, confirmationId);
-
-      const result = await this.transition(confirmationId, (current) => {
-        if (current.phase !== "CreatingMatch") {
-          return null;
-        }
-        return {
-          ...current,
-          phase: "MatchCreated",
-          updatedAt: new Date().toISOString(),
-        };
-      });
-
-      this.logger.log(
-        `[captain-pick] ${confirmationId} created match ${matchId}`,
-      );
-
-      await this.afterTransition(result);
+      await run();
     } finally {
       await this.redis.del(lockKey);
     }
   }
 
+  // Keeps a draft whose match creation is still being resolved from expiring
+  // (and so releasing its players) in the meantime.
+  private async keepAlive(confirmationId: string) {
+    const state = await this.getState(confirmationId);
+    if (!state) {
+      return;
+    }
+    await this.redis.expire(
+      getCaptainPickDraftCacheKey(confirmationId),
+      CAPTAIN_PICK_STATE_TTL_SECONDS,
+    );
+    await this.refreshPlayerKeys(state);
+  }
+
   /**
-   * Match creation gave up after every retry. Nobody is punished and the
-   * other nine are not silently requeued; everyone is released and told to
-   * queue again. A partially created match (if any) is only logged.
+   * Only reached once no match exists or it is confirmed Canceled. Nobody is
+   * punished and the other nine are not silently requeued; everyone is
+   * released and told to queue again.
    */
-  public async failFinalize(confirmationId: string, reason: unknown) {
-    const result = await this.transition(confirmationId, (state) => {
-      if (state.phase !== "CreatingMatch") {
+  private async releaseAfterFailure(state: CaptainPickState, reason: unknown) {
+    const confirmationId = state.confirmationId;
+    const result = await this.transition(confirmationId, (current) => {
+      if (current.phase !== "CreatingMatch") {
         return null;
       }
       return {
-        ...state,
+        ...current,
         phase: "Failed",
         updatedAt: new Date().toISOString(),
       };
     });
 
-    const state = result.state;
-    if (!result.changed || !state) {
+    if (!result.changed) {
       return;
     }
 
@@ -902,48 +1087,174 @@ export class CaptainPickService {
     });
   }
 
-  private async ensureMatch(
-    state: CaptainPickState,
-  ): Promise<Record<CaptainPickLineup, string>> {
-    const matchId = state.matchId as string;
+  // Step 1: match_options + match in one insert, with the fixed id. A
+  // duplicate-key error means an earlier attempt already inserted it, which
+  // the caller's re-inspection picks up.
+  private async createMatch(state: CaptainPickState) {
+    const { mapPoolType, options } = getMatchmakingMatchSetup(
+      "Competitive",
+      state.region,
+    );
 
-    let match = await this.findMatch(matchId);
-
-    if (!match) {
-      const { mapPoolType, options } = getMatchmakingMatchSetup(
+    try {
+      await this.matchAssistant.createMatchBasedOnType(
         "Competitive",
-        state.region,
+        mapPoolType,
+        { ...options, id: state.matchId as string },
       );
-
-      try {
-        match = await this.matchAssistant.createMatchBasedOnType(
-          "Competitive",
-          mapPoolType,
-          { ...options, id: matchId },
-        );
-      } catch (error) {
-        // A concurrent or half-finished earlier attempt may have inserted it.
-        match = await this.findMatch(matchId);
-        if (!match) {
-          throw error;
-        }
+    } catch (error) {
+      if ((await this.inspectMatch(state)).kind === "missing") {
+        throw error;
       }
     }
-
-    return { 1: match.lineup_1_id, 2: match.lineup_2_id };
   }
 
-  private async findMatch(matchId: string) {
-    const { matches_by_pk } = await this.hasura.query({
+  /**
+   * What exists under this draft's fixed match id. "complete" means it is
+   * provably this draft's match and already handed to the normal flow:
+   * Competitive with the Standard matchmaking options, the active
+   * Competitive map pool with the normal veto, 5stack source, no draft link,
+   * exactly the drafted players on their drafted sides, and past
+   * PickingPlayers. A match that is ours but not there yet is "partial";
+   * one that doesn't match these expectations at all is "foreign" and is
+   * never touched.
+   */
+  public async inspectMatch(state: CaptainPickState): Promise<MatchInspection> {
+    const { matches_by_pk: match } = await this.hasura.query({
       matches_by_pk: {
-        __args: { id: matchId },
+        __args: { id: state.matchId as string },
         id: true,
+        status: true,
+        source: true,
+        region: true,
         lineup_1_id: true,
         lineup_2_id: true,
+        options: {
+          type: true,
+          mr: true,
+          best_of: true,
+          knife_round: true,
+          overtime: true,
+          timeout_setting: true,
+          map_veto: true,
+          map_pool: {
+            type: true,
+          },
+        },
+        draft_games: {
+          id: true,
+        },
+        lineup_1: {
+          lineup_players: {
+            steam_id: true,
+            captain: true,
+          },
+        },
+        lineup_2: {
+          lineup_players: {
+            steam_id: true,
+            captain: true,
+          },
+        },
       },
     });
 
-    return matches_by_pk ?? null;
+    if (!match) {
+      return { kind: "missing" };
+    }
+
+    const summary: InspectedMatch = {
+      id: match.id,
+      status: match.status,
+      lineupIds: { 1: match.lineup_1_id, 2: match.lineup_2_id },
+    };
+
+    const { options: expected } = getMatchmakingMatchSetup(
+      "Competitive",
+      state.region,
+    );
+    const options = match.options;
+    const mismatch = [
+      options?.type !== "Competitive" && `type ${options?.type}`,
+      match.source !== "5stack" && `source ${match.source}`,
+      match.region !== state.region && `region ${match.region}`,
+      options?.mr !== expected.mr && `mr ${options?.mr}`,
+      options?.best_of !== expected.best_of && `best_of ${options?.best_of}`,
+      options?.knife_round !== expected.knife && "knife round",
+      options?.overtime !== expected.overtime && "overtime",
+      options?.timeout_setting !== expected.timeout_setting &&
+        `timeouts ${options?.timeout_setting}`,
+      options?.map_veto !== true && "no map veto",
+      options?.map_pool?.type !== "Competitive" &&
+        `map pool ${options?.map_pool?.type}`,
+      (match.draft_games?.length ?? 0) > 0 && "linked to a draft game",
+    ].filter(Boolean);
+
+    const seated = {
+      1: (match.lineup_1?.lineup_players ?? []).map((p) => ({
+        steam_id: String(p.steam_id),
+        captain: p.captain,
+      })),
+      2: (match.lineup_2?.lineup_players ?? []).map((p) => ({
+        steam_id: String(p.steam_id),
+        captain: p.captain,
+      })),
+    };
+
+    for (const lineup of [1, 2] as const) {
+      const drafted = new Set(state.draft.lineups[lineup]);
+      const strangers = seated[lineup].filter((p) => !drafted.has(p.steam_id));
+      if (strangers.length > 0) {
+        mismatch.push(`unexpected players in lineup ${lineup}`);
+      }
+    }
+
+    if (mismatch.length > 0) {
+      return { kind: "foreign", match: summary, reason: mismatch.join(", ") };
+    }
+
+    if (match.status === "Canceled") {
+      return { kind: "canceled", match: summary, reason: "match is canceled" };
+    }
+
+    const lineupsComplete = ([1, 2] as const).every(
+      (lineup) =>
+        seated[lineup].length === state.draft.lineups[lineup].length &&
+        state.draft.lineups[lineup].every((steamId) =>
+          seated[lineup].some((p) => p.steam_id === steamId),
+        ),
+    );
+
+    if (!lineupsComplete) {
+      return {
+        kind: "partial",
+        match: summary,
+        lineupsComplete,
+        reason: "lineups are not fully seated",
+      };
+    }
+
+    if (match.status === "PickingPlayers") {
+      return {
+        kind: "partial",
+        match: summary,
+        lineupsComplete,
+        reason: "match was never started",
+      };
+    }
+
+    return { kind: "complete", match: summary };
+  }
+
+  // Steps 2-4, each lineup idempotently; also restores the drafted captain.
+  private async ensureLineups(state: CaptainPickState, match: InspectedMatch) {
+    for (const lineup of [1, 2] as const) {
+      await this.ensureLineup(
+        match.lineupIds[lineup],
+        state.draft.lineups[lineup],
+        state.draft.captains[lineup].steam_id,
+      );
+    }
   }
 
   /**

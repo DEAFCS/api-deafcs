@@ -46,9 +46,49 @@ const ELO: Record<number, number> = {
 type Match = {
   id: string;
   status: string;
+  source: string;
+  region: string;
   lineup_1_id: string;
   lineup_2_id: string;
+  options: {
+    type: string;
+    mr: number;
+    best_of: number;
+    knife_round: boolean;
+    overtime: boolean;
+    timeout_setting: string;
+    map_veto: boolean;
+    map_pool: { type: string };
+  };
+  draft_games: Array<{ id: string }>;
 };
+
+// What insert_matches_one inside createMatchBasedOnType writes: the enabled
+// pool for the map pool type (so map_veto is on) and the 5stack source
+// default, with two empty lineups.
+const matchRow = (
+  matchType: string,
+  mapPoolType: string,
+  options: any,
+): Match => ({
+  id: options.id,
+  status: "PickingPlayers",
+  source: "5stack",
+  region: options.region,
+  lineup_1_id: `${options.id}-lineup-1`,
+  lineup_2_id: `${options.id}-lineup-2`,
+  options: {
+    type: matchType,
+    mr: options.mr,
+    best_of: options.best_of,
+    knife_round: options.knife,
+    overtime: options.overtime,
+    timeout_setting: options.timeout_setting,
+    map_veto: true,
+    map_pool: { type: mapPoolType },
+  },
+  draft_games: [],
+});
 
 describe("CaptainPickService", () => {
   let redis: FakeRedis;
@@ -68,6 +108,9 @@ describe("CaptainPickService", () => {
     updateMatchStatus: jest.Mock;
   };
   let failNextLineupInsert: boolean;
+  // Status transitions that fail with the given error, e.g. a region with no
+  // servers making Live raise in tbu_matches.
+  let failStatus: Record<string, string>;
 
   const setNow = (ms: number) => jest.setSystemTime(ms);
 
@@ -136,6 +179,7 @@ describe("CaptainPickService", () => {
     queue = new FakeQueue();
     pickSeconds = 30;
     failNextLineupInsert = false;
+    failStatus = {};
 
     players = new Map(
       Object.entries(ELO).map(([n, elo]) => [
@@ -160,8 +204,19 @@ describe("CaptainPickService", () => {
           };
         }
         if (query.matches_by_pk) {
+          const match = matches.get(query.matches_by_pk.__args.id);
+          const seatedIn = (lineupId: string) =>
+            lineupPlayers
+              .filter((p) => p.match_lineup_id === lineupId)
+              .map(({ steam_id, captain }) => ({ steam_id, captain }));
           return {
-            matches_by_pk: matches.get(query.matches_by_pk.__args.id) ?? null,
+            matches_by_pk: match
+              ? {
+                  ...structuredClone(match),
+                  lineup_1: { lineup_players: seatedIn(match.lineup_1_id) },
+                  lineup_2: { lineup_players: seatedIn(match.lineup_2_id) },
+                }
+              : null,
           };
         }
         if (query.match_lineup_players) {
@@ -207,21 +262,19 @@ describe("CaptainPickService", () => {
     };
 
     matchAssistant = {
-      createMatchBasedOnType: jest.fn(async (_type, _pool, options) => {
+      createMatchBasedOnType: jest.fn(async (type, pool, options) => {
         if (matches.has(options.id)) {
           throw new Error("duplicate key value violates matches_pkey");
         }
-        const match = {
-          id: options.id,
-          status: "PickingPlayers",
-          lineup_1_id: `${options.id}-lineup-1`,
-          lineup_2_id: `${options.id}-lineup-2`,
-        };
+        const match = matchRow(type, pool, options);
         matches.set(options.id, match);
         return match;
       }),
       // tbu_matches: Live without a map becomes the normal map veto.
       updateMatchStatus: jest.fn(async (id: string, status: string) => {
+        if (failStatus[status]) {
+          throw new Error(failStatus[status]);
+        }
         const match = matches.get(id);
         match.status = status === "Live" ? "Veto" : status;
       }),
@@ -852,13 +905,8 @@ describe("CaptainPickService", () => {
     it("adopts a match a concurrent attempt already inserted", async () => {
       const s = await state();
       matchAssistant.createMatchBasedOnType.mockImplementationOnce(
-        async (_t, _p, options) => {
-          matches.set(options.id, {
-            id: options.id,
-            status: "PickingPlayers",
-            lineup_1_id: `${options.id}-lineup-1`,
-            lineup_2_id: `${options.id}-lineup-2`,
-          });
+        async (type, pool, options) => {
+          matches.set(options.id, matchRow(type, pool, options));
           throw new Error("duplicate key value violates matches_pkey");
         },
       );
@@ -913,13 +961,16 @@ describe("CaptainPickService", () => {
         expect((await state()).phase).toBe("CreatingMatch");
       });
 
-      it("releases everyone (no requeue, no penalty) after the last attempt", async () => {
+      it("on the last attempt cancels the half-created match, then releases everyone", async () => {
         failNextLineupInsert = true;
 
         await new CaptainPickFinalize(service).process(
           job(CAPTAIN_PICK_FINALIZE_ATTEMPTS - 1),
         );
 
+        // The match row existed with empty lineups: it is canceled first.
+        expect(matches.size).toBe(1);
+        expect([...matches.values()][0].status).toBe("Canceled");
         expect(await service.hasDraft(CONFIRMATION_ID)).toBe(false);
         for (let n = 1; n <= 10; n++) {
           await expect(service.getActiveDraftId(steam(n))).resolves.toBeNull();
@@ -937,13 +988,334 @@ describe("CaptainPickService", () => {
           1,
         );
 
-        await expect(
-          new CaptainPickFinalize(service).process(
-            job(CAPTAIN_PICK_FINALIZE_ATTEMPTS - 1),
-          ),
-        ).rejects.toBeInstanceOf(CaptainPickFinalizeBusyError);
+        await new CaptainPickFinalize(service).process(
+          job(CAPTAIN_PICK_FINALIZE_ATTEMPTS - 1),
+        );
+
+        expect((await state()).phase).toBe("CreatingMatch");
+        expect(await service.getActiveDraftId(steam(1))).toBe(CONFIRMATION_ID);
+        // Tries again later instead.
+        expect(
+          queue.added.filter((j) => j.data.recovery === true),
+        ).toHaveLength(1);
+      });
+
+      it("a recovery job only resolves, it never creates a match", async () => {
+        await new CaptainPickFinalize(service).process({
+          data: { confirmationId: CONFIRMATION_ID, recovery: true },
+          opts: {},
+          attemptsMade: 0,
+        } as any);
+
+        // No match existed: resolved as a clean failure.
+        expect(matchAssistant.createMatchBasedOnType).not.toHaveBeenCalled();
+        expect(await service.hasDraft(CONFIRMATION_ID)).toBe(false);
+      });
+    });
+  });
+
+  describe("recovering from failed match creation", () => {
+    const exhaust = () =>
+      service.handleFinalizeExhausted(CONFIRMATION_ID, new Error("boom"));
+    const createFailureMessages = (n: number) =>
+      redis
+        .messagesTo(steam(n), "matchmaking:error")
+        .filter(
+          (m) =>
+            m.data.message ===
+            "The Captain Pick match could not be created. Please queue again.",
+        );
+    const onlyMatch = () => [...matches.values()][0];
+
+    beforeEach(async () => {
+      await service.startDraft(CONFIRMATION_ID);
+      await draftToCompletion();
+    });
+
+    describe("no match row exists", () => {
+      it("releases everyone with the queue-again message, no requeue, no penalty", async () => {
+        await exhaust();
+
+        expect(matches.size).toBe(0);
+        expect(await service.hasDraft(CONFIRMATION_ID)).toBe(false);
+        for (let n = 1; n <= 10; n++) {
+          await expect(service.getActiveDraftId(steam(n))).resolves.toBeNull();
+          expect(createFailureMessages(n)).toHaveLength(1);
+        }
+        // Nothing queued back and nothing written besides the failure.
+        expect(queue.byName("CaptainPickFinalize")).toHaveLength(1);
+        expect(hasura.mutation).not.toHaveBeenCalled();
+        expect(
+          redis.hashes.has(getMatchmakingConformationCacheKey(CONFIRMATION_ID)),
+        ).toBe(false);
+      });
+
+      it("is safe to run twice", async () => {
+        await exhaust();
+        await exhaust();
+
+        for (let n = 1; n <= 10; n++) {
+          expect(createFailureMessages(n)).toHaveLength(1);
+        }
+      });
+    });
+
+    describe("a complete match already exists (Redis never heard)", () => {
+      beforeEach(async () => {
+        // The DB side fully succeeded, then the process died before Redis
+        // recorded anything.
+        const s = await state();
+        const recordSpy = jest
+          .spyOn(service as any, "recordMatchCreated")
+          .mockRejectedValueOnce(new Error("redis gone"));
+        await expect(service.finalize(CONFIRMATION_ID)).rejects.toThrow(
+          "redis gone",
+        );
+        recordSpy.mockRestore();
+        expect(matches.get(s.matchId!)?.status).toBe("Veto");
         expect((await state()).phase).toBe("CreatingMatch");
       });
+
+      it("a plain retry recovers it without a second match", async () => {
+        await service.finalize(CONFIRMATION_ID);
+
+        expect(matchAssistant.createMatchBasedOnType).toHaveBeenCalledTimes(1);
+        expect(matches.size).toBe(1);
+        expect((await state()).phase).toBe("MatchCreated");
+      });
+
+      it("the terminal path recovers it as the match instead of failing", async () => {
+        await exhaust();
+
+        const s = await state();
+        expect(s.phase).toBe("MatchCreated");
+        expect(onlyMatch().status).toBe("Veto");
+        expect(matches.size).toBe(1);
+        expect(
+          await redis.hget(
+            getMatchmakingConformationCacheKey(CONFIRMATION_ID),
+            "matchId",
+          ),
+        ).toBe(s.matchId);
+        for (let n = 1; n <= 10; n++) {
+          // Still committed to that match; never told to queue again.
+          await expect(service.getActiveDraftId(steam(n))).resolves.toBe(
+            CONFIRMATION_ID,
+          );
+          expect(createFailureMessages(n)).toHaveLength(0);
+        }
+        expect(matchAssistant.updateMatchStatus).not.toHaveBeenCalledWith(
+          s.matchId,
+          "Canceled",
+        );
+      });
+
+      it("keeps the drafted captains and normal veto when recovering", async () => {
+        const s = await state();
+        // A captain flag lost somewhere is restored, not a reason to cancel.
+        for (const p of lineupPlayers) {
+          p.captain = false;
+        }
+
+        await exhaust();
+
+        const match = onlyMatch();
+        expect(match.options.type).toBe("Competitive");
+        expect(match.options.map_veto).toBe(true);
+        expect(match.options.map_pool.type).toBe("Competitive");
+        for (const [lineup, lineupId] of [
+          [1, match.lineup_1_id],
+          [2, match.lineup_2_id],
+        ] as const) {
+          expect(
+            lineupPlayers
+              .filter((p) => p.match_lineup_id === lineupId && p.captain)
+              .map((p) => p.steam_id),
+          ).toEqual([s.draft.captains[lineup].steam_id]);
+        }
+      });
+
+      it("recovering twice is harmless", async () => {
+        await exhaust();
+        await exhaust();
+        await service.finalize(CONFIRMATION_ID);
+
+        expect((await state()).phase).toBe("MatchCreated");
+        expect(matches.size).toBe(1);
+        expect(onlyMatch().status).toBe("Veto");
+      });
+
+      it("never cancels a match that already finished", async () => {
+        onlyMatch().status = "Finished";
+
+        await exhaust();
+
+        expect(onlyMatch().status).toBe("Finished");
+        expect((await state()).phase).toBe("MatchCreated");
+      });
+    });
+
+    describe("a partial match exists", () => {
+      it("is detected as partial when lineups are missing", async () => {
+        failNextLineupInsert = true;
+        await expect(service.finalize(CONFIRMATION_ID)).rejects.toThrow();
+
+        const inspection = await service.inspectMatch(await state());
+        expect(inspection).toMatchObject({
+          kind: "partial",
+          lineupsComplete: false,
+        });
+      });
+
+      it("is detected as partial when it was never started", async () => {
+        failStatus.Live = "No game servers are available in region Europe";
+        await expect(service.finalize(CONFIRMATION_ID)).rejects.toThrow(
+          /No game servers/,
+        );
+
+        const inspection = await service.inspectMatch(await state());
+        expect(inspection).toMatchObject({
+          kind: "partial",
+          lineupsComplete: true,
+          reason: "match was never started",
+        });
+      });
+
+      it("is canceled before anyone is released, and can never start", async () => {
+        failStatus.Live = "No game servers are available in region Europe";
+        await expect(service.finalize(CONFIRMATION_ID)).rejects.toThrow();
+
+        const order: string[] = [];
+        matchAssistant.updateMatchStatus.mockImplementation(
+          async (id: string, status: string) => {
+            order.push(`status:${status}`);
+            matches.get(id).status = status;
+          },
+        );
+        const originalPublish = redis.publish.bind(redis);
+        jest
+          .spyOn(redis, "publish")
+          .mockImplementation(async (channel: string, message: string) => {
+            if (JSON.parse(message).event === "matchmaking:error") {
+              order.push("released");
+            }
+            return originalPublish(channel, message);
+          });
+
+        await exhaust();
+
+        expect(order[0]).toBe("status:Canceled");
+        expect(order.slice(1).every((step) => step === "released")).toBe(true);
+        expect(onlyMatch().status).toBe("Canceled");
+        // Canceled and never set Live again by Captain Pick.
+        expect(order).not.toContain("status:Live");
+
+        // The finalizer no longer acts on it at all.
+        await service.finalize(CONFIRMATION_ID);
+        expect(onlyMatch().status).toBe("Canceled");
+      });
+
+      it("cleanup is idempotent", async () => {
+        failNextLineupInsert = true;
+        await expect(service.finalize(CONFIRMATION_ID)).rejects.toThrow();
+
+        await exhaust();
+        await exhaust();
+
+        expect(onlyMatch().status).toBe("Canceled");
+        for (let n = 1; n <= 10; n++) {
+          expect(createFailureMessages(n)).toHaveLength(1);
+        }
+      });
+
+      it("a failing cancel keeps everyone committed and retries later", async () => {
+        failNextLineupInsert = true;
+        await expect(service.finalize(CONFIRMATION_ID)).rejects.toThrow();
+        failStatus.Canceled = "hasura unavailable";
+
+        await exhaust();
+
+        expect(onlyMatch().status).toBe("PickingPlayers");
+        expect((await state()).phase).toBe("CreatingMatch");
+        for (let n = 1; n <= 10; n++) {
+          await expect(service.getActiveDraftId(steam(n))).resolves.toBe(
+            CONFIRMATION_ID,
+          );
+          expect(createFailureMessages(n)).toHaveLength(0);
+        }
+        const [recovery] = queue.added.filter((j) => j.data.recovery);
+        expect(recovery.opts.delay).toBe(60000);
+
+        // Once cancel works again, the recovery job finishes the job.
+        delete failStatus.Canceled;
+        await new CaptainPickFinalize(service).process({
+          data: recovery.data,
+          opts: recovery.opts,
+          attemptsMade: 0,
+        } as any);
+
+        expect(onlyMatch().status).toBe("Canceled");
+        expect(await service.getActiveDraftId(steam(1))).toBeNull();
+      });
+    });
+
+    describe("a match that isn't this draft's", () => {
+      it("is left alone and nobody is released", async () => {
+        const s = await state();
+        matches.set(
+          s.matchId!,
+          matchRow("Wingman", "Wingman", {
+            id: s.matchId,
+            region: REGION,
+            mr: 8,
+            best_of: 1,
+            knife: true,
+            overtime: true,
+            timeout_setting: "CoachAndPlayers",
+          }),
+        );
+
+        await exhaust();
+
+        expect(onlyMatch().status).toBe("PickingPlayers");
+        expect(matchAssistant.updateMatchStatus).not.toHaveBeenCalled();
+        expect(await service.getActiveDraftId(steam(1))).toBe(CONFIRMATION_ID);
+        expect(queue.added.filter((j) => j.data.recovery)).toHaveLength(1);
+      });
+
+      it("a draft-linked match is never treated as ours", async () => {
+        failNextLineupInsert = true;
+        await expect(service.finalize(CONFIRMATION_ID)).rejects.toThrow();
+        onlyMatch().draft_games = [{ id: "draft-game" }];
+
+        expect((await service.inspectMatch(await state())).kind).toBe(
+          "foreign",
+        );
+      });
+    });
+
+    it("two finalize workers racing create one match", async () => {
+      const results = await Promise.allSettled([
+        service.finalize(CONFIRMATION_ID),
+        service.finalize(CONFIRMATION_ID),
+      ]);
+
+      expect(results.filter((r) => r.status === "fulfilled")).not.toHaveLength(
+        0,
+      );
+      expect(matchAssistant.createMatchBasedOnType).toHaveBeenCalledTimes(1);
+      expect(matches.size).toBe(1);
+      expect((await state()).phase).toBe("MatchCreated");
+    });
+
+    it("never generates a new match id on retry", async () => {
+      const { matchId } = await state();
+      failNextLineupInsert = true;
+      await expect(service.finalize(CONFIRMATION_ID)).rejects.toThrow();
+      await service.finalize(CONFIRMATION_ID);
+
+      expect((await state()).matchId).toBe(matchId);
+      expect([...matches.keys()]).toEqual([matchId]);
     });
   });
 
@@ -1010,7 +1382,9 @@ describe("CaptainPickService", () => {
 
       expect(await service.hasDraft(CONFIRMATION_ID)).toBe(false);
       expect(await service.getActiveDraftId(steam(1))).toBeNull();
-      expect(await service.getActiveDraftId(steam(3))).toBe("other-draft");
+      expect(await redis.get(getCaptainPickPlayerCacheKey(steam(3)))).toBe(
+        "other-draft",
+      );
 
       // Released players get the usual "no longer in matchmaking" update;
       // the one now in another draft does not.

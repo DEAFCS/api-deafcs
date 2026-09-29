@@ -14,8 +14,20 @@ export class CaptainPickFinalize extends WorkerHost {
     super();
   }
 
-  async process(job: Job<{ confirmationId: string }>): Promise<void> {
-    const { confirmationId } = job.data;
+  async process(
+    job: Job<{ confirmationId: string; recovery?: boolean }>,
+  ): Promise<void> {
+    const { confirmationId, recovery } = job.data;
+
+    // A follow-up after the normal attempts ran out: only resolve (recover,
+    // clean up or release), never start creating from scratch again.
+    if (recovery) {
+      await this.captainPick.handleFinalizeExhausted(
+        confirmationId,
+        "match creation recovery",
+      );
+      return;
+    }
 
     try {
       await this.captainPick.finalize(confirmationId);
@@ -23,10 +35,13 @@ export class CaptainPickFinalize extends WorkerHost {
       const attempts = job.opts.attempts ?? CAPTAIN_PICK_FINALIZE_ATTEMPTS;
       const lastAttempt = job.attemptsMade + 1 >= attempts;
 
-      // Busy means another runner owns match creation right now; it is not a
-      // reason to give up on the draft.
-      if (lastAttempt && !(error instanceof CaptainPickFinalizeBusyError)) {
-        await this.captainPick.failFinalize(confirmationId, error);
+      if (lastAttempt) {
+        // Busy means another runner owns match creation right now; resolving
+        // is still attempted, and itself waits its turn via the same lock.
+        await this.captainPick.handleFinalizeExhausted(
+          confirmationId,
+          error instanceof CaptainPickFinalizeBusyError ? "busy" : error,
+        );
         return;
       }
 
