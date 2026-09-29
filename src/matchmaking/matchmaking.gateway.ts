@@ -20,6 +20,7 @@ import { e_player_roles_enum } from "generated";
 import { SocketsService } from "src/sockets/sockets.service";
 import { TermsService } from "src/terms/terms.service";
 import { WebsiteRestrictionsService } from "src/website-restrictions/website-restrictions.service";
+import { resolveMatchmakingQueueVariant } from "./types/MatchmakingQueueVariant";
 
 @WebSocketGateway({
   path: "/ws/web",
@@ -46,6 +47,7 @@ export class MatchmakingGateway {
     data: {
       type: e_match_types_enum;
       regions: Array<string>;
+      variant?: unknown;
     },
     @ConnectedSocket() client: FiveStackWebSocketClient,
   ) {
@@ -183,6 +185,8 @@ export class MatchmakingGateway {
     });
 
     try {
+      this.assertStandardQueueVariant(data.variant);
+
       const latencyResults = await this.getLatencyResults(client);
 
       let checkLatency = false;
@@ -386,6 +390,22 @@ export class MatchmakingGateway {
       confirmationId,
       user.steam_id,
     );
+  }
+
+  // Captain Pick has no draft engine yet, so it is refused outright, whatever
+  // the feature setting says. Without this, a client sending a variant would
+  // be queued as Standard and auto-balanced. Requests without a variant (all
+  // current clients) are unaffected.
+  private assertStandardQueueVariant(variant: unknown) {
+    const resolved = resolveMatchmakingQueueVariant(variant);
+
+    if (!resolved) {
+      throw new JoinQueueError("Unknown matchmaking queue");
+    }
+
+    if (resolved === "CaptainPick") {
+      throw new JoinQueueError("5v5 Captain Pick is not available yet.");
+    }
   }
 
   private async getLatencyResults(client: FiveStackWebSocketClient) {

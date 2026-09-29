@@ -253,7 +253,7 @@ export class MatchmakingLobbyService {
 
     for (const region of details.regions) {
       const position = await this.redis.zrank(
-        getMatchmakingQueueCacheKey(details.type, region),
+        getMatchmakingQueueCacheKey(details.type, region, details.variant),
         lobbyId,
       );
 
@@ -271,11 +271,19 @@ export class MatchmakingLobbyService {
 
     for (const region of queueDetails.regions) {
       await this.redis.zrem(
-        getMatchmakingQueueCacheKey(queueDetails.type, region),
+        getMatchmakingQueueCacheKey(
+          queueDetails.type,
+          region,
+          queueDetails.variant,
+        ),
         lobbyId,
       );
       await this.redis.zrem(
-        getMatchmakingRankCacheKey(queueDetails.type, region),
+        getMatchmakingRankCacheKey(
+          queueDetails.type,
+          region,
+          queueDetails.variant,
+        ),
         lobbyId,
       );
     }

@@ -17,6 +17,7 @@ import { MatchmakingController } from "./matchmaking.controller";
 import { MarkPlayerOffline } from "./jobs/MarkPlayerOffline";
 import { TermsModule } from "src/terms/terms.module";
 import { NotificationsModule } from "src/notifications/notifications.module";
+import { CaptainPickSettingsService } from "./captain-pick/captain-pick-settings.service";
 
 @Module({
   imports: [
@@ -34,11 +35,16 @@ import { NotificationsModule } from "src/notifications/notifications.module";
       adapter: BullMQAdapter,
     }),
   ],
-  exports: [MatchmakeService, MatchmakingLobbyService],
+  exports: [
+    MatchmakeService,
+    MatchmakingLobbyService,
+    CaptainPickSettingsService,
+  ],
   providers: [
     MatchmakingGateway,
     MatchmakeService,
     MatchmakingLobbyService,
+    CaptainPickSettingsService,
     CancelMatchMaking,
     MarkPlayerOffline,
     ...getQueuesProcessors("Matchmaking"),

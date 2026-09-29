@@ -819,4 +819,264 @@ describe("MatchmakeService", () => {
       expect(zaddKeys.some((k: string) => k.includes("eu-west"))).toBe(true);
     });
   });
+
+  describe("Captain Pick foundations", () => {
+    const region = "us-east";
+
+    const soloLobby = (
+      index: number,
+      rank: number,
+      variant?: MatchmakingLobby["variant"],
+    ): MatchmakingLobby => ({
+      lobbyId: `lobby-${index}`,
+      type: "Competitive",
+      ...(variant ? { variant } : {}),
+      regions: [region],
+      players: [{ steam_id: `steam-${index}`, rank }],
+      avgRank: rank,
+      joinedAt: new Date(Date.now() + index),
+      regionPositions: {},
+    });
+
+    describe("standard Competitive is unchanged", () => {
+      it("still balances ten solo players through splitIntoBalancedTeams", async () => {
+        const lobbies = Array.from({ length: 10 }, (_, i) =>
+          soloLobby(i + 1, 1000 + i * 100),
+        );
+        mockMatchmakingLobbyService.getLobbyDetails.mockImplementation(
+          async (lobbyId: string) =>
+            lobbies.find((lobby) => lobby.lobbyId === lobbyId) ?? null,
+        );
+
+        const splitSpy = jest.spyOn(service as any, "splitIntoBalancedTeams");
+        const confirmationSpy = jest
+          .spyOn(service as any, "createMatchConfirmation")
+          .mockResolvedValue(undefined);
+
+        await (service as any).createMatches(region, "Competitive", [
+          ...lobbies,
+        ]);
+
+        expect(splitSpy).toHaveBeenCalledTimes(1);
+        expect(splitSpy.mock.calls[0][1]).toBe(5);
+        expect(confirmationSpy).toHaveBeenCalledTimes(1);
+
+        const { team1, team2 } = confirmationSpy.mock.calls[0][2] as any;
+        expect(team1.players).toHaveLength(5);
+        expect(team2.players).toHaveLength(5);
+        // Ranks 1000..1900 total 14500; the best 5/5 split is 7200 vs 7300.
+        const total = (team: any) =>
+          team.players.reduce((sum: number, p: any) => sum + p.rank, 0);
+        expect(Math.abs(total(team1) - total(team2))).toBe(100);
+      });
+
+      it("matchmakes from the standard rank key under the standard lock", async () => {
+        await service.matchmake("Competitive", region);
+
+        expect(mockRedis.set).toHaveBeenCalledWith(
+          "matchmaking:lock:us-east",
+          1,
+          "EX",
+          60,
+          "NX",
+        );
+        expect(mockRedis.zrange).toHaveBeenCalledWith(
+          "matchmaking:v20:us-east:Competitive:ranks",
+          0,
+          -1,
+          "WITHSCORES",
+        );
+        expect(mockRedis.del).toHaveBeenCalledWith("matchmaking:lock:us-east");
+      });
+
+      it("queues a lobby without a variant under the exact standard keys", async () => {
+        mockMatchmakingLobbyService.getLobbyDetails.mockResolvedValue(
+          soloLobby(1, 1000),
+        );
+
+        await service.addLobbyToQueue("lobby-1");
+
+        expect(mockRedis.zadd.mock.calls.map((call) => call[0])).toEqual([
+          "matchmaking:v20:us-east:Competitive:ranks",
+          "matchmaking:v20:us-east:Competitive",
+        ]);
+      });
+    });
+
+    describe("queue separation", () => {
+      it("queues a Captain Pick lobby only under Captain Pick keys", async () => {
+        mockMatchmakingLobbyService.getLobbyDetails.mockResolvedValue(
+          soloLobby(1, 1000, "CaptainPick"),
+        );
+
+        await service.addLobbyToQueue("lobby-1");
+
+        expect(mockRedis.zadd.mock.calls.map((call) => call[0])).toEqual([
+          "matchmaking:v20:us-east:Competitive:captain-pick:ranks",
+          "matchmaking:v20:us-east:Competitive:captain-pick",
+        ]);
+      });
+
+      it("claims a Captain Pick lobby out of its own queue keys", async () => {
+        await (service as any).claimLobby(
+          "lobby-1",
+          soloLobby(1, 1000, "CaptainPick"),
+        );
+
+        const [, keyCount, ...rest] = mockRedis.eval.mock.calls[0] as any[];
+        expect(rest.slice(0, keyCount)).toEqual([
+          "matchmaking:lock:lobby-1",
+          "matchmaking:v20:us-east:Competitive:captain-pick",
+          "matchmaking:v20:us-east:Competitive:captain-pick:ranks",
+        ]);
+      });
+
+      it("never lets a Captain Pick lobby reach standard balancing", async () => {
+        const lobbies = [
+          ...Array.from({ length: 10 }, (_, i) =>
+            soloLobby(i + 1, 1000, "CaptainPick"),
+          ),
+          // Even a full-size one, which would otherwise take the
+          // single-lobby shortcut straight to a confirmation.
+          {
+            ...soloLobby(99, 1000, "CaptainPick"),
+            players: Array.from({ length: 10 }, (_, i) => ({
+              steam_id: `full-${i}`,
+              rank: 1000,
+            })),
+          },
+        ];
+        mockMatchmakingLobbyService.getLobbyDetails.mockImplementation(
+          async (lobbyId: string) =>
+            lobbies.find((lobby) => lobby.lobbyId === lobbyId) ?? null,
+        );
+        mockRedis.zrange.mockResolvedValueOnce(
+          lobbies.flatMap((lobby) => [lobby.lobbyId, "1000"]),
+        );
+
+        const splitSpy = jest.spyOn(service as any, "splitIntoBalancedTeams");
+        const confirmationSpy = jest.spyOn(
+          service as any,
+          "createMatchConfirmation",
+        );
+
+        await service.matchmake("Competitive", region);
+
+        expect(splitSpy).not.toHaveBeenCalled();
+        expect(confirmationSpy).not.toHaveBeenCalled();
+        expect(mockRedis.eval).not.toHaveBeenCalled();
+      });
+
+      it("does not let a held Captain Pick lock block a standard pass", async () => {
+        const held = new Set<string>(["matchmaking:lock:us-east:captain-pick"]);
+        mockRedis.set.mockImplementation((async (key: string) => {
+          if (held.has(key)) {
+            return null;
+          }
+          held.add(key);
+          return "OK";
+        }) as any);
+
+        await service.matchmake("Competitive", region);
+
+        expect(mockRedis.zrange).toHaveBeenCalledWith(
+          "matchmaking:v20:us-east:Competitive:ranks",
+          0,
+          -1,
+          "WITHSCORES",
+        );
+      });
+
+      it("still skips a standard pass while the standard lock is held", async () => {
+        mockRedis.set.mockResolvedValue(null as any);
+
+        await service.matchmake("Competitive", region);
+
+        expect(mockRedis.zrange).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("region stats", () => {
+      it("reports Captain Pick under its own key without mixing counts", async () => {
+        mockHasura.query.mockResolvedValue({
+          server_regions: [{ value: region }],
+        } as any);
+
+        const queued: Record<string, string[]> = {
+          "matchmaking:v20:us-east:Competitive": ["std-party", "std-solo"],
+          "matchmaking:v20:us-east:Competitive:captain-pick": [
+            "cp-1",
+            "cp-2",
+            "cp-3",
+          ],
+          "matchmaking:v20:us-east:Wingman": ["wing-1"],
+        };
+        mockRedis.zrange.mockImplementation((async (key: string) =>
+          queued[key] ?? []) as any);
+
+        const sizes: Record<string, number> = {
+          "std-party": 3,
+          "std-solo": 1,
+          "cp-1": 1,
+          "cp-2": 1,
+          "cp-3": 1,
+          "wing-1": 2,
+        };
+        mockMatchmakingLobbyService.getLobbyDetails.mockImplementation(
+          async (lobbyId: string) =>
+            ({
+              lobbyId,
+              players: Array.from({ length: sizes[lobbyId] }, () => ({})),
+            }) as any,
+        );
+
+        await service.sendRegionStats();
+
+        const [channel, payload] = mockRedis.publish.mock.calls[0];
+        expect(channel).toBe("broadcast-message");
+        const { event, data } = JSON.parse(payload as string);
+        expect(event).toBe("matchmaking:region-stats");
+
+        const stats = data[region];
+        // Existing keys first and unchanged in shape; the new key is extra.
+        expect(Object.keys(stats)).toEqual([
+          "Duel",
+          "Wingman",
+          "Competitive",
+          "CompetitiveCaptainPick",
+        ]);
+        expect(stats.Duel).toEqual([]);
+        expect(stats.Wingman).toEqual([{ index: 0, size: 2 }]);
+        expect(stats.Competitive).toEqual([
+          { index: 0, size: 3 },
+          { index: 1, size: 1 },
+        ]);
+        expect(stats.CompetitiveCaptainPick).toEqual([
+          { index: 0, size: 1 },
+          { index: 1, size: 1 },
+          { index: 2, size: 1 },
+        ]);
+      });
+
+      it("self-heals an orphaned Captain Pick entry from Captain Pick keys only", async () => {
+        mockHasura.query.mockResolvedValue({
+          server_regions: [{ value: region }],
+        } as any);
+        mockRedis.zrange.mockImplementation((async (key: string) =>
+          key === "matchmaking:v20:us-east:Competitive:captain-pick"
+            ? ["gone"]
+            : []) as any);
+        mockMatchmakingLobbyService.getLobbyDetails.mockResolvedValue(
+          undefined as any,
+        );
+
+        await service.sendRegionStats();
+
+        expect(mockRedis.zrem.mock.calls).toEqual([
+          ["matchmaking:v20:us-east:Competitive:captain-pick", "gone"],
+          ["matchmaking:v20:us-east:Competitive:captain-pick:ranks", "gone"],
+        ]);
+      });
+    });
+  });
 });

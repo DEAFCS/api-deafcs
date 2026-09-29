@@ -18,8 +18,14 @@ import {
   getMatchmakingQueueCacheKey,
   getMatchmakingConformationCacheKey,
   getMatchmakingRankCacheKey,
+  getMatchmakingRegionLockKey,
 } from "./utilities/cacheKeys";
 import { ExpectedPlayers } from "src/discord-bot/enums/ExpectedPlayers";
+import {
+  getMatchmakingRegionStatsKey,
+  MatchmakingQueueVariant,
+  resolveMatchmakingQueueVariant,
+} from "./types/MatchmakingQueueVariant";
 
 @Injectable()
 export class MatchmakeService {
@@ -47,13 +53,13 @@ export class MatchmakeService {
     // store the lobby's rank in a separate sorted set for quick rank matching
     for (const region of lobby.regions) {
       await this.redis.zadd(
-        getMatchmakingRankCacheKey(lobby.type, region),
+        getMatchmakingRankCacheKey(lobby.type, region, lobby.variant),
         lobby.avgRank,
         lobbyId,
       );
 
       await this.redis.zadd(
-        getMatchmakingQueueCacheKey(lobby.type, region),
+        getMatchmakingQueueCacheKey(lobby.type, region, lobby.variant),
         0, // score doesn't matter for queue cache
         lobbyId,
       );
@@ -85,22 +91,34 @@ export class MatchmakeService {
 
     const types: e_match_types_enum[] = ["Duel", "Wingman", "Competitive"];
 
+    // Standard queues report under their bare match type exactly as before;
+    // Captain Pick gets its own key so the two 5v5 counts never mix. Older
+    // web builds only read the match-type keys and ignore the extra one.
+    const queues: Array<{
+      type: e_match_types_enum;
+      variant: MatchmakingQueueVariant;
+    }> = [
+      ...types.map((type) => ({ type, variant: "Standard" as const })),
+      { type: "Competitive", variant: "CaptainPick" },
+    ];
+
     const regionStats: Partial<
       Record<
         string,
-        Partial<Record<e_match_types_enum, Array<{ index: number; size: number }>>>
+        Partial<Record<string, Array<{ index: number; size: number }>>>
       >
     > = {};
 
-    for (const type of types) {
+    for (const { type, variant } of queues) {
+      const statsKey = getMatchmakingRegionStatsKey(type, variant);
       const lobbyIndexes = new Map<string, number>();
       // A lobby can appear in more than one region's zset (multi-region
-      // search), so its player count is only worth fetching once per type.
+      // search), so its player count is only worth fetching once per queue.
       const lobbySizes = new Map<string, number>();
 
       for (const region of regions.server_regions) {
         const lobbyIds = await this.redis.zrange(
-          getMatchmakingQueueCacheKey(type, region.value),
+          getMatchmakingQueueCacheKey(type, region.value, variant),
           0,
           -1,
         );
@@ -124,11 +142,11 @@ export class MatchmakeService {
                 // this loop already has the exact (type, region) pair that
                 // needs the zrem.
                 await this.redis.zrem(
-                  getMatchmakingQueueCacheKey(type, region.value),
+                  getMatchmakingQueueCacheKey(type, region.value, variant),
                   lobbyId,
                 );
                 await this.redis.zrem(
-                  getMatchmakingRankCacheKey(type, region.value),
+                  getMatchmakingRankCacheKey(type, region.value, variant),
                   lobbyId,
                 );
                 lobbySizes.set(lobbyId, 0);
@@ -152,7 +170,7 @@ export class MatchmakeService {
             return { index, size };
           }),
         );
-        stats[type] = entries.filter(
+        stats[statsKey] = entries.filter(
           (entry): entry is { index: number; size: number } => entry !== null,
         );
       }
@@ -255,6 +273,16 @@ export class MatchmakeService {
       );
 
       if (!details) {
+        continue;
+      }
+
+      // Only Standard lobbies may ever reach the automatic balancing below.
+      // A Captain Pick (or unknown) lobby showing up here would otherwise be
+      // auto-balanced into a normal match instead of drafted.
+      if (resolveMatchmakingQueueVariant(details.variant) !== "Standard") {
+        this.logger.warn(
+          `Skipping lobby ${details.lobbyId} - ${details.variant} lobbies are not matched by the standard matchmaker`,
+        );
         continue;
       }
 
@@ -558,8 +586,11 @@ export class MatchmakeService {
     };
   }
 
-  private async aquireMatchmakeRegionLock(region: string): Promise<boolean> {
-    const lockKey = `matchmaking:lock:${region}`;
+  private async aquireMatchmakeRegionLock(
+    region: string,
+    variant: MatchmakingQueueVariant = "Standard",
+  ): Promise<boolean> {
+    const lockKey = getMatchmakingRegionLockKey(region, variant);
 
     const result = await this.redis.set(lockKey, 1, "EX", 60, "NX");
 
@@ -570,8 +601,11 @@ export class MatchmakeService {
     return true;
   }
 
-  private async releaseMatchmakeRegionLock(region: string) {
-    const lockKey = `matchmaking:lock:${region}`;
+  private async releaseMatchmakeRegionLock(
+    region: string,
+    variant: MatchmakingQueueVariant = "Standard",
+  ) {
+    const lockKey = getMatchmakingRegionLockKey(region, variant);
     await this.redis.del(lockKey);
   }
 
@@ -601,8 +635,8 @@ export class MatchmakeService {
     const keys: string[] = [lockKey];
 
     for (const region of lobby.regions) {
-      keys.push(getMatchmakingQueueCacheKey(lobby.type, region));
-      keys.push(getMatchmakingRankCacheKey(lobby.type, region));
+      keys.push(getMatchmakingQueueCacheKey(lobby.type, region, lobby.variant));
+      keys.push(getMatchmakingRankCacheKey(lobby.type, region, lobby.variant));
     }
 
     const result = await this.redis.eval(

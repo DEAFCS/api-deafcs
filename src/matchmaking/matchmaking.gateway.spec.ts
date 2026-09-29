@@ -79,6 +79,90 @@ describe("MatchmakingGateway Terms enforcement", () => {
     sessionId: "session-1",
   });
 
+  describe("matchmaking:join-queue queue variants", () => {
+    const solo = { id: "solo-lobby", players: [{ steam_id: "3", captain: true }] };
+
+    beforeEach(() => {
+      terms.hasAcceptedCurrentTerms.mockResolvedValue(true);
+      matchmakingLobbyService.getPlayerLobby.mockResolvedValue(solo);
+    });
+
+    const errorsSentTo = (steamId: string) =>
+      redis.publish.mock.calls
+        .map(([, payload]: [string, string]) => JSON.parse(payload))
+        .filter(
+          (message: any) =>
+            message.steamId === steamId && message.event === "matchmaking:error",
+        )
+        .map((message: any) => message.data.message);
+
+    it("queues as before when no variant is sent", async () => {
+      await gateway.joinQueue(
+        { type: "Competitive", regions: ["TestA"] },
+        client("3"),
+      );
+
+      expect(matchmakeService.addLobbyToQueue).toHaveBeenCalledWith(solo.id);
+    });
+
+    it("queues an explicit Standard request the same way", async () => {
+      await gateway.joinQueue(
+        { type: "Competitive", regions: ["TestA"], variant: "Standard" },
+        client("3"),
+      );
+
+      expect(matchmakeService.addLobbyToQueue).toHaveBeenCalledWith(solo.id);
+    });
+
+    it("refuses Captain Pick instead of queueing it as Standard", async () => {
+      // Even with the feature switched on, Phase 1 has no draft engine.
+      hasura.query.mockImplementation((query: any) => {
+        if (query.settings)
+          return Promise.resolve({
+            settings: [
+              {
+                name: "public.matchmaking_competitive_captain_pick",
+                value: "true",
+              },
+            ],
+          });
+        if (query.server_regions)
+          return Promise.resolve({
+            server_regions: [
+              { value: "TestA", is_lan: false, status: "Enabled" },
+            ],
+          });
+        if (query.game_server_nodes_aggregate)
+          return Promise.resolve({
+            game_server_nodes_aggregate: { aggregate: { count: 0 } },
+          });
+        return Promise.resolve({});
+      });
+
+      await gateway.joinQueue(
+        { type: "Competitive", regions: ["TestA"], variant: "CaptainPick" },
+        client("3"),
+      );
+
+      expect(matchmakingLobbyService.setLobbyDetails).not.toHaveBeenCalled();
+      expect(matchmakeService.addLobbyToQueue).not.toHaveBeenCalled();
+      expect(matchmakeService.matchmake).not.toHaveBeenCalled();
+      expect(errorsSentTo("3")).toEqual([
+        "5v5 Captain Pick is not available yet.",
+      ]);
+    });
+
+    it("refuses unknown variants", async () => {
+      await gateway.joinQueue(
+        { type: "Competitive", regions: ["TestA"], variant: "Draft" },
+        client("3"),
+      );
+
+      expect(matchmakeService.addLobbyToQueue).not.toHaveBeenCalled();
+      expect(errorsSentTo("3")).toEqual(["Unknown matchmaking queue"]);
+    });
+  });
+
   describe("matchmaking:join-queue", () => {
     it("denies the whole party when the leader has accepted but a party member has not", async () => {
       terms.hasAcceptedCurrentTerms.mockImplementation((steamId: string) =>
