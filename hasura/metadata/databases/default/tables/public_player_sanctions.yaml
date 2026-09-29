@@ -39,10 +39,8 @@ select_permissions:
           - is_active:
               _eq: true
           - type:
-              _nin:
-                - website_chat_mute
-                - website_restriction
-    comment: "Public can see the reason and duration of a player's CURRENTLY ACTIVE sanction only -- expired/revoked/deleted sanctions are hidden to keep past history private."
+              _eq: ban
+    comment: "Public can see the reason and duration of a player's CURRENTLY ACTIVE ban only -- warnings, mutes, gags and other sanction types stay private, as do expired/revoked/deleted bans."
   - role: user
     permission:
       columns:
@@ -61,10 +59,8 @@ select_permissions:
           - is_active:
               _eq: true
           - type:
-              _nin:
-                - website_chat_mute
-                - website_restriction
-    comment: "Same as guest -- logged-in regular players see the reason and duration of another player's CURRENTLY ACTIVE sanction only, not history. A separate 'user' entry existed originally but was accidentally dropped when a Dec 2025 commit renamed it to 'guest' instead of adding guest alongside it."
+              _eq: ban
+    comment: "Same as guest -- logged-in regular players see the reason and duration of another player's CURRENTLY ACTIVE ban only, not warnings/mutes/gags/history. A separate 'user' entry existed originally but was accidentally dropped when a Dec 2025 commit renamed it to 'guest' instead of adding guest alongside it."
   - role: administrator
     permission:
       columns:
