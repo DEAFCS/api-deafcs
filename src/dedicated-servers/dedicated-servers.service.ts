@@ -274,7 +274,14 @@ export class DedicatedServersService {
                       // TODO - number of players
                       {
                         name: "EXTRA_GAME_PARAMS",
-                        value: `-maxplayers ${server.type === "Ranked" ? 16 : server.max_players} +map de_dust2 +game_type ${this.getGameType(server.type)} +game_mode ${this.getGameMode(server.type)} +sv_skirmish_id ${this.getWarGameType(server.type)} ${server.connect_password ? ` +sv_password ${server.connect_password}` : ""}${vacInsecureFlag}`,
+                        // Without this, CS2 (since its January 2026 update)
+                        // silently drops a long list of cvars set by exec'd cfg
+                        // files specifically on workshop maps ("DISALLOWED
+                        // WORKSHOP CONVAR" in the server log) -- including a
+                        // workshop map's own embedded config. This restores the
+                        // pre-update behavior of letting a workshop map's config
+                        // actually take effect.
+                        value: `-disable_workshop_command_filtering -maxplayers ${server.type === "Ranked" ? 16 : server.max_players} +map de_dust2 +game_type ${this.getGameType(server.type)} +game_mode ${this.getGameMode(server.type)} +sv_skirmish_id ${this.getWarGameType(server.type)} ${server.connect_password ? ` +sv_password ${server.connect_password}` : ""}${vacInsecureFlag}`,
                       },
                       { name: "SERVER_ID", value: server.id },
                       {

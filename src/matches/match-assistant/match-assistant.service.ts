@@ -890,7 +890,14 @@ export class MatchAssistantService {
                           },
                           {
                             name: "EXTRA_GAME_PARAMS",
-                            value: `-maxplayers ${match.max_players_per_lineup * 2 + 3} ${map.workshop_map_id ? `+map de_inferno` : `+map ${map.name}`} +sv_password ${match.password}${vacInsecureFlag}`,
+                            // Without this, CS2 (since its January 2026 update)
+                            // silently drops a long list of cvars set by exec'd
+                            // cfg files specifically on workshop maps ("DISALLOWED
+                            // WORKSHOP CONVAR" in the server log) -- including a
+                            // workshop map's own embedded config. This restores
+                            // the pre-update behavior of letting a workshop map's
+                            // config actually take effect.
+                            value: `-disable_workshop_command_filtering -maxplayers ${match.max_players_per_lineup * 2 + 3} ${map.workshop_map_id ? `+map de_inferno` : `+map ${map.name}`} +sv_password ${match.password}${vacInsecureFlag}`,
                           },
                           { name: "SERVER_ID", value: server.id },
                           {
