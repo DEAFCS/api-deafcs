@@ -14,26 +14,57 @@ object_relationships:
   - name: revoked_by
     using:
       foreign_key_constraint_on: revoked_by_steam_id
+computed_fields:
+  - name: is_active
+    definition:
+      function:
+        name: player_sanction_is_active
+        schema: public
 select_permissions:
   - role: guest
     permission:
       columns:
         - player_steam_id
         - sanctioned_by_steam_id
+        - reason
         - type
         - created_at
         - remove_sanction_date
         - id
         - deleted_at
+      computed_fields:
+        - is_active
       filter:
         _and:
-          - deleted_at:
-              _is_null: true
+          - is_active:
+              _eq: true
           - type:
               _nin:
                 - website_chat_mute
                 - website_restriction
-    comment: "Public can see that a player is sanctioned (type/dates), not why -- reason text is meant for staff/the sanctioned player only."
+    comment: "Public can see the reason and duration of a player's CURRENTLY ACTIVE sanction only -- expired/revoked/deleted sanctions are hidden to keep past history private."
+  - role: user
+    permission:
+      columns:
+        - player_steam_id
+        - sanctioned_by_steam_id
+        - reason
+        - type
+        - created_at
+        - remove_sanction_date
+        - id
+        - deleted_at
+      computed_fields:
+        - is_active
+      filter:
+        _and:
+          - is_active:
+              _eq: true
+          - type:
+              _nin:
+                - website_chat_mute
+                - website_restriction
+    comment: "Same as guest -- logged-in regular players see the reason and duration of another player's CURRENTLY ACTIVE sanction only, not history. A separate 'user' entry existed originally but was accidentally dropped when a Dec 2025 commit renamed it to 'guest' instead of adding guest alongside it."
   - role: administrator
     permission:
       columns:
