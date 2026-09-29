@@ -19,6 +19,7 @@ import { MatchAssistantService } from "../matches/match-assistant/match-assistan
 import { MatchmakingLobbyService } from "./matchmaking-lobby.service";
 import { RedisManagerService } from "../redis/redis-manager/redis-manager.service";
 import { MatchmakingQueues } from "./enums/MatchmakingQueues";
+import { PushNotificationsService } from "../notifications/push/push-notifications.service";
 
 describe("MatchmakeService", () => {
   let service: MatchmakeService;
@@ -102,6 +103,12 @@ describe("MatchmakeService", () => {
         {
           provide: RedisManagerService,
           useValue: mockRedisManager,
+        },
+        {
+          provide: PushNotificationsService,
+          useValue: {
+            sendMatchFound: jest.fn().mockResolvedValue(undefined),
+          },
         },
         {
           provide: `BullQueue_${MatchmakingQueues.Matchmaking}`,

@@ -54,16 +54,22 @@ describe("MatchmakingLobbyService.verifyLobby", () => {
     // verifyPlayer runs per lobby member once the size check passes — every
     // player comes back clean so only the party-size rule can fail.
     mockHasura = {
-      query: jest.fn().mockImplementation(({ players_by_pk }) => ({
-        players_by_pk: {
-          name: "player",
-          steam_id: players_by_pk.__args.steam_id,
-          is_banned: false,
-          matchmaking_cooldown: false,
-          current_lobby_id: "lobby-1",
-          is_in_another_match: false,
-        },
-      })),
+      query: jest.fn().mockImplementation(({ players_by_pk, settings }) => {
+        // getMaxCompetitivePartySize: no settings row, so the default applies.
+        if (settings) {
+          return { settings: [] };
+        }
+        return {
+          players_by_pk: {
+            name: "player",
+            steam_id: players_by_pk.__args.steam_id,
+            is_banned: false,
+            matchmaking_cooldown: false,
+            current_lobby_id: "lobby-1",
+            is_in_another_match: false,
+          },
+        };
+      }),
     } as any;
 
     const mockRedisManager = {

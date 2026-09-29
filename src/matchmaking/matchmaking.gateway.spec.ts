@@ -68,6 +68,10 @@ describe("MatchmakingGateway Terms enforcement", () => {
     gateway.cache = cache;
     gateway.terms = terms;
     gateway.redis = redis;
+    gateway.websiteRestrictions = {
+      getStatus: jest.fn().mockResolvedValue({ active: false }),
+      assertCanParticipate: jest.fn().mockResolvedValue(undefined),
+    };
   });
 
   const client = (steamId: string) => ({
