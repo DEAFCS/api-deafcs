@@ -1238,6 +1238,104 @@ describe("CaptainPickService", () => {
       });
     });
 
+    describe("match status for the match page", () => {
+      it("tells whether a match is an active draft's match and who is in it", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        const { matchId } = await state();
+
+        await expect(
+          service.getMatchDraftStatus(matchId!, steam(7)),
+        ).resolves.toEqual({ active: true, participant: true });
+        await expect(
+          service.getMatchDraftStatus(matchId!, "999"),
+        ).resolves.toEqual({ active: true, participant: false });
+        await expect(
+          service.getMatchDraftStatus(matchId!, null),
+        ).resolves.toEqual({ active: true, participant: false });
+        await expect(
+          service.getMatchDraftStatus("some-other-match", steam(7)),
+        ).resolves.toEqual({ active: false, participant: false });
+      });
+
+      it("is no longer active once the match is created (no permanent lock)", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        const { matchId } = await state();
+        await draftToCompletion();
+        await expect(
+          service.getMatchDraftStatus(matchId!, steam(7)),
+        ).resolves.toEqual({ active: true, participant: true });
+
+        await service.finalize(CONFIRMATION_ID);
+
+        await expect(
+          service.getMatchDraftStatus(matchId!, steam(7)),
+        ).resolves.toEqual({ active: false, participant: false });
+      });
+
+      it("never trusts a mapping that points at another draft's match", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        await redis.set(
+          getMatchConfirmationKey("forged-match"),
+          CONFIRMATION_ID,
+        );
+
+        await expect(
+          service.getMatchDraftStatus("forged-match", steam(7)),
+        ).resolves.toEqual({ active: false, participant: false });
+      });
+    });
+
+    describe("an admin canceling the match during picking", () => {
+      const canceledByAdmin = (n: number) =>
+        redis
+          .messagesTo(steam(n), "matchmaking:error")
+          .filter(
+            (m) =>
+              m.data.message ===
+              "The Captain Pick match was canceled by an admin.",
+          );
+
+      it("tells the ten players why the draft ended", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        await pickNext();
+
+        // What the end-of-match cleanup does for a canceled match.
+        await service.cleanup(CONFIRMATION_ID);
+
+        for (let n = 1; n <= 10; n++) {
+          expect(canceledByAdmin(n)).toHaveLength(1);
+          await expect(service.getActiveDraftId(steam(n))).resolves.toBeNull();
+        }
+      });
+
+      it("says nothing of the kind when a finished match is cleaned up", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        await draftToCompletion();
+        await service.finalize(CONFIRMATION_ID);
+
+        await service.cleanup(CONFIRMATION_ID);
+
+        for (let n = 1; n <= 10; n++) {
+          expect(canceledByAdmin(n)).toHaveLength(0);
+        }
+      });
+
+      it("keeps the failed-creation message separate", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        await draftToCompletion();
+        matches.clear();
+
+        await service.handleFinalizeExhausted(
+          CONFIRMATION_ID,
+          new Error("boom"),
+        );
+
+        for (let n = 1; n <= 10; n++) {
+          expect(canceledByAdmin(n)).toHaveLength(0);
+        }
+      });
+    });
+
     describe("failure", () => {
       it("cancels the shell and removes its mappings when the draft is released", async () => {
         await service.startDraft(CONFIRMATION_ID);

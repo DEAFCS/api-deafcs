@@ -336,6 +336,49 @@ describe("MatchmakingGateway Terms enforcement", () => {
     });
   });
 
+  describe("matchmaking:captain-pick:match-status", () => {
+    const repliesTo = (steamId: string) =>
+      redis.publish.mock.calls
+        .map(([, payload]: [string, string]) => JSON.parse(payload))
+        .filter(
+          (message: any) =>
+            message.steamId === steamId &&
+            message.event === "matchmaking:captain-pick:match-status",
+        )
+        .map((message: any) => message.data);
+
+    beforeEach(() => {
+      (captainPick as any).getMatchDraftStatus = jest.fn(
+        async (_matchId: string, steamId: string) => ({
+          active: true,
+          participant: steamId === "5",
+        }),
+      );
+    });
+
+    it("answers only the asking player, using the server's own draft state", async () => {
+      await gateway.captainPickMatchStatus({ matchId: "match-1" }, client("5") as any);
+      await gateway.captainPickMatchStatus({ matchId: "match-1" }, client("999") as any);
+
+      expect((captainPick as any).getMatchDraftStatus).toHaveBeenCalledWith("match-1", "5");
+      expect(repliesTo("5")).toEqual([
+        { matchId: "match-1", active: true, participant: true },
+      ]);
+      expect(repliesTo("999")).toEqual([
+        { matchId: "match-1", active: true, participant: false },
+      ]);
+    });
+
+    it("ignores guests and invalid input", async () => {
+      await gateway.captainPickMatchStatus({ matchId: "match-1" }, { user: null } as any);
+      await gateway.captainPickMatchStatus({ matchId: 42 } as any, client("5") as any);
+      await gateway.captainPickMatchStatus({} as any, client("5") as any);
+
+      expect((captainPick as any).getMatchDraftStatus).not.toHaveBeenCalled();
+      expect(redis.publish).not.toHaveBeenCalled();
+    });
+  });
+
   describe("matchmaking:join-queue", () => {
     it("denies the whole party when the leader has accepted but a party member has not", async () => {
       terms.hasAcceptedCurrentTerms.mockImplementation((steamId: string) =>

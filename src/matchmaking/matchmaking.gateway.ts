@@ -501,6 +501,38 @@ export class MatchmakingGateway {
     }
   }
 
+  /**
+   * Whether a match is an active Captain Pick draft's match, and whether the
+   * asking player is one of its ten. Lets the match page lock the drafted
+   * lineups against manual edits and offer the ten players their Match chat
+   * (which the chat service authorizes on its own). Answers only the asker.
+   */
+  @SubscribeMessage("matchmaking:captain-pick:match-status")
+  async captainPickMatchStatus(
+    @MessageBody() data: { matchId?: unknown },
+    @ConnectedSocket() client: FiveStackWebSocketClient,
+  ) {
+    const user = client.user;
+    const matchId = data?.matchId;
+    if (!user || typeof matchId !== "string" || !matchId) {
+      return;
+    }
+
+    const status = await this.captainPick.getMatchDraftStatus(
+      matchId,
+      String(user.steam_id),
+    );
+
+    await this.redis.publish(
+      "send-message-to-steam-id",
+      JSON.stringify({
+        steamId: user.steam_id,
+        event: "matchmaking:captain-pick:match-status",
+        data: { matchId, ...status },
+      }),
+    );
+  }
+
   private async sendError(steamId: string, message: string) {
     await this.redis.publish(
       "send-message-to-steam-id",

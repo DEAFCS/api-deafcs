@@ -788,6 +788,37 @@ export class CaptainPickService {
   }
 
   /**
+   * Whether a match is an active Captain Pick draft's match (players still
+   * being picked or seated), and whether the given player is one of that
+   * draft's ten. Read from the server's own matchId -> draft mapping and
+   * draft state; nothing comes from the client but the match id.
+   */
+  public async getMatchDraftStatus(
+    matchId: string,
+    steamId: string | null,
+  ): Promise<{ active: boolean; participant: boolean }> {
+    const draftId = matchId
+      ? await this.redis.get(getMatchConfirmationKey(matchId))
+      : null;
+    const state = draftId ? await this.getState(draftId) : null;
+
+    const active =
+      !!state &&
+      state.matchId === matchId &&
+      (state.phase === "Drafting" || state.phase === "CreatingMatch");
+
+    return {
+      active,
+      participant:
+        active &&
+        !!steamId &&
+        state.participants.some(
+          (participant) => participant.steam_id === String(steamId),
+        ),
+    };
+  }
+
+  /**
    * Removes the draft and the reverse player keys that still point at it.
    * Only called once the confirmation itself is being removed.
    */
@@ -795,6 +826,25 @@ export class CaptainPickService {
     const state = await this.getState(confirmationId);
 
     if (state) {
+      // Still picking means the match ended under the draft: the only way
+      // is an admin canceling (or deleting) it. Tell the players why they
+      // are back at /play. A failed creation is Failed by now and has its
+      // own message; a normal end is MatchCreated.
+      if (state.phase === "Drafting") {
+        for (const participant of state.participants) {
+          await this.redis.publish(
+            "send-message-to-steam-id",
+            JSON.stringify({
+              steamId: participant.steam_id,
+              event: "matchmaking:error",
+              data: {
+                message: "The Captain Pick match was canceled by an admin.",
+              },
+            }),
+          );
+        }
+      }
+
       for (const participant of state.participants) {
         const released = await this.redis.eval(
           CaptainPickService.DELETE_IF_EQUAL_SCRIPT,
