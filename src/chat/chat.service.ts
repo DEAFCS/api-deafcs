@@ -1903,8 +1903,17 @@ export class ChatService {
     // in-game say/say_team gets relayed here) and players are expected to
     // have the match page open while playing, so push notifications and
     // the unread badge fallback ping just add distracting noise during a
-    // live match rather than surfacing something missed.
-    if (type === ChatLobbyType.Match || type === ChatLobbyType.MatchTeam) {
+    // live match rather than surfacing something missed. Draft chat gets
+    // the same treatment per explicit request: no push, no red unread
+    // badge. (Tournament's own group chat -- ChatLobbyType.Tournament --
+    // is a separate, lower-volume room and keeps both; only a tournament
+    // match's own Match/MatchTeam chat is covered by this, same as any
+    // other match.)
+    if (
+      type === ChatLobbyType.Match ||
+      type === ChatLobbyType.MatchTeam ||
+      type === ChatLobbyType.Draft
+    ) {
       return;
     }
 
