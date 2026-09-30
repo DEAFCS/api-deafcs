@@ -52,6 +52,7 @@ describe("NotificationsService sanction notifications", () => {
         steamId: player,
         type: "ban",
         reason: "cheating",
+        notifyTeammates: true,
       });
 
       expect(hasura.mutation).toHaveBeenCalledWith(

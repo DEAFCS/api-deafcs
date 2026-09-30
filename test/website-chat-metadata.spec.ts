@@ -20,10 +20,15 @@ describe("website chat moderation metadata", () => {
       ),
       "utf8",
     );
-    expect(metadata).toMatch(
-      /role: guest[\s\S]*type:\s*\n\s*_neq: website_chat_mute/,
+    // guest/user only ever see the CURRENTLY ACTIVE "ban" type (see
+    // player_sanction_is_active) -- website_chat_mute can never come back
+    // from either, since it's a stricter allowlist than the old
+    // "everything except mute/restriction" denylist this used to check.
+    expect(metadata).toMatch(/role: guest[\s\S]*type:\s*\n\s*_eq: ban/);
+    expect(metadata).toMatch(/role: user[\s\S]*type:\s*\n\s*_eq: ban/);
+    expect(metadata.match(/_nin:\s*\n\s*- website_chat_mute/g)?.length).toBe(
+      4,
     );
-    expect(metadata.match(/_neq: website_chat_mute/g)?.length).toBeGreaterThanOrEqual(5);
     expect(metadata).toMatch(
       /role: administrator[\s\S]*revoked_by_steam_id[\s\S]*evidence_message_id/,
     );

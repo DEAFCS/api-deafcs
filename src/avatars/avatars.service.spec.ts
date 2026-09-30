@@ -3,14 +3,16 @@ import { AvatarsService } from "./avatars.service";
 import { User } from "../auth/types/User";
 import { e_player_roles_enum } from "generated";
 
-// Roster images (general and team-specific) are Administrator/Tournament
-// Organizer only, with self-service and team owner/Admin self-management
-// deliberately removed. Normal avatar editing is untouched and keeps
-// self-service.
+// General roster images are Administrator/Tournament Organizer only, no
+// self-service. Team-specific roster images additionally let a team's own
+// owner or a team_roster 'Admin' manage anyone on that team, and any
+// verified_user+ manage their own image regardless of team role (see
+// assertTeamRosterEditor / commit 06b62c7). Normal avatar editing is
+// untouched and keeps self-service.
 describe("AvatarsService - roster image permissions", () => {
   let service: AvatarsService;
   let hasura: { query: jest.Mock; mutation: jest.Mock };
-  let postgres: { transaction: jest.Mock };
+  let postgres: { transaction: jest.Mock; query: jest.Mock };
   let s3: { put: jest.Mock; remove: jest.Mock; has: jest.Mock };
   let logger: { log: jest.Mock; warn: jest.Mock; error: jest.Mock };
 
@@ -55,6 +57,16 @@ describe("AvatarsService - roster image permissions", () => {
           }),
         }),
       ),
+      // assertTeamRosterEditor's ownership/admin check runs outside the
+      // upload/remove transaction, straight on postgres.query -- unlike the
+      // transaction-scoped client.query above, this resolves the row array
+      // directly (see PostgresService.query<T>), not wrapped in { rows }.
+      // Default to neither, so DENIED_ROLES cases (who aren't given an
+      // owner/admin fixture below) correctly fall through to the final
+      // ForbiddenException instead of throwing on a missing mock method.
+      query: jest
+        .fn()
+        .mockResolvedValue([{ is_owner: false, is_team_admin: false }]),
     };
     s3 = {
       put: jest.fn().mockResolvedValue(undefined),
@@ -251,7 +263,7 @@ describe("AvatarsService - roster image permissions", () => {
 
   describe("uploadTeamRosterPlayerImage / removeTeamRosterPlayerImage (team-specific roster image)", () => {
     it.each(DENIED_ROLES)(
-      "rejects role %s, even as team owner/Admin (self-service removed)",
+      "rejects role %s with no ownership/admin standing on the team",
       async (role) => {
         const caller = user(role);
         await expect(
@@ -263,11 +275,86 @@ describe("AvatarsService - roster image permissions", () => {
             "image/png",
           ),
         ).rejects.toBeInstanceOf(ForbiddenException);
-        // The removed self-service path used to query teams_by_pk for
-        // ownership/roster role before deciding - it must no longer do so.
+        // Denied before ever reaching the team_roster lookup that decides
+        // where to put the uploaded image.
         expect(hasura.query).not.toHaveBeenCalled();
       },
     );
+
+    it("allows the team owner to upload a team-specific roster image", async () => {
+      postgres.query.mockResolvedValueOnce([
+        { is_owner: true, is_team_admin: false },
+      ]);
+      hasura.query.mockResolvedValueOnce({
+        team_roster: [{ roster_image_url: null }],
+      });
+      hasura.mutation.mockResolvedValueOnce({
+        update_team_roster_by_pk: { __typename: "team_roster" },
+      });
+
+      const path = await service.uploadTeamRosterPlayerImage(
+        "team-1",
+        "76561190000000002",
+        user("user", "76561190000000009"),
+        Buffer.from("x"),
+        "image/png",
+      );
+
+      expect(path).toMatch(/^avatars\/roster-teams\//);
+    });
+
+    it("allows a team_roster Admin to upload a team-specific roster image", async () => {
+      postgres.query.mockResolvedValueOnce([
+        { is_owner: false, is_team_admin: true },
+      ]);
+      hasura.query.mockResolvedValueOnce({
+        team_roster: [{ roster_image_url: null }],
+      });
+      hasura.mutation.mockResolvedValueOnce({
+        update_team_roster_by_pk: { __typename: "team_roster" },
+      });
+
+      const path = await service.uploadTeamRosterPlayerImage(
+        "team-1",
+        "76561190000000002",
+        user("user", "76561190000000009"),
+        Buffer.from("x"),
+        "image/png",
+      );
+
+      expect(path).toMatch(/^avatars\/roster-teams\//);
+    });
+
+    it("allows a verified_user to upload their OWN team-specific roster image with no team role", async () => {
+      hasura.query.mockResolvedValueOnce({
+        team_roster: [{ roster_image_url: null }],
+      });
+      hasura.mutation.mockResolvedValueOnce({
+        update_team_roster_by_pk: { __typename: "team_roster" },
+      });
+
+      const path = await service.uploadTeamRosterPlayerImage(
+        "team-1",
+        "76561190000000002",
+        user("verified_user", "76561190000000002"),
+        Buffer.from("x"),
+        "image/png",
+      );
+
+      expect(path).toMatch(/^avatars\/roster-teams\//);
+    });
+
+    it("still rejects a plain user editing their own team-specific roster image", async () => {
+      await expect(
+        service.uploadTeamRosterPlayerImage(
+          "team-1",
+          "76561190000000002",
+          user("user", "76561190000000002"),
+          Buffer.from(""),
+          "image/png",
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
 
     it("rejects match_organizer (previously allowed, no longer permitted)", async () => {
       await expect(

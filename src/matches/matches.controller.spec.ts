@@ -180,15 +180,23 @@ describe("MatchesController.callForOrganizer", () => {
     expect(controller.notifications.sendSilent).toHaveBeenCalledTimes(1);
   });
 
-  it("does not re-notify once an organizer has already been requested", async () => {
-    const controller = makeController({ requested_organizer: true });
+  it("re-notifies on every call, no dedup on a prior request", async () => {
+    // Deliberately no dedup (see callForOrganizer's own comment): a stale
+    // unread MatchSupport notification used to leave the button stuck
+    // disabled for the rest of the match, even once a new/different
+    // problem came up later in the same live match.
+    const controller = makeController();
 
     await controller.callForOrganizer({
       user: { steam_id: "100" },
       match_id: "match-1",
     });
+    await controller.callForOrganizer({
+      user: { steam_id: "100" },
+      match_id: "match-1",
+    });
 
-    expect(controller.notifications.send).not.toHaveBeenCalled();
-    expect(controller.notifications.sendSilent).not.toHaveBeenCalled();
+    expect(controller.notifications.send).toHaveBeenCalledTimes(2);
+    expect(controller.notifications.sendSilent).toHaveBeenCalledTimes(2);
   });
 });
