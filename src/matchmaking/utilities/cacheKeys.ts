@@ -53,6 +53,13 @@ export function getCaptainPickDraftCacheKey(confirmationId: string) {
   return `matchmaking:${version}:captain-pick:draft:${confirmationId}`;
 }
 
+// matchId -> matchmaking confirmation (for Captain Pick, the draft). Read by
+// the normal end-of-match cleanup; for Captain Pick written as soon as the
+// match shell exists, so the match can find its draft while it's picking.
+export function getMatchConfirmationKey(matchId: string) {
+  return `matches:confirmation:${matchId}`;
+}
+
 // Reverse lookup: which committed draft a player belongs to. Lives apart from
 // lobby details, which offline/party cleanup is free to remove.
 export function getCaptainPickPlayerCacheKey(steamId: string) {

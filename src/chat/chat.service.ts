@@ -8,11 +8,9 @@ import { RconService } from "../rcon/rcon.service";
 import { FiveStackWebSocketClient } from "src/sockets/types/FiveStackWebSocketClient";
 import { ChatLobbyType } from "./enums/ChatLobbyTypes";
 import {
-  CAPTAIN_PICK_MATCH_CHAT_TTL_SECONDS,
   CAPTAIN_PICK_TEAM_CHAT_TTL_SECONDS,
-  canAccessCaptainPickMatchChat,
   canAccessCaptainPickTeamChat,
-  isCaptainPickMatchChatId,
+  isCaptainPickPlayerOfMatch,
 } from "src/matchmaking/captain-pick/captain-pick-team-chat";
 import {
   e_player_roles_enum,
@@ -174,9 +172,6 @@ export class ChatService {
     if (type === ChatLobbyType.CaptainPickTeam) {
       return CAPTAIN_PICK_TEAM_CHAT_TTL_SECONDS;
     }
-    if (type === ChatLobbyType.CaptainPickMatch) {
-      return CAPTAIN_PICK_MATCH_CHAT_TTL_SECONDS;
-    }
     return type === ChatLobbyType.Match || type === ChatLobbyType.MatchTeam
       ? ChatService.MATCH_CHAT_TTL_SECONDS
       : this.expiresIn;
@@ -204,6 +199,7 @@ export class ChatService {
               is_coach: true,
               is_organizer: true,
               is_in_lineup: true,
+              status: true,
             },
           },
           user.steam_id,
@@ -216,14 +212,17 @@ export class ChatService {
         if (
           matches_by_pk.is_coach === false &&
           matches_by_pk.is_in_lineup === false &&
-          matches_by_pk.is_organizer === false
+          matches_by_pk.is_organizer === false &&
+          // Captain Pick: the draft's ten players, before they're seated.
+          !(await isCaptainPickPlayerOfMatch(
+            this.redis,
+            id,
+            matches_by_pk.status,
+            String(user.steam_id),
+          ))
         ) {
           return;
         }
-
-        // A Captain Pick match starts its conversation in the draft's
-        // shared chat; carry that over before this history is read.
-        await this.adoptCaptainPickMatchChat(id);
 
         break;
       case ChatLobbyType.MatchTeam: {
@@ -280,19 +279,6 @@ export class ChatService {
         // the teams are still being drafted.
         if (
           !(await canAccessCaptainPickTeamChat(
-            this.redis,
-            id,
-            String(user.steam_id),
-          ))
-        ) {
-          return;
-        }
-        break;
-      case ChatLobbyType.CaptainPickMatch:
-        // Only the ten players committed to this draft; no admin or
-        // organizer bypass before the match exists.
-        if (
-          !(await canAccessCaptainPickMatchChat(
             this.redis,
             id,
             String(user.steam_id),
@@ -695,15 +681,24 @@ export class ChatService {
               is_coach: true,
               is_organizer: true,
               is_in_lineup: true,
+              status: true,
             },
           },
           user.steam_id,
         );
-        return Boolean(
-          matches_by_pk &&
-          (matches_by_pk.is_coach ||
+        if (!matches_by_pk) return false;
+        return (
+          Boolean(
+            matches_by_pk.is_coach ||
             matches_by_pk.is_organizer ||
-            matches_by_pk.is_in_lineup),
+            matches_by_pk.is_in_lineup,
+          ) ||
+          isCaptainPickPlayerOfMatch(
+            this.redis,
+            id,
+            matches_by_pk.status,
+            String(user.steam_id),
+          )
         );
       }
       case ChatLobbyType.MatchTeam: {
@@ -746,12 +741,6 @@ export class ChatService {
       }
       case ChatLobbyType.CaptainPickTeam:
         return canAccessCaptainPickTeamChat(
-          this.redis,
-          id,
-          String(user.steam_id),
-        );
-      case ChatLobbyType.CaptainPickMatch:
-        return canAccessCaptainPickMatchChat(
           this.redis,
           id,
           String(user.steam_id),
@@ -1000,9 +989,7 @@ export class ChatService {
     // types.
     if (
       (attachment || gifUrl) &&
-      (type === ChatLobbyType.Match ||
-        type === ChatLobbyType.MatchTeam ||
-        type === ChatLobbyType.CaptainPickMatch)
+      (type === ChatLobbyType.Match || type === ChatLobbyType.MatchTeam)
     ) {
       return { accepted: false };
     }
@@ -1051,16 +1038,6 @@ export class ChatService {
       if (
         type === ChatLobbyType.CaptainPickTeam &&
         !(await canAccessCaptainPickTeamChat(
-          this.redis,
-          id,
-          String(player.steam_id),
-        ))
-      ) {
-        return { accepted: false };
-      }
-      if (
-        type === ChatLobbyType.CaptainPickMatch &&
-        !(await canAccessCaptainPickMatchChat(
           this.redis,
           id,
           String(player.steam_id),
@@ -1823,7 +1800,6 @@ export class ChatService {
       [ChatLobbyType.Match]: "MATCH",
       [ChatLobbyType.MatchTeam]: "TEAM",
       [ChatLobbyType.CaptainPickTeam]: "TEAM",
-      [ChatLobbyType.CaptainPickMatch]: "MATCH",
       [ChatLobbyType.Announcement]: "ANNOUNCEMENT",
     };
 
@@ -1950,13 +1926,11 @@ export class ChatService {
     // badge. (Tournament's own group chat -- ChatLobbyType.Tournament --
     // is a separate, lower-volume room and keeps both; only a tournament
     // match's own Match/MatchTeam chat is covered by this, same as any
-    // other match.) A Captain Pick draft's shared Match chat is that same
-    // conversation before the match exists, so it is quiet too.
+    // other match.)
     if (
       type === ChatLobbyType.Match ||
       type === ChatLobbyType.MatchTeam ||
-      type === ChatLobbyType.Draft ||
-      type === ChatLobbyType.CaptainPickMatch
+      type === ChatLobbyType.Draft
     ) {
       return;
     }
@@ -2577,49 +2551,6 @@ export class ChatService {
     const lobbyKey = this.getLobbyKey(type, id);
     const sessionKeys = await this.redis.keys(`${lobbyKey}:sessions:*`);
     await this.redis.del(lobbyKey, ...sessionKeys);
-  }
-
-  // Captain Pick: the draft's shared chat (CaptainPickMatch, id = draftId)
-  // is the beginning of the match's conversation. The first Match chat join
-  // after the match exists moves whatever is left of it into the Match chat
-  // (matches:confirmation:<matchId> is written when the match is recorded).
-  // Lives here, not in Captain Pick finalization, so match creation and its
-  // recovery never depend on chat. Safe to repeat: messages keep their ids
-  // as hash fields, so a retry or two players joining at once rewrite the
-  // same entries, and the source is deleted once copied. Moved messages
-  // follow the Match chat's retention from then on, like Draft chat does.
-  private async adoptCaptainPickMatchChat(matchId: string) {
-    try {
-      const draftId = await this.redis.get(`matches:confirmation:${matchId}`);
-      if (!draftId || !isCaptainPickMatchChatId(draftId)) {
-        return;
-      }
-      const sourceKey = `chat_${ChatLobbyType.CaptainPickMatch}_${draftId}`;
-      if (!(await this.redis.exists(sourceKey))) {
-        return;
-      }
-      // A message deleted in the draft chat stays deleted (normally it is
-      // already gone from the hash; this covers a failed Redis cleanup).
-      const deletedIds = await this.getDeletedMessageIds(
-        ChatLobbyType.CaptainPickMatch,
-        draftId,
-      );
-      if (deletedIds.size) {
-        await this.redis.hdel(sourceKey, ...deletedIds);
-      }
-      await this.migrateLobbyMessages(
-        ChatLobbyType.CaptainPickMatch,
-        draftId,
-        ChatLobbyType.Match,
-        matchId,
-      );
-    } catch (error) {
-      // Never block joining the match chat over the draft's history.
-      this.logger.warn(
-        `[chat] unable to carry Captain Pick chat over to match ${matchId}`,
-        error,
-      );
-    }
   }
 
   public async migrateLobbyMessages(

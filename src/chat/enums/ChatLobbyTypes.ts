@@ -17,13 +17,6 @@ export enum ChatLobbyType {
   // committed draft state in Redis (see captain-pick-team-chat.ts), never
   // from the client, and messages expire with the draft.
   CaptainPickTeam = "captain_pick_team",
-  // Shared "Match Chat" of a matchmaking Captain Pick draft, before the
-  // match exists. id is the draftId. Only the ten players committed to
-  // that draft (Redis state, see captain-pick-team-chat.ts), no admin
-  // bypass, messages expire with the draft. When the real match exists,
-  // its Match chat takes the history over (see
-  // ChatService.adoptCaptainPickMatchChat).
-  CaptainPickMatch = "captain_pick_match",
   // Single site-wide room, open to every verified_user+ player. Fixed id
   // "global" -- there's only ever one, see joinMatchLobby's Global case.
   Global = "global",

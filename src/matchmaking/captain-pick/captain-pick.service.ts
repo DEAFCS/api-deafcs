@@ -11,6 +11,7 @@ import { MatchmakingQueues } from "../enums/MatchmakingQueues";
 import {
   getCaptainPickDraftCacheKey,
   getCaptainPickPlayerCacheKey,
+  getMatchConfirmationKey,
   getMatchmakingConformationCacheKey,
   getMatchmakingLobbyDetailsCacheKey,
 } from "../utilities/cacheKeys";
@@ -41,6 +42,13 @@ import {
  * auto-picked, the teams are always completed and an ordinary Competitive
  * match is always created. Whether someone actually shows up is decided by
  * the existing match no-show/leaver handling, same as Standard 5v5.
+ *
+ * The match itself (fixed id, generated at 10/10) is created as an empty
+ * PickingPlayers shell right when the draft starts, so it is watchable and
+ * reachable by admins while players are being picked (see
+ * ensureMatchShell). Creating it is best-effort and retried; no pick ever
+ * waits on Postgres. The teams are seated and veto starts only in
+ * finalize(), once the draft is complete.
  *
  * State lives in one Redis hash (JSON state + version). Every change is a
  * compare-and-swap on the version, computed with the pure rules in
@@ -148,6 +156,11 @@ export function getCaptainPickTimeoutJobId(
 
 export function getCaptainPickFinalizeJobId(confirmationId: string) {
   return `matchmaking.captain-pick-finalize.${confirmationId}`;
+}
+
+// Set once the draft's match shell is confirmed to exist (and to be ours).
+export function getCaptainPickShellKey(confirmationId: string) {
+  return `${getCaptainPickDraftCacheKey(confirmationId)}:match-shell`;
 }
 
 @Injectable()
@@ -273,7 +286,8 @@ export class CaptainPickService {
         deadline: timer.deadline.toISOString(),
       },
       pickedAt: [],
-      matchId: null,
+      // The one match this draft becomes, fixed from the start.
+      matchId: uuidv4(),
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
     };
@@ -299,7 +313,71 @@ export class CaptainPickService {
       `[captain-pick] ${confirmationId} drafting: captains ${state.draft.captains[1].steam_id} (first pick, ${state.draft.firstPickReason}) vs ${state.draft.captains[2].steam_id}`,
     );
 
+    // Best effort: a failure here only delays the shell (every later publish
+    // retries it, and finalize() creates the match anyway).
+    await this.ensureMatchShell(confirmationId).catch((error) =>
+      this.logger.warn(
+        `[captain-pick] ${confirmationId} match shell not created yet: ${(error as Error)?.message}`,
+      ),
+    );
+
     await this.publishState(confirmationId);
+  }
+
+  /**
+   * Makes sure this draft's match exists as an ordinary Competitive match
+   * shell (PickingPlayers, empty lineups) under the draft's fixed id, and
+   * records the matchId -> draft mapping. Idempotent and safe to race: the
+   * fixed id makes a second insert fail, and whatever exists is inspected
+   * first. A foreign match under the id is never touched; a canceled one is
+   * left alone (an admin canceling it ends the draft through the normal
+   * end-of-match cleanup). Never changes the match status.
+   * Returns whether the shell is ready.
+   */
+  public async ensureMatchShell(confirmationId: string): Promise<boolean> {
+    const state = await this.getState(confirmationId);
+
+    if (
+      !state?.matchId ||
+      (state.phase !== "Drafting" && state.phase !== "CreatingMatch")
+    ) {
+      return false;
+    }
+
+    if (await this.redis.get(getCaptainPickShellKey(confirmationId))) {
+      return true;
+    }
+
+    let inspection = await this.inspectMatch(state);
+
+    if (inspection.kind === "missing") {
+      await this.createMatch(state);
+      inspection = await this.inspectMatch(state);
+    }
+
+    if (inspection.kind === "foreign") {
+      this.logger.error(
+        `[captain-pick] ${confirmationId} match ${state.matchId} does not look like this draft's match (${inspection.reason}); leaving it untouched`,
+      );
+      return false;
+    }
+
+    if (inspection.kind === "missing" || inspection.kind === "canceled") {
+      return false;
+    }
+
+    await this.redis.set(
+      getMatchConfirmationKey(state.matchId),
+      confirmationId,
+    );
+    await this.redis.set(
+      getCaptainPickShellKey(confirmationId),
+      state.matchId,
+      "EX",
+      CAPTAIN_PICK_STATE_TTL_SECONDS,
+    );
+
+    return true;
   }
 
   public async pick(
@@ -409,7 +487,8 @@ export class CaptainPickService {
    *
    * Write sequence (each numbered step is its own Postgres transaction):
    *   1. insert_matches_one: match_options + match (+ its two empty lineups
-   *      via tbi_match/tai_match) with the pre-generated id
+   *      via tbi_match/tai_match) with the pre-generated id -- normally
+   *      already done when the draft started (ensureMatchShell)
    *   2. lineup 1 players, one insert   3. lineup 2 players, one insert
    *   4. captain flag per lineup        5. status Live (-> map veto)
    *   6. Redis: confirmation matchId, matches:confirmation key, MatchCreated
@@ -574,7 +653,7 @@ export class CaptainPickService {
       "matchId",
       matchId,
     );
-    await this.redis.set(`matches:confirmation:${matchId}`, confirmationId);
+    await this.redis.set(getMatchConfirmationKey(matchId), confirmationId);
 
     const result = await this.transition(confirmationId, (current) => {
       if (current.phase !== "CreatingMatch") {
@@ -695,6 +774,19 @@ export class CaptainPickService {
     await this.cleanup(confirmationId);
   }
 
+  private async removeMatchMapping(state: CaptainPickState) {
+    if (state.matchId) {
+      // Only our own mapping, never one pointing at another confirmation.
+      await this.redis.eval(
+        CaptainPickService.DELETE_IF_EQUAL_SCRIPT,
+        1,
+        getMatchConfirmationKey(state.matchId),
+        state.confirmationId,
+      );
+    }
+    await this.redis.del(getCaptainPickShellKey(state.confirmationId));
+  }
+
   /**
    * Removes the draft and the reverse player keys that still point at it.
    * Only called once the confirmation itself is being removed.
@@ -724,13 +816,19 @@ export class CaptainPickService {
           );
         }
       }
+
+      await this.removeMatchMapping(state);
     }
 
     await this.redis.del(getCaptainPickDraftCacheKey(confirmationId));
   }
 
-  /** Public view of a draft. No Redis internals, no unannounced match id. */
-  public toPublicState(state: CaptainPickState) {
+  /**
+   * Public view of a draft. No Redis internals. The match id is shown once
+   * the match exists: from the moment its shell is created (so the draft
+   * can use the real Match Chat), not only once the teams are seated.
+   */
+  public toPublicState(state: CaptainPickState, shellReady = false) {
     const pickIndex = state.draft.pickIndex;
     const pickingLineup =
       state.phase === "Drafting" && pickIndex !== null
@@ -772,7 +870,12 @@ export class CaptainPickService {
         captain_steam_id: state.draft.captains[selection.lineup].steam_id,
         at: state.pickedAt[selection.pickIndex] ?? null,
       })),
-      matchId: state.phase === "MatchCreated" ? state.matchId : null,
+      matchId:
+        state.phase === "MatchCreated" ||
+        (shellReady &&
+          (state.phase === "Drafting" || state.phase === "CreatingMatch"))
+          ? state.matchId
+          : null,
     };
   }
 
@@ -796,7 +899,25 @@ export class CaptainPickService {
     const confirmation = await this.redis.hgetall(
       getMatchmakingConformationCacheKey(confirmationId),
     );
-    const captainPick = this.toPublicState(state);
+    const shellReady = !!(await this.redis.get(
+      getCaptainPickShellKey(confirmationId),
+    ));
+    const captainPick = this.toPublicState(state, shellReady);
+
+    // Retries a shell that could not be created yet, off the publish path so
+    // picks never wait on Postgres; announces the match id once it exists.
+    if (
+      !shellReady &&
+      (state.phase === "Drafting" || state.phase === "CreatingMatch")
+    ) {
+      void this.ensureMatchShell(confirmationId)
+        .then((ready) => (ready ? this.publishState(confirmationId) : null))
+        .catch((error) =>
+          this.logger.warn(
+            `[captain-pick] ${confirmationId} match shell retry failed: ${(error as Error)?.message}`,
+          ),
+        );
+    }
 
     for (const participant of state.participants) {
       if (onlySteamIds && !onlySteamIds.includes(participant.steam_id)) {
@@ -813,7 +934,13 @@ export class CaptainPickService {
               type: "Competitive",
               variant: "CaptainPick",
               region: state.region,
-              matchId: captainPick.matchId ?? undefined,
+              // The ready check/matchmaking UI routes to the match page as
+              // soon as this is set, so it stays empty until the teams are
+              // seated. The draft screen reads captainPick.matchId instead.
+              matchId:
+                state.phase === "MatchCreated"
+                  ? (state.matchId ?? undefined)
+                  : undefined,
               expiresAt: confirmation.expiresAt,
               confirmationId,
               confirmed: state.participants.length,
@@ -856,7 +983,9 @@ export class CaptainPickService {
         pickedAt,
         phase: "CreatingMatch",
         timer: null,
-        matchId: uuidv4(),
+        // The id fixed at 10/10 (a draft started before that existed gets
+        // one now).
+        matchId: state.matchId ?? uuidv4(),
         updatedAt: now.toISOString(),
       };
       assertFinalTeams(next);

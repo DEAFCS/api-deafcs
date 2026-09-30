@@ -582,10 +582,26 @@ select_permissions:
         - server_type
         - tv_connection_string
       filter:
-        status:
-          _nin:
-            - PickingPlayers
-            - Canceled
+        _or:
+          - status:
+              _nin:
+                - PickingPlayers
+                - Canceled
+          # A matchmaking match whose players are still being picked (Captain
+          # Pick): public like any other active matchmaking match. Custom matches
+          # still being set up by their organizer, draft-game and tournament
+          # matches stay hidden while in PickingPlayers.
+          - _and:
+              - status:
+                  _eq: PickingPlayers
+              - organizer_steam_id:
+                  _is_null: true
+              - source:
+                  _eq: 5stack
+              - _not:
+                  tournament_brackets: {}
+              - _not:
+                  draft_games: {}
       allow_aggregations: true
     comment: ""
   - role: user
@@ -654,6 +670,21 @@ select_permissions:
               _eq: true
           - is_friend_in_match_lineup:
               _eq: true
+          # A matchmaking match whose players are still being picked (Captain
+          # Pick): public like any other active matchmaking match. Custom matches
+          # still being set up by their organizer, draft-game and tournament
+          # matches stay hidden while in PickingPlayers.
+          - _and:
+              - status:
+                  _eq: PickingPlayers
+              - organizer_steam_id:
+                  _is_null: true
+              - source:
+                  _eq: 5stack
+              - _not:
+                  tournament_brackets: {}
+              - _not:
+                  draft_games: {}
       allow_aggregations: true
     comment: ""
 update_permissions:

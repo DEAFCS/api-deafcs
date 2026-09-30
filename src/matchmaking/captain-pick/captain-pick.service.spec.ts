@@ -12,12 +12,14 @@ import {
   CaptainPickService,
   CaptainPickState,
   CAPTAIN_PICK_FINALIZE_ATTEMPTS,
+  getCaptainPickShellKey,
   getCaptainPickTimeoutJobId,
 } from "./captain-pick.service";
 import { getPickingLineup } from "./captain-pick-rules";
 import {
   getCaptainPickDraftCacheKey,
   getCaptainPickPlayerCacheKey,
+  getMatchConfirmationKey,
   getMatchmakingConformationCacheKey,
 } from "../utilities/cacheKeys";
 import { CaptainPickFinalize } from "../jobs/CaptainPickFinalize";
@@ -399,8 +401,12 @@ describe("CaptainPickService", () => {
           serverNow: new Date(START).toISOString(),
           deadline: new Date(START + 30000).toISOString(),
           pickOrder: [1, 2, 2, 1, 1, 2, 2],
-          matchId: null,
+          // The real match already exists (see "the match shell").
+          matchId: (await state()).matchId,
         });
+        // ...but the ready-check/matchmaking routing field stays empty, so
+        // nobody is sent to the match page before the teams are seated.
+        expect(message.data.confirmation.matchId).toBeUndefined();
       }
     });
 
@@ -919,6 +925,7 @@ describe("CaptainPickService", () => {
     });
 
     it("refuses to run twice at the same time", async () => {
+      matchAssistant.createMatchBasedOnType.mockClear();
       await redis.set(
         `${getCaptainPickDraftCacheKey(CONFIRMATION_ID)}:finalize-lock`,
         1,
@@ -1001,6 +1008,10 @@ describe("CaptainPickService", () => {
       });
 
       it("a recovery job only resolves, it never creates a match", async () => {
+        // The shell could never be created (e.g. Postgres down all along).
+        matches.clear();
+        matchAssistant.createMatchBasedOnType.mockClear();
+
         await new CaptainPickFinalize(service).process({
           data: { confirmationId: CONFIRMATION_ID, recovery: true },
           opts: {},
@@ -1010,6 +1021,250 @@ describe("CaptainPickService", () => {
         // No match existed: resolved as a clean failure.
         expect(matchAssistant.createMatchBasedOnType).not.toHaveBeenCalled();
         expect(await service.hasDraft(CONFIRMATION_ID)).toBe(false);
+      });
+    });
+  });
+
+  describe("the match shell", () => {
+    const mapping = (matchId: string) =>
+      redis.get(getMatchConfirmationKey(matchId));
+    const shellReady = () => redis.get(getCaptainPickShellKey(CONFIRMATION_ID));
+
+    describe("at 10/10", () => {
+      it("fixes the match id and creates one ordinary Competitive match, still picking players", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        const s = await state();
+
+        expect(s.phase).toBe("Drafting");
+        expect(s.matchId).toEqual(expect.any(String));
+        expect(matchAssistant.createMatchBasedOnType).toHaveBeenCalledTimes(1);
+        expect(matchAssistant.createMatchBasedOnType).toHaveBeenCalledWith(
+          "Competitive",
+          "Competitive",
+          expect.objectContaining({ id: s.matchId, region: REGION }),
+        );
+        expect([...matches.keys()]).toEqual([s.matchId]);
+        expect(matches.get(s.matchId!)!.status).toBe("PickingPlayers");
+        // Nobody seated, no veto, no server.
+        expect(lineupPlayers).toEqual([]);
+        expect(matchAssistant.updateMatchStatus).not.toHaveBeenCalled();
+        expect(await mapping(s.matchId!)).toBe(CONFIRMATION_ID);
+        expect(await shellReady()).toBe(s.matchId);
+      });
+
+      it("keeps the draft running when the match can't be created yet, and retries on the next publish", async () => {
+        // Down for the start and for the retry right after it.
+        matchAssistant.createMatchBasedOnType
+          .mockRejectedValueOnce(new Error("database unavailable"))
+          .mockRejectedValueOnce(new Error("database unavailable"));
+        jest
+          .spyOn((service as any).logger, "warn")
+          .mockImplementation(() => {});
+
+        await service.startDraft(CONFIRMATION_ID);
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+        const s = await state();
+
+        expect(s.phase).toBe("Drafting");
+        expect(matches.size).toBe(0);
+        const [first] = redis.messagesTo(steam(1), "matchmaking:details");
+        // No unannounced match id while it doesn't exist.
+        expect(first.data.confirmation.captainPick.matchId).toBeNull();
+
+        // A pick still works without the database.
+        await pickNext();
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+
+        // The retry created the same fixed-id match and announced it.
+        expect([...matches.keys()]).toEqual([s.matchId]);
+        expect(
+          redis.messagesTo(steam(1), "matchmaking:details").at(-1).data
+            .confirmation.captainPick.matchId,
+        ).toBe(s.matchId);
+      });
+    });
+
+    describe("idempotency", () => {
+      it("never creates a second match on repeated starts or recovery", async () => {
+        await Promise.all([
+          service.startDraft(CONFIRMATION_ID),
+          service.startDraft(CONFIRMATION_ID),
+        ]);
+        await service.startDraft(CONFIRMATION_ID);
+        await service.ensureMatchShell(CONFIRMATION_ID);
+        await redis.del(getCaptainPickShellKey(CONFIRMATION_ID));
+        await service.ensureMatchShell(CONFIRMATION_ID);
+
+        expect(matches.size).toBe(1);
+        expect(matchAssistant.createMatchBasedOnType).toHaveBeenCalledTimes(1);
+      });
+
+      it("recreates a missing shell under the same id", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        const { matchId } = await state();
+        matches.clear();
+        await redis.del(getCaptainPickShellKey(CONFIRMATION_ID));
+
+        await expect(service.ensureMatchShell(CONFIRMATION_ID)).resolves.toBe(
+          true,
+        );
+
+        expect([...matches.keys()]).toEqual([matchId]);
+      });
+
+      it("reuses an existing correct shell", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        await redis.del(getCaptainPickShellKey(CONFIRMATION_ID));
+        matchAssistant.createMatchBasedOnType.mockClear();
+
+        await expect(service.ensureMatchShell(CONFIRMATION_ID)).resolves.toBe(
+          true,
+        );
+
+        expect(matchAssistant.createMatchBasedOnType).not.toHaveBeenCalled();
+        expect(matchAssistant.updateMatchStatus).not.toHaveBeenCalled();
+      });
+
+      it("never touches a foreign match under the id", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        const { matchId } = await state();
+        const foreign = matches.get(matchId!)!;
+        foreign.options.type = "Wingman";
+        const before = structuredClone(foreign);
+        await redis.del(getCaptainPickShellKey(CONFIRMATION_ID));
+        matchAssistant.createMatchBasedOnType.mockClear();
+
+        await expect(service.ensureMatchShell(CONFIRMATION_ID)).resolves.toBe(
+          false,
+        );
+
+        expect(matches.get(matchId!)).toEqual(before);
+        expect(matchAssistant.createMatchBasedOnType).not.toHaveBeenCalled();
+        expect(matchAssistant.updateMatchStatus).not.toHaveBeenCalled();
+        expect(hasura.mutation).not.toHaveBeenCalled();
+        expect(await shellReady()).toBeNull();
+      });
+    });
+
+    describe("picks", () => {
+      it("manual picks keep the same match and never start it", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        const { matchId } = await state();
+
+        await draftToCompletion();
+
+        const s = await state();
+        expect(s.phase).toBe("CreatingMatch");
+        expect(s.matchId).toBe(matchId);
+        expect(matches.size).toBe(1);
+        expect(matchAssistant.createMatchBasedOnType).toHaveBeenCalledTimes(1);
+        expect(matches.get(matchId!)!.status).toBe("PickingPlayers");
+        expect(matchAssistant.updateMatchStatus).not.toHaveBeenCalled();
+      });
+
+      it("timeout picks, including the final auto-pick, keep the same match", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        const { matchId } = await state();
+
+        for (let i = 0; i < 7; i++) {
+          const current = await state();
+          setNow(new Date(current.timer!.deadline).getTime());
+          await service.handleTimeout(
+            CONFIRMATION_ID,
+            current.draft.pickIndex!,
+            current.timer!.deadline,
+          );
+        }
+
+        const s = await state();
+        expect(s.phase).toBe("CreatingMatch");
+        expect(s.matchId).toBe(matchId);
+        expect(matches.size).toBe(1);
+        expect(matchAssistant.createMatchBasedOnType).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe("finalization", () => {
+      it("seats the drafted teams in the early match, then starts the normal veto", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        const { matchId } = await state();
+        await draftToCompletion();
+        const drafted = (await state()).draft;
+
+        await service.finalize(CONFIRMATION_ID);
+
+        expect(matches.size).toBe(1);
+        expect(matchAssistant.createMatchBasedOnType).toHaveBeenCalledTimes(1);
+        const match = matches.get(matchId!)!;
+        for (const lineup of [1, 2] as const) {
+          const seated = lineupPlayers.filter(
+            (p) => p.match_lineup_id === match[`lineup_${lineup}_id`],
+          );
+          expect(seated.map((p) => p.steam_id).sort()).toEqual(
+            [...drafted.lineups[lineup]].sort(),
+          );
+          expect(
+            seated.filter((p) => p.captain).map((p) => p.steam_id),
+          ).toEqual([drafted.captains[lineup].steam_id]);
+        }
+        expect(matchAssistant.updateMatchStatus).toHaveBeenCalledTimes(1);
+        expect(matchAssistant.updateMatchStatus).toHaveBeenCalledWith(
+          matchId,
+          "Live",
+        );
+        expect(match.status).toBe("Veto");
+        const s = await state();
+        expect(s.phase).toBe("MatchCreated");
+        expect(s.matchId).toBe(matchId);
+        // Now the normal matchmaking routing may send everyone there.
+        expect(
+          redis.messagesTo(steam(1), "matchmaking:details").at(-1).data
+            .confirmation.matchId,
+        ).toBe(matchId);
+      });
+
+      it("still creates the match at the end if the shell never could be", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        const { matchId } = await state();
+        await draftToCompletion();
+        matches.clear();
+
+        await service.finalize(CONFIRMATION_ID);
+
+        expect([...matches.keys()]).toEqual([matchId]);
+        expect((await state()).phase).toBe("MatchCreated");
+      });
+    });
+
+    describe("failure", () => {
+      it("cancels the shell and removes its mappings when the draft is released", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        const { matchId } = await state();
+        await draftToCompletion();
+        failNextLineupInsert = true;
+
+        await new CaptainPickFinalize(service).process({
+          data: { confirmationId: CONFIRMATION_ID },
+          opts: { attempts: CAPTAIN_PICK_FINALIZE_ATTEMPTS },
+          attemptsMade: CAPTAIN_PICK_FINALIZE_ATTEMPTS - 1,
+        } as any);
+
+        expect(matches.get(matchId!)!.status).toBe("Canceled");
+        expect(await mapping(matchId!)).toBeNull();
+        expect(await shellReady()).toBeNull();
+        expect(await service.hasDraft(CONFIRMATION_ID)).toBe(false);
+      });
+
+      it("only removes its own mapping", async () => {
+        await service.startDraft(CONFIRMATION_ID);
+        const { matchId } = await state();
+        await redis.set(getMatchConfirmationKey(matchId!), "someone-else");
+
+        await service.cleanup(CONFIRMATION_ID);
+
+        expect(await mapping(matchId!)).toBe("someone-else");
       });
     });
   });
@@ -1033,6 +1288,11 @@ describe("CaptainPickService", () => {
     });
 
     describe("no match row exists", () => {
+      // The early shell could never be created (e.g. Postgres down all along).
+      beforeEach(() => {
+        matches.clear();
+      });
+
       it("releases everyone with the queue-again message, no requeue, no penalty", async () => {
         await exhaust();
 

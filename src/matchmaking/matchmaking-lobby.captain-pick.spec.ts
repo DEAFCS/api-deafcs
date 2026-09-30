@@ -172,8 +172,11 @@ describe("Captain Pick and lobby cleanup", () => {
     expect(message.data.confirmation.captainPick.deadline).toBe(
       (await captainPick.getState(CONFIRMATION_ID))?.timer?.deadline,
     );
-    // Found through the reverse key, not the player's lobby.
-    expect(hasura.query).not.toHaveBeenCalled();
+    // Found through the reverse key, not the player's lobby. (The only
+    // database read allowed is the match shell check.)
+    expect(
+      hasura.query.mock.calls.filter(([query]: any[]) => !query.matches_by_pk),
+    ).toEqual([]);
     // Only the reconnecting player is sent the state.
     expect(redis.messagesTo(steam(4), "matchmaking:details")).toEqual([]);
   });

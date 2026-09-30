@@ -1,5 +1,8 @@
 import Redis from "ioredis";
-import { getCaptainPickDraftCacheKey } from "../utilities/cacheKeys";
+import {
+  getCaptainPickDraftCacheKey,
+  getMatchConfirmationKey,
+} from "../utilities/cacheKeys";
 
 /**
  * Private team chat for a matchmaking Captain Pick draft.
@@ -66,23 +69,53 @@ export function captainPickTeamOf(
   return null;
 }
 
-type CommittedCaptainPickState = Parameters<typeof captainPickTeamOf>[0] & {
-  participants?: Array<{ steam_id?: unknown }>;
-};
-
-async function readCommittedState(
+/**
+ * The ten players of a Captain Pick draft use the real match's Match chat
+ * from the start, but are only seated in its lineups once the teams lock.
+ * Until then (match still PickingPlayers) this lets exactly them in: the
+ * match must map to a draft (matches:confirmation, written by the server when
+ * the shell is created), that draft must be this match's, not Failed, and
+ * list the player among its committed participants.
+ */
+export async function isCaptainPickPlayerOfMatch(
   redis: Redis,
-  draftId: string,
-): Promise<CommittedCaptainPickState | null> {
+  matchId: string,
+  matchStatus: string | null | undefined,
+  steamId: string,
+): Promise<boolean> {
+  if (matchStatus !== "PickingPlayers" || !matchId) {
+    return false;
+  }
+
+  const draftId = await redis.get(getMatchConfirmationKey(matchId));
+  if (!draftId) {
+    return false;
+  }
+
   const raw = await redis.hget(getCaptainPickDraftCacheKey(draftId), "state");
   if (!raw) {
-    return null;
+    return false;
   }
+
+  let state: {
+    phase?: string;
+    matchId?: string | null;
+    participants?: Array<{ steam_id?: unknown }>;
+  };
   try {
-    return JSON.parse(raw);
+    state = JSON.parse(raw);
   } catch {
-    return null;
+    return false;
   }
+
+  return (
+    state?.phase !== "Failed" &&
+    state?.matchId === matchId &&
+    Array.isArray(state.participants) &&
+    state.participants.some(
+      (participant) => String(participant?.steam_id) === String(steamId),
+    )
+  );
 }
 
 export async function canAccessCaptainPickTeamChat(
@@ -95,46 +128,20 @@ export async function canAccessCaptainPickTeamChat(
     return false;
   }
 
-  const state = await readCommittedState(redis, room.draftId);
-  if (!state) {
+  const raw = await redis.hget(
+    getCaptainPickDraftCacheKey(room.draftId),
+    "state",
+  );
+  if (!raw) {
+    return false;
+  }
+
+  let state: Parameters<typeof captainPickTeamOf>[0];
+  try {
+    state = JSON.parse(raw);
+  } catch {
     return false;
   }
 
   return captainPickTeamOf(state, steamId) === room.lineup;
-}
-
-/**
- * Shared "Match Chat" of a Captain Pick draft (ChatLobbyType.CaptainPickMatch,
- * id = draftId): open to exactly the ten players committed to that draft,
- * whether or not they have been picked yet. Nobody else, including
- * administrators and organizers, since the match does not exist yet.
- */
-export const CAPTAIN_PICK_MATCH_CHAT_TTL_SECONDS =
-  CAPTAIN_PICK_TEAM_CHAT_TTL_SECONDS;
-
-export function isCaptainPickMatchChatId(id: string): boolean {
-  const draftId = String(id ?? "");
-  return draftId.length > 0 && !draftId.includes(":");
-}
-
-export async function canAccessCaptainPickMatchChat(
-  redis: Redis,
-  id: string,
-  steamId: string,
-): Promise<boolean> {
-  if (!isCaptainPickMatchChatId(id)) {
-    return false;
-  }
-
-  const state = await readCommittedState(redis, id);
-  if (!state || state.phase === "Failed") {
-    return false;
-  }
-
-  return (
-    Array.isArray(state.participants) &&
-    state.participants.some(
-      (participant) => String(participant?.steam_id) === String(steamId),
-    )
-  );
 }
