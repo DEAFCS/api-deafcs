@@ -66,6 +66,25 @@ export function captainPickTeamOf(
   return null;
 }
 
+type CommittedCaptainPickState = Parameters<typeof captainPickTeamOf>[0] & {
+  participants?: Array<{ steam_id?: unknown }>;
+};
+
+async function readCommittedState(
+  redis: Redis,
+  draftId: string,
+): Promise<CommittedCaptainPickState | null> {
+  const raw = await redis.hget(getCaptainPickDraftCacheKey(draftId), "state");
+  if (!raw) {
+    return null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 export async function canAccessCaptainPickTeamChat(
   redis: Redis,
   id: string,
@@ -76,20 +95,46 @@ export async function canAccessCaptainPickTeamChat(
     return false;
   }
 
-  const raw = await redis.hget(
-    getCaptainPickDraftCacheKey(room.draftId),
-    "state",
-  );
-  if (!raw) {
-    return false;
-  }
-
-  let state: Parameters<typeof captainPickTeamOf>[0];
-  try {
-    state = JSON.parse(raw);
-  } catch {
+  const state = await readCommittedState(redis, room.draftId);
+  if (!state) {
     return false;
   }
 
   return captainPickTeamOf(state, steamId) === room.lineup;
+}
+
+/**
+ * Shared "Match Chat" of a Captain Pick draft (ChatLobbyType.CaptainPickMatch,
+ * id = draftId): open to exactly the ten players committed to that draft,
+ * whether or not they have been picked yet. Nobody else, including
+ * administrators and organizers, since the match does not exist yet.
+ */
+export const CAPTAIN_PICK_MATCH_CHAT_TTL_SECONDS =
+  CAPTAIN_PICK_TEAM_CHAT_TTL_SECONDS;
+
+export function isCaptainPickMatchChatId(id: string): boolean {
+  const draftId = String(id ?? "");
+  return draftId.length > 0 && !draftId.includes(":");
+}
+
+export async function canAccessCaptainPickMatchChat(
+  redis: Redis,
+  id: string,
+  steamId: string,
+): Promise<boolean> {
+  if (!isCaptainPickMatchChatId(id)) {
+    return false;
+  }
+
+  const state = await readCommittedState(redis, id);
+  if (!state || state.phase === "Failed") {
+    return false;
+  }
+
+  return (
+    Array.isArray(state.participants) &&
+    state.participants.some(
+      (participant) => String(participant?.steam_id) === String(steamId),
+    )
+  );
 }
