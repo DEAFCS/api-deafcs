@@ -818,6 +818,41 @@ export class CaptainPickService {
     };
   }
 
+  /** Spectator DTO only: never return the confirmation, timer or raw Redis state. */
+  public async getSpectatorProgress(matchId: string) {
+    const inactive = { matchId, active: false, completed: false, progress: null as null };
+    const draftId = await this.redis.get(getMatchConfirmationKey(matchId));
+    const state = draftId ? await this.getState(draftId) : null;
+    if (!state || state.matchId !== matchId ||
+      await this.redis.get(getCaptainPickShellKey(draftId)) !== matchId) return inactive;
+    const active = state.phase === "Drafting" || state.phase === "CreatingMatch";
+    if (!active) return { ...inactive, completed: state.phase === "MatchCreated" };
+    const pickingLineup = state.phase === "Drafting" && state.draft.pickIndex !== null
+      ? getPickingLineup(state.draft.pickIndex) : null;
+    return {
+      matchId, active, completed: false,
+      progress: {
+        phase: state.phase,
+        captains: { 1: state.draft.captains[1].steam_id, 2: state.draft.captains[2].steam_id },
+        participants: state.participants.map(({ steam_id, name, avatar_url, elo }) =>
+          ({ steam_id, name, avatar_url, elo })),
+        lineups: { 1: [...state.draft.lineups[1]], 2: [...state.draft.lineups[2]] },
+        available: state.draft.available.map(({ steam_id }) => steam_id),
+        pickIndex: state.phase === "Drafting" ? state.draft.pickIndex : null,
+        pickOrder: getManualPickOrder(),
+        pickingLineup,
+      },
+    };
+  }
+
+  private async notifySpectators(matchId: string | null) {
+    if (!matchId) return;
+    // Only an invalidation, not another state store. Each API pod reads Redis.
+    await this.redis.publish("captain-pick-progress", JSON.stringify({ matchId })).catch((error) =>
+      this.logger.warn("captain pick spectator notification failed: " + error.message),
+    );
+  }
+
   /**
    * Removes the draft and the reverse player keys that still point at it.
    * Only called once the confirmation itself is being removed.
@@ -871,6 +906,7 @@ export class CaptainPickService {
     }
 
     await this.redis.del(getCaptainPickDraftCacheKey(confirmationId));
+    await this.notifySpectators(state?.matchId ?? null);
   }
 
   /**
@@ -953,6 +989,7 @@ export class CaptainPickService {
       getCaptainPickShellKey(confirmationId),
     ));
     const captainPick = this.toPublicState(state, shellReady);
+    if (shellReady) await this.notifySpectators(state.matchId);
 
     // Retries a shell that could not be created yet, off the publish path so
     // picks never wait on Postgres; announces the match id once it exists.

@@ -1756,4 +1756,60 @@ describe("CaptainPickService", () => {
       ).toHaveLength(0);
     });
   });
+  describe("public spectator progress", () => {
+    it("projects only public identities and the correct match's live picks", async () => {
+      await service.startDraft(CONFIRMATION_ID);
+      const matchId = (await state()).matchId;
+      const before = await state();
+      const first = await service.getSpectatorProgress(matchId);
+      expect(first).toMatchObject({ matchId, active: true, completed: false,
+        progress: { captains: { 1: steam(2), 2: steam(1) }, pickingLineup: 1,
+          lineups: { 1: [steam(2)], 2: [steam(1)] }, pickIndex: 0 } });
+      expect(first.progress.available).toHaveLength(8);
+      expect(Object.keys(first).sort()).toEqual(["active", "completed", "matchId", "progress"]);
+      expect(Object.keys(first.progress).sort()).toEqual(
+        ["available", "captains", "lineups", "participants", "phase", "pickIndex", "pickOrder", "pickingLineup"]);
+      expect(Object.keys(first.progress.participants[0]).sort()).toEqual(["avatar_url", "elo", "name", "steam_id"]);
+      expect(await state()).toEqual(before); // Observation never alters authoritative state.
+      await pickNext(steam(3));
+      const team1 = await service.getSpectatorProgress(matchId);
+      expect(team1.progress.lineups[1]).toEqual([steam(2), steam(3)]);
+      expect(team1.progress.pickingLineup).toBe(2);
+      expect(team1.progress.available).not.toContain(steam(3));
+      await pickNext(steam(4));
+      const team2 = await service.getSpectatorProgress(matchId);
+      expect(team2.progress.lineups[2]).toEqual([steam(1), steam(4)]);
+      expect(team2.progress.pickIndex).toBe(2);
+      expect(team2.progress.available).toHaveLength(6);
+      expect(redis.published.filter((p) => p.channel === "captain-pick-progress").at(-1).message)
+        .toEqual({ matchId });
+    });
+
+    it("does not leak a foreign, nonexistent or uncreated shell", async () => {
+      await service.startDraft(CONFIRMATION_ID);
+      const matchId = (await state()).matchId;
+      await redis.set(getMatchConfirmationKey("wrong"), CONFIRMATION_ID);
+      expect(await service.getSpectatorProgress("wrong")).toEqual(
+        { matchId: "wrong", active: false, completed: false, progress: null });
+      expect((await service.getSpectatorProgress("missing")).progress).toBeNull();
+      await redis.del(getCaptainPickShellKey(CONFIRMATION_ID));
+      expect((await service.getSpectatorProgress(matchId)).progress).toBeNull();
+    });
+
+    it("announces completion and clears deleted state without exposing private fields", async () => {
+      await service.startDraft(CONFIRMATION_ID);
+      const matchId = (await state()).matchId;
+      await draftToCompletion();
+      expect((await service.getSpectatorProgress(matchId)).progress.phase).toBe("CreatingMatch");
+      await service.finalize(CONFIRMATION_ID);
+      expect(await service.getSpectatorProgress(matchId)).toEqual(
+        { matchId, active: false, completed: true, progress: null });
+      await service.cleanup(CONFIRMATION_ID);
+      expect(await service.getSpectatorProgress(matchId)).toEqual(
+        { matchId, active: false, completed: false, progress: null });
+      expect(redis.published.filter((p) => p.channel === "captain-pick-progress").at(-1).message)
+        .toEqual({ matchId });
+    });
+  });
+
 });

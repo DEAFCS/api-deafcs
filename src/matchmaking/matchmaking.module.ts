@@ -20,6 +20,7 @@ import { NotificationsModule } from "src/notifications/notifications.module";
 import { CaptainPickSettingsService } from "./captain-pick/captain-pick-settings.service";
 import { CaptainPickService } from "./captain-pick/captain-pick.service";
 import { CaptainPickTimeout } from "./jobs/CaptainPickTimeout";
+import { CaptainPickProgressController } from "./captain-pick/captain-pick-progress.controller";
 import { CaptainPickFinalize } from "./jobs/CaptainPickFinalize";
 
 @Module({
@@ -57,6 +58,6 @@ import { CaptainPickFinalize } from "./jobs/CaptainPickFinalize";
     ...getQueuesProcessors("Matchmaking"),
     loggerFactory(),
   ],
-  controllers: [MatchmakingController],
+  controllers: [MatchmakingController, CaptainPickProgressController],
 })
 export class MatchMaking {}
