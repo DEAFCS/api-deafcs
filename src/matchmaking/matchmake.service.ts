@@ -867,6 +867,8 @@ export class MatchmakeService {
 
     await this.cancelMatchMakingDueToReadyCheck(confirmationId);
 
+    await this.broadcastRegionStatsAfterClaim();
+
     const steamIds = [...team1.players, ...team2.players].map(
       (p) => p.steam_id,
     );
@@ -929,6 +931,8 @@ export class MatchmakeService {
 
     await this.cancelMatchMakingDueToReadyCheck(confirmationId);
 
+    await this.broadcastRegionStatsAfterClaim();
+
     this.pushNotifications
       .sendMatchFound(
         participants.map(({ steam_id }) => steam_id),
@@ -943,6 +947,23 @@ export class MatchmakeService {
           `[matchmaking] push match-found notification failed: ${(error as Error)?.message}`,
         ),
       );
+  }
+
+  /**
+   * claimLobby already took these lobbies out of the queue zsets, but every
+   * client's "Play" badge still shows the count broadcast when they joined.
+   * Re-broadcast so players in a ready check (and later the draft/match) stop
+   * counting as searching. A failed broadcast must never undo the ready
+   * check (callers requeue on throw), so it is only logged.
+   */
+  private async broadcastRegionStatsAfterClaim() {
+    try {
+      await this.sendRegionStats();
+    } catch (error) {
+      this.logger.warn(
+        `[matchmaking] region stats broadcast after match found failed: ${(error as Error)?.message}`,
+      );
+    }
   }
 
   public async cancelMatchMakingDueToReadyCheck(confirmationId: string) {
