@@ -576,4 +576,129 @@ describe("map veto (SQL-driven)", () => {
       expect(picks.filter((p) => p.type === "Decider").length).toBe(1);
     });
   });
+
+  // get_map_veto_sequence: the whole veto for display, built only from the
+  // functions the veto runs on. These lock it to what actually happens.
+  describe("get_map_veto_sequence", () => {
+    const sequence = async (matchId: string) => {
+      const [{ seq }] = await postgres.query<
+        Array<{ seq: Array<{ index: number; type: string; team: number }> | null }>
+      >("SELECT get_map_veto_sequence(m) AS seq FROM matches m WHERE id = $1", [
+        matchId,
+      ]);
+      return seq;
+    };
+    const compact = (seq: Array<{ type: string; team: number }> | null) =>
+      seq?.map((step) => `${step.type}:T${step.team}`) ?? null;
+
+    it("BO1 pool 7: six alternating bans, then the Decider", async () => {
+      const match = await createVetoMatch(1, 7);
+      expect(compact(await sequence(match.id))).toEqual([
+        "Ban:T1", "Ban:T2", "Ban:T1", "Ban:T2", "Ban:T1", "Ban:T2", "Decider:T1",
+      ]);
+    });
+
+    it("BO3 pool 7: bans, picks with the opponent's side choice, the swap after four turns", async () => {
+      const match = await createVetoMatch(3, 7);
+      const seq = await sequence(match.id);
+      expect(compact(seq)).toEqual([
+        "Ban:T1", "Ban:T2", "Pick:T1", "Side:T2", "Pick:T2", "Side:T1", "Ban:T2", "Ban:T1", "Decider:T2",
+      ]);
+      expect(seq!.map((step) => step.index)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    });
+
+    it("BO5 pool 7: two bans, four picks each with a side, the Decider", async () => {
+      const match = await createVetoMatch(5, 7);
+      expect(compact(await sequence(match.id))).toEqual([
+        "Ban:T1", "Ban:T2", "Pick:T1", "Side:T2", "Pick:T2", "Side:T1",
+        "Pick:T1", "Side:T2", "Pick:T2", "Side:T1", "Decider:T1",
+      ]);
+    });
+
+    it.each([
+      [1, 3],
+      [3, 5],
+      [3, 15],
+      [5, 8],
+    ])("BO%i pool %i: a real veto follows the sequence step for step", async (bestOf, poolSize) => {
+      const match = await createVetoMatch(bestOf, poolSize);
+      const seq = (await sequence(match.id))!;
+      expect(seq.map((step) => step.type)).toEqual(
+        (
+          await postgres.query<Array<{ pattern: string[] }>>(
+            "SELECT get_map_veto_pattern(m) AS pattern FROM matches m WHERE id = $1",
+            [match.id],
+          )
+        )[0].pattern,
+      );
+      const lineupOf = (team: number) => (team === 1 ? match.lineup_1_id : match.lineup_2_id);
+      const used = new Set<string>();
+      let lastPick: string | null = null;
+
+      for (let guard = 0; guard < 200; guard++) {
+        const state = await vetoState(match.id);
+        if (state.status !== "Veto") break;
+        const [{ count }] = await postgres.query<Array<{ count: number }>>(
+          "SELECT count(*)::int AS count FROM match_map_veto_picks WHERE match_id = $1",
+          [match.id],
+        );
+        // What the server asks for right now is exactly the sequence's step.
+        expect(state.veto_type).toBe(seq[count].type);
+        expect(state.picking).toBe(lineupOf(seq[count].team));
+        if (state.veto_type === "Side") {
+          await insertPick(match.id, "Side", state.picking!, lastPick!, "CT");
+        } else {
+          const mapId = match.mapIds.find((id) => !used.has(id))!;
+          used.add(mapId);
+          if (state.veto_type === "Pick") lastPick = mapId;
+          await insertPick(match.id, state.veto_type!, state.picking!, mapId);
+        }
+      }
+
+      const picks = await postgres.query<Array<{ type: string; match_lineup_id: string }>>(
+        "SELECT type, match_lineup_id FROM match_map_veto_picks WHERE match_id = $1 ORDER BY created_at",
+        [match.id],
+      );
+      expect(picks.map((pick) => pick.type)).toEqual(seq.map((step) => step.type));
+      // The auto-inserted Decider is attributed to the sequence's team too.
+      expect(picks.at(-1)!.match_lineup_id).toBe(lineupOf(seq.at(-1)!.team));
+    });
+
+    it("is NULL without a map veto or for a best of larger than the pool, and never fails the query", async () => {
+      const { poolId } = await fx.mapPool(5);
+      const noVeto = await fx.match({ mapVeto: false, mapPoolId: poolId });
+      expect(await sequence(noVeto.id)).toBeNull();
+
+      // Active matches prevent invalid pool edits. A canceled match can still
+      // reference a pool that shrinks later, so its public query must be safe.
+      const shrinking = await fx.mapPool(3);
+      const tooSmall = await fx.match({ bestOf: 3, mapVeto: true, mapPoolId: shrinking.poolId });
+      await postgres.query("UPDATE matches SET status = 'Canceled' WHERE id = $1", [tooSmall.id]);
+      await postgres.query("DELETE FROM _map_pool WHERE map_pool_id = $1 AND map_id = $2", [
+        shrinking.poolId,
+        shrinking.mapIds[0],
+      ]);
+      await expect(
+        postgres.query("SELECT get_map_veto_pattern(m) FROM matches m WHERE id = $1", [tooSmall.id]),
+      ).rejects.toThrow(/Not enough maps/);
+      expect(await sequence(tooSmall.id)).toBeNull();
+    });
+
+    it("is NULL for unsupported best-of values or an empty pool", async () => {
+      const { poolId } = await fx.mapPool(5);
+      const unsupported = await fx.match({ bestOf: 2, mapVeto: true, mapPoolId: poolId });
+      expect(await sequence(unsupported.id)).toBeNull();
+
+      const emptying = await fx.mapPool(1);
+      const match = await fx.match({ bestOf: 1, mapVeto: true, mapPoolId: emptying.poolId });
+      await postgres.query("UPDATE matches SET status = 'Canceled' WHERE id = $1", [match.id]);
+      await postgres.query("DELETE FROM _map_pool WHERE map_pool_id = $1", [emptying.poolId]);
+      expect(await sequence(match.id)).toBeNull();
+    });
+    it("does not depend on the veto having started", async () => {
+      const { poolId } = await fx.mapPool(7);
+      const match = await fx.match({ bestOf: 3, mapVeto: true, mapPoolId: poolId });
+      expect(compact(await sequence(match.id))?.length).toBe(9);
+    });
+  });
 });

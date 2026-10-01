@@ -818,7 +818,11 @@ export class CaptainPickService {
     };
   }
 
-  /** Spectator DTO only: never return the confirmation, timer or raw Redis state. */
+  /**
+   * Spectator DTO only: never return the confirmation or raw Redis state.
+   * The pick clock is public (the same deadline every participant sees) and
+   * carries the server's time so viewers can correct their own clock.
+   */
   public async getSpectatorProgress(matchId: string) {
     const inactive = { matchId, active: false, completed: false, progress: null as null };
     const draftId = await this.redis.get(getMatchConfirmationKey(matchId));
@@ -841,6 +845,9 @@ export class CaptainPickService {
         pickIndex: state.phase === "Drafting" ? state.draft.pickIndex : null,
         pickOrder: getManualPickOrder(),
         pickingLineup,
+        serverNow: new Date().toISOString(),
+        deadline: state.phase === "Drafting" ? (state.timer?.deadline ?? null) : null,
+        timerSeconds: state.phase === "Drafting" ? (state.timer?.timerSeconds ?? null) : null,
       },
     };
   }

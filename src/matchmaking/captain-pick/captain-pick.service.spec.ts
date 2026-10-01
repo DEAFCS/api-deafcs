@@ -1768,11 +1768,20 @@ describe("CaptainPickService", () => {
       expect(first.progress.available).toHaveLength(8);
       expect(Object.keys(first).sort()).toEqual(["active", "completed", "matchId", "progress"]);
       expect(Object.keys(first.progress).sort()).toEqual(
-        ["available", "captains", "lineups", "participants", "phase", "pickIndex", "pickOrder", "pickingLineup"]);
+        ["available", "captains", "deadline", "lineups", "participants", "phase", "pickIndex", "pickOrder",
+          "pickingLineup", "serverNow", "timerSeconds"]);
+      // The public clock is the draft's own timer, nothing else.
+      const timer = (await state()).timer;
+      expect(first.progress.deadline).toBe(timer.deadline);
+      expect(first.progress.timerSeconds).toBe(timer.timerSeconds);
+      expect(Number.isNaN(Date.parse(first.progress.serverNow))).toBe(false);
+      expect(JSON.stringify(first)).not.toMatch(/confirmation|draftId|startedAt|selections|team1|team2/);
       expect(Object.keys(first.progress.participants[0]).sort()).toEqual(["avatar_url", "elo", "name", "steam_id"]);
       expect(await state()).toEqual(before); // Observation never alters authoritative state.
       await pickNext(steam(3));
       const team1 = await service.getSpectatorProgress(matchId);
+      // Every snapshot (a reconnect included) carries the current turn's clock.
+      expect(team1.progress.deadline).toBe((await state()).timer.deadline);
       expect(team1.progress.lineups[1]).toEqual([steam(2), steam(3)]);
       expect(team1.progress.pickingLineup).toBe(2);
       expect(team1.progress.available).not.toContain(steam(3));
@@ -1800,7 +1809,11 @@ describe("CaptainPickService", () => {
       await service.startDraft(CONFIRMATION_ID);
       const matchId = (await state()).matchId;
       await draftToCompletion();
-      expect((await service.getSpectatorProgress(matchId)).progress.phase).toBe("CreatingMatch");
+      const creating = await service.getSpectatorProgress(matchId);
+      expect(creating.progress.phase).toBe("CreatingMatch");
+      // No clock once nobody is picking.
+      expect(creating.progress.deadline).toBeNull();
+      expect(creating.progress.timerSeconds).toBeNull();
       await service.finalize(CONFIRMATION_ID);
       expect(await service.getSpectatorProgress(matchId)).toEqual(
         { matchId, active: false, completed: true, progress: null });

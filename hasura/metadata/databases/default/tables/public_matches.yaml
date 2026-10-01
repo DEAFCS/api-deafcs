@@ -298,6 +298,12 @@ computed_fields:
       function:
         name: get_map_veto_picking_lineup_id
         schema: public
+  - name: map_veto_sequence
+    definition:
+      function:
+        name: get_map_veto_sequence
+        schema: public
+    comment: The full map veto (type and acting team per step), from get_map_veto_pattern and get_map_veto_turn_team.
   - name: map_veto_type
     definition:
       function:
@@ -572,6 +578,7 @@ select_permissions:
         - is_tournament_match
         - lineup_counts
         - map_veto_picking_lineup_id
+        - map_veto_sequence
         - map_veto_type
         - max_players_per_lineup
         - min_players_per_lineup
@@ -649,6 +656,7 @@ select_permissions:
         - is_tournament_match
         - lineup_counts
         - map_veto_picking_lineup_id
+        - map_veto_sequence
         - map_veto_type
         - max_players_per_lineup
         - min_players_per_lineup

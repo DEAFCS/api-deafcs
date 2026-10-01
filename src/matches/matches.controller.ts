@@ -2264,17 +2264,30 @@ export class MatchesController {
   public async checkIntoMatch(data: { user: User; match_id: string }) {
     await this.terms.assertAccepted(data.user.steam_id);
 
-    const { matches_by_pk } = await this.hasura.query({
-      matches_by_pk: {
-        __args: {
-          id: data.match_id,
+    // Asked as the caller, so can_check_in applies the match's own
+    // check_in_setting (Players: anyone in a lineup; Captains: a captain;
+    // Admin: an administrator in a lineup). Hiding the button is not enough:
+    // the action is callable directly. Organizers start a match through
+    // startMatch (can_start), never through this.
+    const { matches_by_pk } = await this.hasura.query(
+      {
+        matches_by_pk: {
+          __args: {
+            id: data.match_id,
+          },
+          status: true,
+          can_check_in: true,
         },
-        status: true,
       },
-    });
+      data.user.steam_id,
+    );
 
-    if (matches_by_pk.status !== "WaitingForCheckIn") {
+    if (!matches_by_pk || matches_by_pk.status !== "WaitingForCheckIn") {
       throw Error("match is not accepting check in's at this time");
+    }
+
+    if (!matches_by_pk.can_check_in) {
+      throw Error("you are not allowed to check in to this match");
     }
 
     const { update_match_lineup_players } = await this.hasura.mutation({

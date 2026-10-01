@@ -54,17 +54,9 @@ BEGIN
         inner join match_options mo on mo.id = m.match_options_id
         where m.id = match.id;
 
-    -- best of 3 swaps teams after the 4th pick
-    IF best_of = 3 THEN
-        IF turn_index < 4 THEN
-            current_team := CASE WHEN turn_index % 2 = 0 THEN 1 ELSE 2 END;
-        ELSE
-            current_team := CASE WHEN turn_index % 2 = 0 THEN 2 ELSE 1 END;
-        END IF;
-    ELSE
-        current_team := CASE WHEN turn_index % 2 = 0 THEN 1 ELSE 2 END;
-    END IF;
-    
+    -- Shared with get_map_veto_sequence (best of 3 swaps after the 4th pick).
+    current_team := get_map_veto_turn_team(best_of, turn_index);
+
 
     IF current_team = 1 THEN
         RETURN match.lineup_1_id;
