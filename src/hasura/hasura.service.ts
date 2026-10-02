@@ -257,7 +257,10 @@ export class HasuraService {
         filePath.replace(".sql", ""),
       );
 
-      if (digest === (await this.getSetting(setting))) {
+      if (
+        digest === (await this.getSetting(setting)) &&
+        !(await this.hasMissingTriggers(sql))
+      ) {
         return;
       }
 
@@ -274,6 +277,61 @@ export class HasuraService {
         `failed to exec sql ${path.basename(filePath)}: ${error.message}`,
       );
     }
+  }
+
+  // A matching digest only proves the file ran once. Recreating a view (e.g.
+  // views/v_pool_maps.sql: DROP VIEW + CREATE) silently drops every trigger
+  // on it while the trigger file's own digest stays "applied", which is how
+  // production lost the v_pool_maps INSTEAD OF triggers on 2026-10-01. So a
+  // file whose statically declared triggers no longer exist is reapplied.
+  // Triggers created through dynamic SQL (format('... %I')) are not parsed;
+  // those files manage their own reconciliation.
+  public declaredTriggers(
+    sql: string,
+  ): Array<{ name: string; schema: string; table: string }> {
+    const identifier = `("[^"]+"|\\w+)`;
+    const createTrigger = new RegExp(
+      `CREATE\\s+(?:OR\\s+REPLACE\\s+)?(?:CONSTRAINT\\s+)?TRIGGER\\s+${identifier}\\s[^;']*?\\sON\\s+(?:${identifier}\\.)?${identifier}(?![\\w.%"])`,
+      "gi",
+    );
+    const normalize = (value: string) =>
+      value.startsWith('"') ? value.slice(1, -1) : value.toLowerCase();
+
+    return [...sql.replace(/--[^\n]*/g, "").matchAll(createTrigger)].map(
+      ([, name, schema, table]) => ({
+        name: normalize(name),
+        schema: schema ? normalize(schema) : "public",
+        table: normalize(table),
+      }),
+    );
+  }
+
+  private async hasMissingTriggers(sql: string) {
+    const triggers = this.declaredTriggers(sql);
+    if (triggers.length === 0) {
+      return false;
+    }
+
+    const [{ missing }] = await this.postgresService.query<
+      Array<{ missing: number }>
+    >(
+      `select count(*)::int as missing
+         from unnest($1::text[], $2::text[], $3::text[]) as d(name, schema, tbl)
+        where not exists (
+          select 1
+            from pg_trigger t
+            join pg_class c on c.oid = t.tgrelid
+            join pg_namespace n on n.oid = c.relnamespace
+           where t.tgname = d.name and n.nspname = d.schema and c.relname = d.tbl
+        )`,
+      [
+        triggers.map(({ name }) => name),
+        triggers.map(({ schema }) => schema),
+        triggers.map(({ table }) => table),
+      ],
+    );
+
+    return missing > 0;
   }
 
   public async getSetting(name: string) {
