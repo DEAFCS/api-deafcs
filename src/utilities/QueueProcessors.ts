@@ -13,6 +13,7 @@ const BULLMQ_CONTROL_FLOW_ERRORS = [
 ];
 
 type Modules =
+  | "ChatVideo"
   | "Matches"
   | "Demos"
   | "Clips"
