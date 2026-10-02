@@ -335,6 +335,16 @@ BEGIN
         _elo_change := -_leaver_elo_penalty;
     END IF;
 
+    -- An administrator voided this match's ELO (matches.elo_voided, e.g. a
+    -- cheater confirmed afterwards): it changes nobody's rating, leaver
+    -- penalty included. Everything else (score, performance metrics) is
+    -- computed as usual, so generate_player_elo_for_match still writes the
+    -- player's row with current = their pre-match rating, and later matches
+    -- start from that unchanged rating on every (re)compute.
+    IF match_record.elo_voided THEN
+        _elo_change := 0;
+    END IF;
+
     -- Return the elo change as JSON with detailed information
     RETURN jsonb_build_object(
         'current_elo', _current_player_elo, -- The current ELO rating of the player (including base ELO)

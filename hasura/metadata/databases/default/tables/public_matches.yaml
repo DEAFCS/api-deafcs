@@ -540,6 +540,7 @@ select_permissions:
         - created_at
         - ended_at
         - effective_at
+        - elo_voided
         - id
         - label
         - lineup_1_id
@@ -618,6 +619,7 @@ select_permissions:
         - created_at
         - ended_at
         - effective_at
+        - elo_voided
         - id
         - label
         - lineup_1_id

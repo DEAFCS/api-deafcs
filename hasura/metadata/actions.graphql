@@ -503,6 +503,12 @@ type Mutation {
 }
 
 type Mutation {
+  voidMatchElo(
+    match_id: uuid!
+  ): SuccessOutput
+}
+
+type Mutation {
   recomputePlayerEloStatus: RecomputeEloStatusOutput
 }
 

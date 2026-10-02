@@ -50,6 +50,9 @@ import { ClipSpec } from "./clips/types/ClipSpec";
 import { SYSTEM_STEAM_ID } from "./disconnect-budget/constants";
 import { TermsService } from "src/terms/terms.service";
 
+// Played terminal statuses: a match that actually produced a result.
+const ELO_VOIDABLE_STATUSES = ["Finished", "Forfeit", "Tie", "Surrendered"];
+
 @Controller("matches")
 export class MatchesController {
   private readonly appConfig: AppConfig;
@@ -1256,6 +1259,74 @@ export class MatchesController {
     );
 
     return { success: true, running: true };
+  }
+
+  // Admin "Void ELO": the match stays exactly as it is (score, result,
+  // stats, demos, clips, bracket); only its rating effect goes, for every
+  // player. get_player_elo_for_match scores an elo_voided match as a 0
+  // change, and a full chronological rebuild makes every later match start
+  // from the unchanged ratings. Idempotent.
+  @HasuraAction()
+  public async voidMatchElo(data: { match_id: string; user: User }) {
+    const { match_id, user } = data;
+
+    if (!user || !isRoleAbove(user.role, "administrator")) {
+      throw Error("you must be an administrator to void a match's ELO");
+    }
+
+    const [match] = await this.postgres.query<
+      Array<{ status: string; elo_voided: boolean }>
+    >(`SELECT status, elo_voided FROM matches WHERE id = $1`, [match_id]);
+
+    if (!match) {
+      throw Error("match not found");
+    }
+
+    if (match.elo_voided) {
+      return { success: true };
+    }
+
+    if (!ELO_VOIDABLE_STATUSES.includes(match.status)) {
+      throw Error(
+        "only a played match (Finished, Forfeit, Tie or Surrendered) can have its ELO voided",
+      );
+    }
+
+    const voided = await this.postgres.query<Array<{ id: string }>>(
+      `UPDATE matches
+          SET elo_voided = true, elo_voided_at = now(), elo_voided_by = $2
+        WHERE id = $1 AND elo_voided = false
+        RETURNING id`,
+      [match_id, user.steam_id],
+    );
+
+    // Voided concurrently by another request: nothing more to do.
+    if (voided.length === 0) {
+      return { success: true };
+    }
+
+    this.logger.log(
+      `[elo-void] match ${match_id} ELO voided by ${user.steam_id}`,
+    );
+
+    // Rebuild ELO with the existing single-run recompute. If one is already
+    // running it may have passed this match, so it gets one follow-up run.
+    if (await this.playerEloRecompute.isRunning()) {
+      await this.playerEloRecompute.requestRerun();
+    } else {
+      await this.playerEloRecompute.markQueued();
+      await this.eloRecomputeQueue.add(
+        RecomputeAllElo.name,
+        {},
+        {
+          jobId: RecomputeAllElo.name,
+          removeOnComplete: true,
+          removeOnFail: true,
+        },
+      );
+    }
+
+    return { success: true };
   }
 
   @HasuraAction()

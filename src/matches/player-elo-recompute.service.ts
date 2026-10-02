@@ -10,6 +10,7 @@ import {
 } from "../../generated";
 import { TypesenseQueues } from "../type-sense/enums/TypesenseQueues";
 import { RefreshAllPlayersJob } from "../type-sense/jobs/RefreshAllPlayers";
+import { MatchQueues } from "./enums/MatchQueues";
 
 // Status + cancel signal live in Redis so any API replica can read progress and
 // request cancellation regardless of which pod is running the job.
@@ -20,6 +21,18 @@ const LOCK_KEY = "elo-recompute:lock";
 // Cross-pod flag so player_elo events (which fire on any replica) can be
 // suppressed while the recompute rebuilds every row, then reindexed once.
 const SUPPRESS_KEY = "elo-recompute:suppress-events";
+
+// Set when a match's ELO is voided while a run is in progress: that run may
+// already have rebuilt the match (and the matches after it) with the old
+// rating effect, so one more full run follows it. Cleared when a run starts,
+// since a run started after the void reads every match's current state.
+const RERUN_KEY = "elo-recompute:rerun-requested";
+const RERUN_TTL_SECONDS = 24 * 3600;
+
+// The queue job id the recompute action uses (RecomputeAllElo.name, kept as
+// a literal to avoid importing the worker). A follow-up run needs a distinct
+// id: BullMQ ignores an add whose id matches the job still finishing.
+const RECOMPUTE_JOB_NAME = "RecomputeAllElo";
 
 const PERSIST_EVERY = 25;
 // Per-match cap so one hung query can't freeze the whole run.
@@ -50,7 +63,14 @@ export class PlayerEloRecomputeService {
     private readonly notifications: NotificationsService,
     @InjectQueue(TypesenseQueues.PlayerReindex)
     private readonly reindexQueue: Queue,
+    @InjectQueue(MatchQueues.EloRecompute)
+    private readonly eloRecomputeQueue: Queue,
   ) {}
+
+  // A running recompute must be followed by one more full run (see RERUN_KEY).
+  public async requestRerun(): Promise<void> {
+    await this.cache.put(RERUN_KEY, true, RERUN_TTL_SECONDS);
+  }
 
   public async isRunning(): Promise<boolean> {
     return (await this.getStatus()).running;
@@ -120,6 +140,8 @@ export class PlayerEloRecomputeService {
     }
 
     await this.cache.forget(CANCEL_KEY);
+    // This run reads every match's current elo_voided state as it goes.
+    await this.cache.forget(RERUN_KEY);
 
     const status: EloRecomputeStatus = {
       ...this.idleStatus(),
@@ -196,7 +218,35 @@ export class PlayerEloRecomputeService {
       );
 
       await this.notifyComplete(status);
+
+      await this.queueRequestedRerun(status.canceled);
     }
+  }
+
+  // An ELO void arrived during this run: queue exactly one more full run.
+  // A canceled run leaves the request in place for the next run to pick up.
+  private async queueRequestedRerun(canceled: boolean): Promise<void> {
+    if ((await this.cache.get(RERUN_KEY)) !== true) {
+      return;
+    }
+    if (canceled) {
+      this.logger.warn(
+        "[elo-recompute] canceled with an ELO void pending; the next recompute applies it",
+      );
+      return;
+    }
+    await this.cache.forget(RERUN_KEY);
+    await this.markQueued();
+    await this.eloRecomputeQueue.add(
+      RECOMPUTE_JOB_NAME,
+      {},
+      {
+        jobId: `${RECOMPUTE_JOB_NAME}:rerun:${Date.now()}`,
+        removeOnComplete: true,
+        removeOnFail: true,
+      },
+    );
+    this.logger.log("[elo-recompute] queued a follow-up run for an ELO void");
   }
 
   private async notifyComplete(status: EloRecomputeStatus): Promise<void> {
