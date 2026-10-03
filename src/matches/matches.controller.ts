@@ -47,6 +47,7 @@ import { isRoleAbove } from "../utilities/isRoleAbove";
 import { DemoMetadataService } from "../demos/demo-metadata.service";
 import { ClipsService } from "./clips/clips.service";
 import { ClipSpec } from "./clips/types/ClipSpec";
+import { buildForcedClientNamesFile } from "./utilities/forcedClientNames";
 import { SYSTEM_STEAM_ID } from "./disconnect-budget/constants";
 import { TermsService } from "src/terms/terms.service";
 
@@ -196,6 +197,28 @@ export class MatchesController {
           .filter(Boolean)
       : undefined;
     return this.gameStreamer.getStreamViewerCounts(matchIds);
+  }
+
+  // Fetched by the game server (setup.sh) before CS2 starts and passed to
+  // +sv_load_forced_client_names_file, so registered players join with their
+  // DEAFCS name from the first tick. Authenticated with the server API
+  // password by MatchServerMiddlewareMiddleware (see matches.module.ts).
+  @Get("forced-client-names/:serverId")
+  public async getForcedClientNames(@Res() response: Response) {
+    const players = await this.postgres.query<
+      Array<{ steam_id: string; name: string | null }>
+    >(
+      `SELECT steam_id::text AS steam_id, name
+         FROM public.players
+        WHERE name_registered IS TRUE
+          AND role <> 'user'
+        ORDER BY steam_id`,
+    );
+
+    response
+      .status(200)
+      .type("text/plain")
+      .send(buildForcedClientNamesFile(players));
   }
 
   @Get("current-match/:serverId")

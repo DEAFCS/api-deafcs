@@ -471,6 +471,10 @@ export class MatchesModule implements NestModule {
       .apply(MatchServerMiddlewareMiddleware)
       .forRoutes(
         { path: "matches/current-match/:serverId", method: RequestMethod.ALL },
+        {
+          path: "matches/forced-client-names/:serverId",
+          method: RequestMethod.GET,
+        },
         { path: "demos/:matchId/*splat", method: RequestMethod.POST },
       );
     consumer.apply(MatchRelayAuthMiddleware).forRoutes(
