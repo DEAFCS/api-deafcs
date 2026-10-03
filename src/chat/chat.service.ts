@@ -969,6 +969,10 @@ export class ChatService {
     // endpoint the way a real attachment is.
     gifUrl?: string,
     videoDraftId?: string,
+    // Untrusted steam_ids the sender @-tagged from the composer list; only
+    // those who can actually read this room (and haven't blocked the
+    // sender) survive resolveMentions.
+    mentionSteamIds?: unknown,
   ): Promise<{
     accepted: boolean;
     tooLong?: boolean;
@@ -1213,6 +1217,17 @@ export class ChatService {
       message.gifUrl = gifUrl;
     }
 
+    const mentions = await this.resolveMentions(
+      type,
+      id,
+      player,
+      mentionSteamIds,
+      source,
+    );
+    if (mentions.length) {
+      message.mentions = mentions;
+    }
+
     if (type === ChatLobbyType.Announcement) {
       // Persisted in Postgres instead of the Redis 24h-TTL hash below --
       // see ANNOUNCEMENTS_LOBBY_ID. `id` is the row's own uuid, the
@@ -1326,7 +1341,7 @@ export class ChatService {
     // people with an open socket to this exact channel -- i.e. already
     // seeing the message live, so they're excluded rather than targeted).
     // A failure here must never break message delivery, hence the catch.
-    void this.notifyLobbyMembers(type, id, player, _message).catch((error) =>
+    void this.notifyLobbyMembers(type, id, player, _message, mentions).catch((error) =>
       this.logger.warn(
         `[chat] push notify failed for ${type}:${id}: ${(error as Error)?.message}`,
       ),
@@ -2852,12 +2867,126 @@ export class ChatService {
     return label ? `[${label}] ${name}` : name;
   }
 
+  // Rooms where @-tagging works. Deliberately not Match/MatchTeam (live
+  // in-game relay), Draft/CaptainPickTeam, Direct (two people already) or
+  // Announcement (admin-only posting).
+  private static readonly MENTION_ENABLED_TYPES: ReadonlySet<ChatLobbyType> =
+    new Set([
+      ChatLobbyType.Global,
+      ChatLobbyType.Organizer,
+      ChatLobbyType.Tournament,
+      ChatLobbyType.Team,
+      ChatLobbyType.MatchMaking,
+    ]);
+
+  private static readonly MAX_MENTIONS = 10;
+
+  // Narrows the sender's picks to people who may actually read this room
+  // and haven't blocked the sender. Anyone else stays plain text -- an alert
+  // (push/badge) to a non-member would leak the room's private content.
+  private async resolveMentions(
+    type: ChatLobbyType,
+    id: string,
+    sender: User,
+    requested: unknown,
+    source: "website" | "game",
+  ): Promise<Array<{ steam_id: string; name: string }>> {
+    if (
+      source !== "website" ||
+      !ChatService.MENTION_ENABLED_TYPES.has(type) ||
+      !Array.isArray(requested)
+    ) {
+      return [];
+    }
+
+    const senderId = String(sender.steam_id);
+    const ids = Array.from(
+      new Set(
+        requested
+          .map((value) => String(value))
+          .filter((value) => /^\d{5,20}$/.test(value) && value !== senderId),
+      ),
+    ).slice(0, ChatService.MAX_MENTIONS);
+
+    if (!ids.length) {
+      return [];
+    }
+
+    const { players } = await this.hasuraService.query({
+      players: {
+        __args: { where: { steam_id: { _in: ids } } },
+        steam_id: true,
+        name: true,
+        role: true,
+      },
+    });
+
+    let eligible = players ?? [];
+
+    if (type === ChatLobbyType.Global) {
+      eligible = eligible.filter((player) =>
+        isRoleAbove(player.role, "verified_user"),
+      );
+    } else if (type === ChatLobbyType.Organizer) {
+      eligible = eligible.filter((player) =>
+        isRoleAbove(player.role, "match_organizer"),
+      );
+    } else {
+      const members = new Set(await this.getLobbyMemberSteamIds(type, id));
+      eligible = eligible.filter((player) =>
+        members.has(String(player.steam_id)),
+      );
+    }
+
+    if (!eligible.length) {
+      return [];
+    }
+
+    const blockingViewers = await this.blocks.getViewersBlocking(
+      eligible.map((player) => String(player.steam_id)),
+      senderId,
+    );
+
+    return eligible
+      .filter((player) => !blockingViewers.has(String(player.steam_id)))
+      .map((player) => ({
+        steam_id: String(player.steam_id),
+        name: player.name ?? "",
+      }));
+  }
+
+  // Push for the tagged players only. Goes through ChatMessage like any
+  // other chat push (never reaches the bell or the Discord webhook), under
+  // the player's existing chat push preference.
+  private async notifyMentioned(
+    type: ChatLobbyType,
+    id: string,
+    sender: User,
+    message: string,
+    steamIds: string[],
+  ): Promise<void> {
+    if (!steamIds.length) return;
+
+    await this.notifications.notifyPlayers(
+      "ChatMessage" as unknown as e_notification_types_enum,
+      {
+        title: `${this.notificationTitle(type, sender.name)} mentioned you`,
+        message: message.length > 200 ? `${message.slice(0, 200)}…` : message,
+        role: "user" as e_player_roles_enum,
+        entity_id: `${type}:${id}`,
+        steamIds,
+      },
+    );
+  }
+
   private async notifyLobbyMembers(
     type: ChatLobbyType,
     id: string,
     sender: User,
     message: string,
+    mentions: Array<{ steam_id: string; name: string }> = [],
   ): Promise<void> {
+    const mentionedIds = mentions.map((mention) => String(mention.steam_id));
     // Global has no fixed roster (every verified_user+ player is a
     // "member") -- targeting each of them individually via notifyPlayers
     // wouldn't scale and would defeat the point of push preferences being
@@ -2892,7 +3021,9 @@ export class ChatService {
         sender,
         message,
         "verified_user",
+        mentionedIds,
       );
+      await this.notifyMentioned(type, id, sender, message, mentionedIds);
       return;
     }
 
@@ -2956,7 +3087,9 @@ export class ChatService {
         sender,
         message,
         "match_organizer",
+        mentionedIds,
       );
+      await this.notifyMentioned(type, id, sender, message, mentionedIds);
       return;
     }
 
@@ -3003,16 +3136,30 @@ export class ChatService {
     // never reach here anymore, so this is just the remaining lobby chats
     // (matchmaking queue, draft, tournament, team, direct). (Organizer
     // chat is handled in its own early-return branch above, not here.)
-    await this.notifications.notifyPlayers(
-      "ChatMessage" as unknown as e_notification_types_enum,
-      {
-        title: this.notificationTitle(type, sender.name),
-        message: message.length > 200 ? `${message.slice(0, 200)}â€¦` : message,
-        role: "user" as e_player_roles_enum,
-        entity_id: `${type}:${id}`,
-        steamIds: targets,
-      },
+    // Tagged members get their own "mentioned you" push instead of this
+    // one, so they aren't pushed twice for the same message.
+    const mentionedTargets = targets.filter((steamId) =>
+      mentionedIds.includes(steamId),
     );
+    const regularTargets = targets.filter(
+      (steamId) => !mentionedIds.includes(steamId),
+    );
+
+    if (regularTargets.length) {
+      await this.notifications.notifyPlayers(
+        "ChatMessage" as unknown as e_notification_types_enum,
+        {
+          title: this.notificationTitle(type, sender.name),
+          message:
+            message.length > 200 ? `${message.slice(0, 200)}â€¦` : message,
+          role: "user" as e_player_roles_enum,
+          entity_id: `${type}:${id}`,
+          steamIds: regularTargets,
+        },
+      );
+    }
+
+    await this.notifyMentioned(type, id, sender, message, mentionedTargets);
 
     // Reported bug: a brand-new incoming DM (or any first message in a
     // chat the recipient has never opened a tab for) produced no unread
@@ -3042,6 +3189,7 @@ export class ChatService {
             senderAvatarUrl: sender.avatar_url,
             message:
               message.length > 200 ? `${message.slice(0, 200)}â€¦` : message,
+            mentions: mentionedIds,
           },
         }),
       );
@@ -3063,6 +3211,7 @@ export class ChatService {
     sender: User,
     message: string,
     minRole: e_player_roles_enum,
+    mentionedIds: string[] = [],
   ): Promise<void> {
     const senderId = String(sender.steam_id);
     const { players: rolePlayers } = await this.hasuraService.query({
@@ -3085,6 +3234,7 @@ export class ChatService {
             senderAvatarUrl: sender.avatar_url,
             message:
               message.length > 200 ? `${message.slice(0, 200)}â€¦` : message,
+            mentions: mentionedIds,
           },
         }),
       );

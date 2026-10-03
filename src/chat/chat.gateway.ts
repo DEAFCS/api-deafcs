@@ -73,6 +73,9 @@ export class ChatGateway {
       // which is what the unread badge/sound need to check instead of
       // steam_id alone.
       clientId?: string;
+      // steam_ids the sender picked from the composer's @ list. Untrusted:
+      // ChatService re-validates room eligibility, blocks and limits.
+      mentions?: unknown;
     },
     @ConnectedSocket() client: FiveStackWebSocketClient,
   ) {
@@ -96,6 +99,8 @@ export class ChatGateway {
       data.attachment,
       "website",
       data.gifUrl,
+      undefined,
+      data.mentions,
     );
 
     if (!result.accepted) {
