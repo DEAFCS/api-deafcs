@@ -180,6 +180,50 @@ describe("isPlayerNameAvailable", () => {
   });
 });
 
+describe("name length 3-15", () => {
+  const register = (name: string) => {
+    const { self, mutation } = harness([[{ name_registered: false }], []]);
+    return {
+      mutation,
+      run: SystemController.prototype.registerName.call(self, {
+        user: user("user"),
+        name,
+      }),
+    };
+  };
+
+  it("accepts 3 and 15 characters", async () => {
+    await expect(register("abc").run).resolves.toEqual({ success: true });
+    await expect(register("a".repeat(15)).run).resolves.toEqual({ success: true });
+  });
+
+  it("rejects 2 and 16 characters", async () => {
+    await expect(register("ab").run).rejects.toThrow(/between 3 and 15/);
+    const long = register("a".repeat(16));
+    await expect(long.run).rejects.toThrow(/between 3 and 15/);
+    expect(long.mutation).not.toHaveBeenCalled();
+  });
+
+  it("applies to name-change requests too", async () => {
+    const { self } = harness([[]]);
+    await expect(
+      SystemController.prototype.requestNameChange.call(self, {
+        user: user("verified_user"),
+        name: "a".repeat(16),
+        steam_id: ME,
+      }),
+    ).rejects.toThrow(/between 3 and 15/);
+  });
+
+  it("is also a database check constraint", () => {
+    const sql = readFileSync(
+      join(__dirname, "../../hasura/migrations/default/1878000022000_players_registered_name_length/up.sql"),
+      "utf8",
+    );
+    expect(sql).toMatch(/char_length\(name\) BETWEEN 3 AND 15/);
+  });
+});
+
 describe("registered-name uniqueness is enforced in the database too", () => {
   const migration = readFileSync(
     join(

@@ -79,7 +79,20 @@ export class SystemController {
   // special-character names copied from "fancy text" generators.
   private static readonly PLAYER_NAME_REGEX = /^[A-Za-z0-9_-]+$/;
 
+  // FACEIT-style length limits; mirrored in the web forms and in the
+  // players_registered_name_length check constraint.
+  public static readonly PLAYER_NAME_MIN_LENGTH = 3;
+  public static readonly PLAYER_NAME_MAX_LENGTH = 15;
+
   private static assertValidPlayerName(name: string) {
+    if (
+      name.length < SystemController.PLAYER_NAME_MIN_LENGTH ||
+      name.length > SystemController.PLAYER_NAME_MAX_LENGTH
+    ) {
+      throw new Error(
+        `Name must be between ${SystemController.PLAYER_NAME_MIN_LENGTH} and ${SystemController.PLAYER_NAME_MAX_LENGTH} characters`,
+      );
+    }
     if (!SystemController.PLAYER_NAME_REGEX.test(name)) {
       throw new Error(
         "Name can only contain letters, numbers, - and _",
