@@ -550,6 +550,13 @@ type Mutation {
   ): SuccessOutput
 }
 
+type Query {
+  isPlayerNameAvailable(
+    name: String!
+    steam_id: String
+  ): PlayerNameAvailability
+}
+
 type Mutation {
   removeFixtures: SuccessOutput
 }
@@ -1059,6 +1066,10 @@ type MeResponse {
 
 type SuccessOutput {
   success: Boolean!
+}
+
+type PlayerNameAvailability {
+  available: Boolean!
 }
 
 type AddTournamentIndividualPlayerOutput {

@@ -785,6 +785,15 @@ actions:
       forward_client_headers: true
     permissions:
       - role: user
+  - name: isPlayerNameAvailable
+    definition:
+      kind: ""
+      handler: '{{HASURA_GRAPHQL_ACTIONS_HOOK}}'
+      forward_client_headers: true
+    permissions:
+      - role: user
+      - role: administrator
+    comment: Whether a registered player name is still free (case-insensitive)
   - name: removeFixtures
     definition:
       kind: synchronous
@@ -1426,6 +1435,7 @@ custom_types:
           source: default
           type: object
     - name: SuccessOutput
+    - name: PlayerNameAvailability
     - name: AddTournamentIndividualPlayerOutput
     - name: CheckInTournamentIndividualPlayerOutput
     - name: RemoveTournamentIndividualPlayerOutput

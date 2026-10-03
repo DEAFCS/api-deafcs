@@ -16,6 +16,7 @@ import { isRoleAbove } from "src/utilities/isRoleAbove";
 import { PassThrough } from "stream";
 import { ChatService } from "src/chat/chat.service";
 import { SystemSettingName } from "./enums/SystemSettingName";
+import { PostgresService } from "src/postgres/postgres.service";
 
 @Controller("system")
 export class SystemController {
@@ -26,7 +27,52 @@ export class SystemController {
     private readonly gameServerNodeService: GameServerNodeService,
     private readonly loggingService: LoggingService,
     private readonly chatService: ChatService,
+    private readonly postgres: PostgresService,
   ) {}
+
+  public static readonly NAME_TAKEN_MESSAGE = "That name is already taken";
+
+  // Partial unique index on lower(name) WHERE name_registered (see the
+  // players_registered_name_unique migration). It is the last line of
+  // defence against two registrations racing past the check below.
+  private static readonly NAME_UNIQUE_INDEX = "players_registered_name_unique";
+
+  // Registered names are unique, ignoring case. Players who never
+  // registered a name aren't part of the namespace at all.
+  public static async isNameTaken(
+    postgres: PostgresService,
+    name: string,
+    exceptSteamId?: string | null,
+  ): Promise<boolean> {
+    const rows = await postgres.query<Array<{ steam_id: string }>>(
+      `SELECT steam_id::text AS steam_id
+         FROM public.players
+        WHERE name_registered IS TRUE
+          AND lower(name) = lower($1)
+          AND ($2::bigint IS NULL OR steam_id <> $2::bigint)
+        LIMIT 1`,
+      [name, exceptSteamId ?? null],
+    );
+    return rows.length > 0;
+  }
+
+  private static async assertNameAvailable(
+    postgres: PostgresService,
+    name: string,
+    exceptSteamId?: string | null,
+  ) {
+    if (await SystemController.isNameTaken(postgres, name, exceptSteamId)) {
+      throw new Error(SystemController.NAME_TAKEN_MESSAGE);
+    }
+  }
+
+  // hasura.mutation rethrows the first GraphQL error's message as a plain
+  // string, so match on the text either way.
+  private static isNameUniqueViolation(error: unknown) {
+    const text =
+      typeof error === "string" ? error : String((error as Error)?.message);
+    return text.includes(SystemController.NAME_UNIQUE_INDEX);
+  }
 
   // Letters, numbers, "-" and "_" only (same restriction as most
   // FACEIT-style platforms) -- blocks lookalike/fullwidth unicode and
@@ -181,42 +227,118 @@ export class SystemController {
   public async registerName(data: { user: User; name: string }) {
     SystemController.assertValidPlayerName(data.name);
 
-    await this.hasura.mutation({
-      update_players_by_pk: {
-        __args: {
-          pk_columns: {
-            steam_id: data.user.steam_id,
+    // First registration only: the action is callable directly, so without
+    // this an already-registered player could rename themselves and skip
+    // the approval flow (requestNameChange -> approveNameChange).
+    const [current] = await this.postgres.query<
+      Array<{ name_registered: boolean | null }>
+    >(
+      `SELECT name_registered FROM public.players WHERE steam_id = $1::bigint`,
+      [data.user.steam_id],
+    );
+    if (current?.name_registered) {
+      throw new Error(
+        "Your name is already registered. Request a name change instead.",
+      );
+    }
+
+    await SystemController.assertNameAvailable(
+      this.postgres,
+      data.name,
+      data.user.steam_id,
+    );
+
+    try {
+      await this.hasura.mutation({
+        update_players_by_pk: {
+          __args: {
+            pk_columns: {
+              steam_id: data.user.steam_id,
+            },
+            _set: {
+              name: data.name,
+              name_registered: true,
+            },
           },
-          _set: {
-            name: data.name,
-            name_registered: true,
-          },
+          __typename: true,
         },
-        __typename: true,
-      },
-    });
+      });
+    } catch (error) {
+      if (SystemController.isNameUniqueViolation(error)) {
+        throw new Error(SystemController.NAME_TAKEN_MESSAGE);
+      }
+      throw error;
+    }
 
     return {
       success: true,
     };
   }
 
+  // Live check for the registration / name-change forms. Only administrators
+  // may ask on behalf of another player (so the target isn't counted as a
+  // clash with their own current name).
+  @HasuraAction()
+  public async isPlayerNameAvailable(data: {
+    user?: User;
+    name: string;
+    steam_id?: string | null;
+  }) {
+    if (!data.user) {
+      throw new Error("Not authenticated");
+    }
+
+    const myId = String(data.user.steam_id);
+    const targetId = data.steam_id ? String(data.steam_id) : myId;
+    if (targetId !== myId && !isRoleAbove(data.user.role, "administrator")) {
+      throw new Error("You can only check a name for yourself");
+    }
+
+    const name = (data.name ?? "").trim();
+    if (!name) {
+      return { available: true };
+    }
+
+    return {
+      available: !(await SystemController.isNameTaken(
+        this.postgres,
+        name,
+        targetId,
+      )),
+    };
+  }
+
   @HasuraAction()
   public async approveNameChange(data: { name: string; steam_id: string }) {
-    await this.hasura.mutation({
-      update_players_by_pk: {
-        __args: {
-          pk_columns: {
-            steam_id: data.steam_id,
+    // The request was only checked when it was made; someone else may have
+    // taken the name while it sat waiting for approval.
+    await SystemController.assertNameAvailable(
+      this.postgres,
+      data.name,
+      data.steam_id,
+    );
+
+    try {
+      await this.hasura.mutation({
+        update_players_by_pk: {
+          __args: {
+            pk_columns: {
+              steam_id: data.steam_id,
+            },
+            _set: {
+              name: data.name,
+              name_registered: true,
+            },
           },
-          _set: {
-            name: data.name,
-            name_registered: true,
-          },
+          __typename: true,
         },
-        __typename: true,
-      },
-    });
+      });
+    } catch (error) {
+      if (SystemController.isNameUniqueViolation(error)) {
+        throw new Error(SystemController.NAME_TAKEN_MESSAGE);
+      }
+      throw error;
+    }
 
     await this.notifications.notifyPlayers(
       "NameChangeApproved" as e_notification_types_enum,
@@ -267,6 +389,11 @@ export class SystemController {
     }
 
     SystemController.assertValidPlayerName(data.name);
+    await SystemController.assertNameAvailable(
+      this.postgres,
+      data.name,
+      data.steam_id,
+    );
 
     const { notifications } = await this.hasura.query({
       notifications: {

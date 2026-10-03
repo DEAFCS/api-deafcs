@@ -25,8 +25,10 @@ function callRequestNameChange(data: {
       .mockResolvedValueOnce({ players_by_pk: { name: "Old" } }),
   };
   const notifications = { send: jest.fn().mockResolvedValue(undefined) };
+  // No other registered player owns the name.
+  const postgres = { query: jest.fn().mockResolvedValue([]) };
   const promise = SystemController.prototype.requestNameChange.call(
-    { hasura, notifications },
+    { hasura, notifications, postgres },
     data,
   );
   return { promise, hasura, notifications };
