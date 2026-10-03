@@ -34,7 +34,7 @@ describe("MatchmakingGateway Terms enforcement", () => {
   let cache: { lock: jest.Mock };
   let terms: { hasAcceptedCurrentTerms: jest.Mock };
   let redis: { publish: jest.Mock; hgetall: jest.Mock };
-  let logger: { error: jest.Mock };
+  let logger: { error: jest.Mock; log: jest.Mock };
   let captainPick: {
     getActiveDraftId: jest.Mock;
     pick: jest.Mock;
@@ -82,7 +82,7 @@ describe("MatchmakingGateway Terms enforcement", () => {
     cache = { lock: jest.fn((key: string, fn: () => unknown) => fn()) };
     terms = { hasAcceptedCurrentTerms: jest.fn() };
     redis = { publish: jest.fn().mockResolvedValue(undefined), hgetall: jest.fn().mockResolvedValue({}) };
-    logger = { error: jest.fn() };
+    logger = { error: jest.fn(), log: jest.fn() };
     captainPickEnabled = true;
     captainPick = {
       getActiveDraftId: jest.fn().mockResolvedValue(null),

@@ -312,6 +312,9 @@ export class MatchmakingGateway {
             variant,
           );
           await this.matchmakeService.addLobbyToQueue(lobby.id);
+          this.logger.log(
+            `[matchmaking] queue join: lobby ${lobby.id} (${lobby.players.map((player) => player.steam_id).join(", ")}) ${type} ${variant ?? "Standard"} in ${regions.join(", ")}`,
+          );
           return true;
         });
       } catch (error) {

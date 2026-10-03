@@ -23,6 +23,13 @@ export class SocketsService {
 
   private clients: Map<string, FiveStackWebSocketClient> = new Map();
 
+  // steam id -> ids of this node's open sockets for that player. Targeted
+  // messages (ready check, DMs, ...) are delivered from this, not from the
+  // 20s Redis presence keys: a backgrounded tab (e.g. alt-tabbed into CS2)
+  // can miss a ping, let its key expire and silently stop receiving
+  // messages while its socket is still open.
+  private clientsBySteamId: Map<string, Set<string>> = new Map();
+
   constructor(
     private readonly logger: Logger,
     private readonly config: ConfigService,
@@ -136,6 +143,7 @@ export class SocketsService {
         client.peerNodes = new Set();
 
         this.clients.set(client.id, client);
+        this.indexClient(client.user.steam_id, client.id);
 
         await this.updateClient(client.user.steam_id, client.id);
 
@@ -149,6 +157,7 @@ export class SocketsService {
 
         client.on("close", async () => {
           this.clients.delete(client.id);
+          this.unindexClient(client.user.steam_id, client.id);
 
           void this.demoSessionWatcher.clientClosed(client.id);
 
@@ -226,30 +235,48 @@ export class SocketsService {
     client.send(JSON.stringify({ event, data }));
   }
 
-  private async sendMessageToSteamId(
+  private indexClient(steamId: string, clientId: string) {
+    const key = String(steamId);
+    const ids = this.clientsBySteamId.get(key) ?? new Set<string>();
+    ids.add(clientId);
+    this.clientsBySteamId.set(key, ids);
+  }
+
+  private unindexClient(steamId: string, clientId: string) {
+    const key = String(steamId);
+    const ids = this.clientsBySteamId.get(key);
+    if (!ids) {
+      return;
+    }
+    ids.delete(clientId);
+    if (ids.size === 0) {
+      this.clientsBySteamId.delete(key);
+    }
+  }
+
+  public async sendMessageToSteamId(
     steamId: string,
     event: string,
     data: unknown,
   ) {
-    const clients = await this.redis.keys(
-      `${SocketsService.GET_PLAYER_CLIENTS_BY_NODE(steamId, this.nodeId)}:*`,
-    );
+    const clientIds = this.clientsBySteamId.get(String(steamId));
 
-    for (const client of clients) {
-      const [, , , clientId] = client.split(":");
+    if (!clientIds) {
+      return;
+    }
 
+    const message = JSON.stringify({ event, data });
+
+    for (const clientId of Array.from(clientIds)) {
       const _client = this.clients.get(clientId);
 
       if (!_client) {
+        // A client that vanished without a close event.
+        clientIds.delete(clientId);
         continue;
       }
 
-      _client.send(
-        JSON.stringify({
-          event,
-          data,
-        }),
-      );
+      _client.send(message);
     }
   }
 

@@ -66,6 +66,13 @@ export function getCaptainPickPlayerCacheKey(steamId: string) {
   return `matchmaking:${version}:captain-pick:player:${steamId}`;
 }
 
+// Which ready check (confirmation) a player is currently part of. Set when a
+// confirmation is created, released when it ends, and what stops one player
+// from being pulled into two ready checks at once (e.g. two queue entries).
+export function getMatchmakingPlayerClaimKey(steamId: string) {
+  return `matchmaking:${version}:confirmation:player:${steamId}`;
+}
+
 // Captain Pick gets its own region lock so a Captain Pick pass can never make
 // a Standard pass bail out with "another matchmaking process is running".
 export function getMatchmakingRegionLockKey(

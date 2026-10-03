@@ -90,7 +90,7 @@ describe("MatchmakingLobbyService.verifyLobby", () => {
     } as any;
 
     const mockRedisManager = {
-      getConnection: jest.fn().mockReturnValue({} as Redis),
+      getConnection: jest.fn().mockReturnValue({ get: jest.fn().mockResolvedValue(null) } as unknown as Redis),
     } as any;
 
     service = new MatchmakingLobbyService(

@@ -19,6 +19,7 @@ import {
   getMatchmakingConformationCacheKey,
   getMatchmakingRankCacheKey,
   getMatchmakingRegionLockKey,
+  getMatchmakingPlayerClaimKey,
 } from "./utilities/cacheKeys";
 import { ExpectedPlayers } from "src/discord-bot/enums/ExpectedPlayers";
 import {
@@ -246,6 +247,14 @@ export class MatchmakeService {
       (a, b) => a.joinedAt.getTime() - b.joinedAt.getTime(),
     );
 
+    // Nobody already in a match, a draft or a ready check, and nobody twice.
+    lobbies = await this.withoutBusyLobbies(lobbies);
+
+    if (lobbies.length === 0) {
+      await this.releaseMatchmakeRegionLock(region);
+      return;
+    }
+
     const totalPlayerNotQueued = await this.createMatches(
       region,
       type,
@@ -333,7 +342,7 @@ export class MatchmakeService {
         return;
       }
 
-      const eligible: Array<MatchmakingLobby> = [];
+      let eligible: Array<MatchmakingLobby> = [];
       for (const lobby of lobbies) {
         if (
           resolveMatchmakingQueueVariant(lobby.variant) === "CaptainPick" &&
@@ -357,6 +366,10 @@ export class MatchmakeService {
           new Date(a.joinedAt).getTime() - new Date(b.joinedAt).getTime(),
       );
 
+      // Anyone already in a match, a draft or another ready check is dropped
+      // from the queue here instead of being pulled into a second one.
+      eligible = await this.withoutBusyLobbies(eligible);
+
       while (eligible.length >= CAPTAIN_PICK_PLAYER_COUNT) {
         const claimed: Array<MatchmakingLobby> = [];
 
@@ -378,7 +391,18 @@ export class MatchmakeService {
         }
 
         try {
-          await this.createCaptainPickConfirmation(region, claimed);
+          const created = await this.createCaptainPickConfirmation(
+            region,
+            claimed,
+          );
+          if (created === false) {
+            // The conflicting lobbies were dropped and the rest requeued;
+            // another pass forms the draft from whoever is left.
+            setTimeout(() => {
+              void this.matchmakeCaptainPick(region);
+            }, 2000);
+            break;
+          }
         } catch (error) {
           this.logger.error(
             `Error creating captain pick confirmation in ${region}:`,
@@ -605,10 +629,14 @@ export class MatchmakeService {
           lobbyLocks.delete(lobbyId);
         }
 
-        await this.createMatchConfirmation(region, type, {
+        const created = await this.createMatchConfirmation(region, type, {
           team1,
           team2,
         });
+        if (created === false) {
+          // Conflicting lobbies were dropped and the rest requeued.
+          totalPlayerNotQueued = team1.players.length + team2.players.length;
+        }
       } catch (error) {
         this.logger.error(`Error creating match confirmation:`, error);
         // Release all locks if match confirmation fails
@@ -832,13 +860,33 @@ export class MatchmakeService {
     region: string,
     type: e_match_types_enum,
     players: { team1: MatchmakingTeam; team2: MatchmakingTeam },
-  ) {
+  ): Promise<boolean> {
     if (!region) {
       throw new Error("Region is required");
     }
     const { team1, team2 } = players;
 
     const allLobbies = new Set([...team1.lobbies, ...team2.lobbies]);
+    const confirmationId = uuidv4();
+
+    // A player already in a match, a draft or another ready check must not
+    // be pulled into this one. Their lobby is dropped, everyone else requeued.
+    const conflicts = await this.claimPlayersForConfirmation(
+      confirmationId,
+      [...team1.players, ...team2.players].map((player) => player.steam_id),
+    );
+    if (conflicts.length > 0) {
+      const busy = new Set(conflicts);
+      for (const lobbyId of allLobbies) {
+        const lobby = await this.matchmakingLobbyService.getLobbyDetails(lobbyId);
+        if (lobby && this.lobbyHasBusyPlayer(lobby, busy)) {
+          await this.dropLobbyWithBusyPlayers(lobby, busy);
+        } else {
+          await this.releaseLobbyAndRequeue(lobbyId);
+        }
+      }
+      return false;
+    }
 
     for (const lobbyId of allLobbies) {
       void this.releaseLobbyLock(lobbyId, 30);
@@ -846,8 +894,6 @@ export class MatchmakeService {
 
     const expiresAt = new Date();
     expiresAt.setSeconds(expiresAt.getSeconds() + 30);
-
-    const confirmationId = uuidv4();
 
     await this.setConfirmationDetails(
       region,
@@ -883,6 +929,8 @@ export class MatchmakeService {
           `[matchmaking] push match-found notification failed: ${(error as Error)?.message}`,
         ),
       );
+
+    return true;
   }
 
   /**
@@ -893,16 +941,35 @@ export class MatchmakeService {
   private async createCaptainPickConfirmation(
     region: string,
     lobbies: Array<MatchmakingLobby>,
-  ) {
+  ): Promise<boolean> {
     if (!region) {
       throw new Error("Region is required");
+    }
+
+    const confirmationId = uuidv4();
+
+    // Same guard as Standard: nobody already in a match, a draft or another
+    // ready check is allowed into this one.
+    const conflicts = await this.claimPlayersForConfirmation(
+      confirmationId,
+      lobbies.flatMap((lobby) => lobby.players.map((player) => player.steam_id)),
+    );
+    if (conflicts.length > 0) {
+      const busy = new Set(conflicts);
+      for (const lobby of lobbies) {
+        if (this.lobbyHasBusyPlayer(lobby, busy)) {
+          await this.dropLobbyWithBusyPlayers(lobby, busy);
+        } else {
+          await this.releaseLobbyAndRequeue(lobby.lobbyId);
+        }
+      }
+      return false;
     }
 
     for (const lobby of lobbies) {
       void this.releaseLobbyLock(lobby.lobbyId, 30);
     }
 
-    const confirmationId = uuidv4();
     const lobbyIds = lobbies.map((lobby) => lobby.lobbyId);
     const participants = lobbies.map((lobby) => ({
       steam_id: lobby.players[0].steam_id,
@@ -947,6 +1014,267 @@ export class MatchmakeService {
           `[matchmaking] push match-found notification failed: ${(error as Error)?.message}`,
         ),
       );
+
+    return true;
+  }
+
+  // ---- One player, one ready check -------------------------------------
+  //
+  // A player can end up with two queue entries (e.g. a party lobby and a solo
+  // one) and be matched into two ready checks, accepting both. These helpers
+  // make sure a player is only ever part of one match/draft/ready check.
+
+  private static readonly PLAYER_CLAIM_TTL_SECONDS = 180;
+
+  private static readonly RELEASE_PLAYER_CLAIM_SCRIPT = `
+    if redis.call('GET', KEYS[1]) == ARGV[1] then
+      return redis.call('DEL', KEYS[1])
+    end
+    return 0
+  `;
+
+  public getConfirmationSteamIds(details: {
+    variant: MatchmakingQueueVariant;
+    team1: Array<{ steam_id: string }>;
+    team2: Array<{ steam_id: string }>;
+    participants: Array<{ steam_id: string }>;
+  }): string[] {
+    const players =
+      details.variant === "CaptainPick"
+        ? details.participants
+        : [...details.team1, ...details.team2];
+
+    return players.map((player) => String(player.steam_id));
+  }
+
+  /**
+   * Players that cannot be put into a (new) ready check: already in a live
+   * match, in a Captain Pick draft, or in a different ready check than
+   * `confirmationId`. A failed lookup never blocks matchmaking.
+   */
+  public async getBusySteamIds(
+    steamIds: string[],
+    confirmationId?: string,
+  ): Promise<Set<string>> {
+    const busy = new Set<string>();
+    const ids = [...new Set(steamIds.map(String))];
+
+    if (ids.length === 0) {
+      return busy;
+    }
+
+    try {
+      const result = await this.hasura.query({
+        players: {
+          __args: { where: { steam_id: { _in: ids } } },
+          steam_id: true,
+          is_in_another_match: true,
+        },
+      });
+      for (const player of result?.players ?? []) {
+        if (player.is_in_another_match) {
+          busy.add(String(player.steam_id));
+        }
+      }
+    } catch (error) {
+      this.logger.warn(
+        `[matchmaking] could not check which players are already in a match: ${(error as Error)?.message}`,
+      );
+    }
+
+    for (const steamId of ids) {
+      if (busy.has(steamId)) {
+        continue;
+      }
+
+      try {
+        // A draft id is its confirmation id, so this ready check's own
+        // (already started) draft is not a conflict.
+        const draftId = await this.captainPick.getActiveDraftId(steamId);
+        if (draftId && draftId !== confirmationId) {
+          busy.add(steamId);
+          continue;
+        }
+
+        const claim = await this.redis.get(getMatchmakingPlayerClaimKey(steamId));
+        if (claim && claim !== confirmationId) {
+          busy.add(steamId);
+        }
+      } catch (error) {
+        this.logger.warn(
+          `[matchmaking] could not check ready check/draft state for ${steamId}: ${(error as Error)?.message}`,
+        );
+      }
+    }
+
+    return busy;
+  }
+
+  /**
+   * Marks these players as part of `confirmationId`. Returns the players that
+   * could not be claimed (busy); when there are any, nothing stays claimed.
+   */
+  private async claimPlayersForConfirmation(
+    confirmationId: string,
+    steamIds: string[],
+  ): Promise<string[]> {
+    const busy = await this.getBusySteamIds(steamIds, confirmationId);
+    const claimed: string[] = [];
+
+    for (const steamId of [...new Set(steamIds.map(String))]) {
+      if (busy.has(steamId)) {
+        continue;
+      }
+
+      const ok = await this.redis.set(
+        getMatchmakingPlayerClaimKey(steamId),
+        confirmationId,
+        "EX",
+        MatchmakeService.PLAYER_CLAIM_TTL_SECONDS,
+        "NX",
+      );
+
+      if (ok === "OK") {
+        claimed.push(steamId);
+      } else {
+        busy.add(steamId);
+      }
+    }
+
+    if (busy.size > 0) {
+      await this.releasePlayerClaims(confirmationId, claimed);
+      this.logger.warn(
+        `[matchmaking] ready check ${confirmationId} refused: ${[...busy].join(", ")} already in a match, draft or ready check`,
+      );
+    }
+
+    return [...busy];
+  }
+
+  private async releasePlayerClaims(
+    confirmationId: string,
+    steamIds: string[],
+  ): Promise<void> {
+    for (const steamId of steamIds) {
+      await this.redis.eval(
+        MatchmakeService.RELEASE_PLAYER_CLAIM_SCRIPT,
+        1,
+        getMatchmakingPlayerClaimKey(steamId),
+        confirmationId,
+      );
+    }
+  }
+
+  private lobbyHasBusyPlayer(
+    lobby: { players: Array<{ steam_id: string }> },
+    busy: Set<string>,
+  ): boolean {
+    return lobby.players.some((player) => busy.has(String(player.steam_id)));
+  }
+
+  /**
+   * Takes a lobby with a busy player out of the queue. The busy player gets
+   * no event (their other match/ready check owns their screen); the rest of
+   * the lobby is told why and sent back to the start.
+   */
+  private async dropLobbyWithBusyPlayers(
+    lobby: { lobbyId: string; players: Array<{ steam_id: string }> },
+    busy: Set<string>,
+  ): Promise<void> {
+    await this.matchmakingLobbyService.removeLobbyFromQueue(lobby.lobbyId);
+    await this.matchmakingLobbyService.removeLobbyDetailsQuietly(lobby.lobbyId);
+    await this.releaseLobbyLock(lobby.lobbyId, 0);
+
+    for (const player of lobby.players) {
+      if (busy.has(String(player.steam_id))) {
+        continue;
+      }
+
+      await this.redis.publish(
+        "send-message-to-steam-id",
+        JSON.stringify({
+          steamId: player.steam_id,
+          event: "matchmaking:error",
+          data: { message: "A player in your lobby is already in a match" },
+        }),
+      );
+      await this.redis.publish(
+        "send-message-to-steam-id",
+        JSON.stringify({
+          steamId: player.steam_id,
+          event: "matchmaking:details",
+          data: {},
+        }),
+      );
+    }
+  }
+
+  private async withoutBusyLobbies(
+    lobbies: Array<MatchmakingLobby>,
+  ): Promise<Array<MatchmakingLobby>> {
+    const busy = await this.getBusySteamIds(
+      lobbies.flatMap((lobby) => lobby.players.map((player) => player.steam_id)),
+    );
+
+    // The same player queued twice (two lobbies): the first entry stays, the
+    // later one is dropped, so one player never fills two seats.
+    const seen = new Set<string>();
+    const kept: Array<MatchmakingLobby> = [];
+    for (const lobby of lobbies) {
+      const ids = lobby.players.map((player) => String(player.steam_id));
+      const duplicates = ids.filter((id) => seen.has(id));
+      const unavailable = new Set([
+        ...duplicates,
+        ...ids.filter((id) => busy.has(id)),
+      ]);
+
+      if (unavailable.size > 0) {
+        await this.dropLobbyWithBusyPlayers(lobby, unavailable);
+      } else {
+        ids.forEach((id) => seen.add(id));
+        kept.push(lobby);
+      }
+    }
+
+    return kept;
+  }
+
+  /**
+   * Ends a ready check because some of its players turned out to be in
+   * another match/draft: they are told and dropped, everyone else who had
+   * already accepted goes back in the queue (cancelMatchMaking).
+   */
+  private async abortConfirmationForBusyPlayers(
+    confirmationId: string,
+    busy: Set<string>,
+    lobbyIds: string[],
+  ): Promise<void> {
+    const confirmedKey = `${getMatchmakingConformationCacheKey(confirmationId)}:confirmed`;
+
+    for (const steamId of busy) {
+      await this.redis.hdel(confirmedKey, steamId);
+      await this.redis.publish(
+        "send-message-to-steam-id",
+        JSON.stringify({
+          steamId,
+          event: "matchmaking:error",
+          data: { message: "You are already in a match" },
+        }),
+      );
+    }
+
+    for (const lobbyId of lobbyIds) {
+      const lobby = await this.matchmakingLobbyService.getLobbyDetails(lobbyId);
+      if (lobby && this.lobbyHasBusyPlayer(lobby, busy)) {
+        await this.dropLobbyWithBusyPlayers(lobby, busy);
+      }
+    }
+
+    this.logger.warn(
+      `[matchmaking] ready check ${confirmationId} canceled: ${[...busy].join(", ")} already in a match or draft`,
+    );
+
+    await this.cancelMatchMaking(confirmationId);
   }
 
   /**
@@ -1005,6 +1333,13 @@ export class MatchmakeService {
   }
 
   public async removeConfirmationDetails(confirmationId: string) {
+    // The ready check is over, so its players are free to join another.
+    const ending = await this.getMatchConfirmationDetails(confirmationId);
+    await this.releasePlayerClaims(
+      confirmationId,
+      this.getConfirmationSteamIds(ending),
+    );
+
     const confirmedKey = `${getMatchmakingConformationCacheKey(confirmationId)}:confirmed`;
     await this.redis.del(confirmedKey);
 
@@ -1158,6 +1493,28 @@ export class MatchmakeService {
     confirmationId: string,
     steamId: string,
   ) {
+    // Whoever is already in a match, a draft or another ready check cannot
+    // accept this one. Ending it here protects the nine other players from
+    // waiting on someone who can never join.
+    const before = await this.getMatchConfirmationDetails(confirmationId);
+    if (
+      this.getConfirmationSteamIds(before).includes(String(steamId)) &&
+      // A late accept after the match/draft exists is not a double booking:
+      // the player is in this very match.
+      !before.matchId &&
+      !(await this.captainPick.hasDraft(confirmationId))
+    ) {
+      const busy = await this.getBusySteamIds([steamId], confirmationId);
+      if (busy.size > 0) {
+        await this.abortConfirmationForBusyPlayers(
+          confirmationId,
+          busy,
+          before.lobbyIds,
+        );
+        return;
+      }
+    }
+
     await this.redis.hset(
       `${getMatchmakingConformationCacheKey(confirmationId)}:confirmed`,
       steamId,
@@ -1190,6 +1547,26 @@ export class MatchmakeService {
     );
     if (!claimed) {
       return;
+    }
+
+    // Last gate before a draft/match is built: only the caller that won the
+    // claim gets here, so a late accept of an already-created match is never
+    // mistaken for a double booking.
+    const alreadyBuilt =
+      !!details.matchId || (await this.captainPick.hasDraft(confirmationId));
+    if (!alreadyBuilt) {
+      const busy = await this.getBusySteamIds(
+        this.getConfirmationSteamIds(details),
+        confirmationId,
+      );
+      if (busy.size > 0) {
+        await this.abortConfirmationForBusyPlayers(
+          confirmationId,
+          busy,
+          lobbyIds,
+        );
+        return;
+      }
     }
 
     // 10/10 is the Captain Pick commitment point: the ready check is over

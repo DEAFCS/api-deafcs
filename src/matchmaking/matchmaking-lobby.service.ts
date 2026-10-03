@@ -13,6 +13,7 @@ import {
   getMatchmakingRankCacheKey,
   getMatchmakingQueueCacheKey,
   getMatchmakingLobbyDetailsCacheKey,
+  getMatchmakingPlayerClaimKey,
 } from "./utilities/cacheKeys";
 import { JoinQueueError } from "./utilities/joinQueueError";
 import { ExpectedPlayers } from "src/discord-bot/enums/ExpectedPlayers";
@@ -230,6 +231,14 @@ export class MatchmakingLobbyService {
         }),
       );
     }
+  }
+
+  // Drops a lobby's details without telling its players anything. Used when a
+  // player is already in another match/ready check: an empty
+  // matchmaking:details event would blank the screen of that other flow.
+  public async removeLobbyDetailsQuietly(lobbyId: string) {
+    await this.redis.hdel(getMatchmakingLobbyDetailsCacheKey(lobbyId), "details");
+    await this.removeConfirmationIdFromLobby(lobbyId);
   }
 
   public async setMatchConformationIdForLobby(
@@ -566,6 +575,14 @@ export class MatchmakingLobbyService {
     if (player.is_in_another_match) {
       throw new JoinQueueError(
         `${player.name} player is already in a match`,
+        lobbyId,
+      );
+    }
+
+    // Already part of a ready check (accept popup) for another match.
+    if (await this.redis.get(getMatchmakingPlayerClaimKey(steamId))) {
+      throw new JoinQueueError(
+        `${player.name} already has a match waiting to be accepted`,
         lobbyId,
       );
     }
