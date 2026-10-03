@@ -1,0 +1,89 @@
+table:
+  name: admin_reply_templates
+  schema: public
+insert_permissions:
+  - role: administrator
+    permission:
+      check:
+        owner_steam_id:
+          _eq: X-Hasura-User-Id
+      set:
+        owner_steam_id: x-hasura-user-id
+      columns:
+        - slot
+        - title
+        - body
+    comment: A staff member saves their own reply texts only.
+  - role: moderator
+    permission:
+      check:
+        owner_steam_id:
+          _eq: X-Hasura-User-Id
+      set:
+        owner_steam_id: x-hasura-user-id
+      columns:
+        - slot
+        - title
+        - body
+    comment: A staff member saves their own reply texts only.
+select_permissions:
+  - role: administrator
+    permission:
+      columns:
+        - owner_steam_id
+        - slot
+        - title
+        - body
+      filter:
+        owner_steam_id:
+          _eq: X-Hasura-User-Id
+    comment: Only your own reply texts.
+  - role: moderator
+    permission:
+      columns:
+        - owner_steam_id
+        - slot
+        - title
+        - body
+      filter:
+        owner_steam_id:
+          _eq: X-Hasura-User-Id
+    comment: Only your own reply texts.
+update_permissions:
+  - role: administrator
+    permission:
+      columns:
+        - title
+        - body
+      filter:
+        owner_steam_id:
+          _eq: X-Hasura-User-Id
+      check:
+        owner_steam_id:
+          _eq: X-Hasura-User-Id
+    comment: Needed for the upsert; own rows only.
+  - role: moderator
+    permission:
+      columns:
+        - title
+        - body
+      filter:
+        owner_steam_id:
+          _eq: X-Hasura-User-Id
+      check:
+        owner_steam_id:
+          _eq: X-Hasura-User-Id
+    comment: Needed for the upsert; own rows only.
+delete_permissions:
+  - role: administrator
+    permission:
+      filter:
+        owner_steam_id:
+          _eq: X-Hasura-User-Id
+    comment: Clearing a slot deletes it.
+  - role: moderator
+    permission:
+      filter:
+        owner_steam_id:
+          _eq: X-Hasura-User-Id
+    comment: Clearing a slot deletes it.
