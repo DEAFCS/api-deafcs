@@ -66,8 +66,14 @@ select_permissions:
         - status_history
         - game_server_node_id
         - k8s_service_name
-      filter: {}
-    comment: ""
+      filter:
+        match:
+          _and:
+            - is_in_lineup:
+                _eq: false
+            - is_coach:
+                _eq: false
+    comment: "Anti-cheat: a match's own players and coaches get none of its streams."
 update_permissions:
   - role: match_organizer
     permission:
