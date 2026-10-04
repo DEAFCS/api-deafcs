@@ -61,6 +61,7 @@ import { PluginsModule } from "./plugins/plugins.module";
 import { VerificationApplicationsModule } from "./verification-applications/verification-applications.module";
 import { SupportRequestsModule } from "./support-requests/support-requests.module";
 import { AdminCallsModule } from "./admin-calls/admin-calls.module";
+import { TwitchModule } from "./twitch/twitch.module";
 import { APP_GUARD } from "@nestjs/core";
 import { WebsiteRestrictionsModule } from "./website-restrictions/website-restrictions.module";
 import { WebsiteRestrictionGuard } from "./website-restrictions/website-restrictions.guard";
@@ -165,6 +166,7 @@ import { WebsiteRestrictionGuard } from "./website-restrictions/website-restrict
     VerificationApplicationsModule,
     SupportRequestsModule,
     AdminCallsModule,
+    TwitchModule,
     WebsiteRestrictionsModule,
   ],
   providers: [

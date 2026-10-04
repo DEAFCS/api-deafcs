@@ -10,6 +10,7 @@ import typesense from "./typesense";
 import tailscale from "./tailscale";
 import faceit from "./faceit";
 import giphy from "./giphy";
+import twitch from "./twitch";
 
 export default [
   app,
@@ -24,4 +25,5 @@ export default [
   tailscale,
   faceit,
   giphy,
+  twitch,
 ];
