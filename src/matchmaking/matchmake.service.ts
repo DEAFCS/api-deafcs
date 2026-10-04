@@ -1190,14 +1190,8 @@ export class MatchmakeService {
         continue;
       }
 
-      await this.redis.publish(
-        "send-message-to-steam-id",
-        JSON.stringify({
-          steamId: player.steam_id,
-          event: "matchmaking:error",
-          data: { message: "A player in your lobby is already in a match" },
-        }),
-      );
+      // No explanation: the lobby just leaves the queue, like a missed
+      // accept. The reason is only in the server log.
       await this.redis.publish(
         "send-message-to-steam-id",
         JSON.stringify({
@@ -1252,15 +1246,9 @@ export class MatchmakeService {
     const confirmedKey = `${getMatchmakingConformationCacheKey(confirmationId)}:confirmed`;
 
     for (const steamId of busy) {
+      // The busy player is told nothing: their other match/ready check owns
+      // their screen, and the reason is only in the server log.
       await this.redis.hdel(confirmedKey, steamId);
-      await this.redis.publish(
-        "send-message-to-steam-id",
-        JSON.stringify({
-          steamId,
-          event: "matchmaking:error",
-          data: { message: "You are already in a match" },
-        }),
-      );
     }
 
     for (const lobbyId of lobbyIds) {

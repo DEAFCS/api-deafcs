@@ -260,9 +260,8 @@ describe("accepting a ready check", () => {
     await h.service.playerConfirmMatchmaking("c1", "steam-2");
 
     expect(cancel).toHaveBeenCalledWith("c1");
-    expect(h.published).toContainEqual(
-      expect.objectContaining({ steamId: "steam-2", event: "matchmaking:error" }),
-    );
+    // Hidden: the busy player is told nothing about why.
+    expect(h.published.filter((m) => m.steamId === "steam-2")).toEqual([]);
     expect(h.captainPick.startDraft).not.toHaveBeenCalled();
   });
 
@@ -297,9 +296,8 @@ describe("accepting a ready check", () => {
 
     expect(h.captainPick.startDraft).not.toHaveBeenCalled();
     expect(cancel).toHaveBeenCalledWith("c3");
-    expect(h.published).toContainEqual(
-      expect.objectContaining({ steamId: "steam-7", event: "matchmaking:error" }),
-    );
+    expect(h.published.filter((m) => m.steamId === "steam-7")).toEqual([]);
+    expect(h.published.filter((m) => m.event === "matchmaking:error")).toEqual([]);
   });
 
   it("starts the draft when all ten are free", async () => {
