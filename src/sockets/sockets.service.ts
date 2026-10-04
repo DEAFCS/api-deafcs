@@ -261,7 +261,15 @@ export class SocketsService {
   ) {
     const clientIds = this.clientsBySteamId.get(String(steamId));
 
-    if (!clientIds) {
+    if (!clientIds || clientIds.size === 0) {
+      // A ready check that reaches nobody is the one miss worth a log line:
+      // the player simply never sees the accept popup. (The same player may
+      // still be connected to another API pod, which delivers it there.)
+      if (event === "matchmaking:details" && (data as any)?.confirmation) {
+        this.logger.warn(
+          `[sockets] ready check update for ${steamId} reached no open socket on ${this.nodeId}`,
+        );
+      }
       return;
     }
 

@@ -92,3 +92,26 @@ describe("SocketsService targeted delivery", () => {
     );
   });
 });
+
+describe("SocketsService ready check delivery logging", () => {
+  it("logs a ready check update that reaches no open socket", async () => {
+    const { service } = build();
+    const warn = jest.spyOn((service as any).logger, "warn").mockImplementation(() => undefined);
+
+    await service.sendMessageToSteamId("1", "matchmaking:details", {
+      confirmation: { confirmationId: "c1" },
+    });
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("reached no open socket"));
+  });
+
+  it("stays quiet for other messages to an offline player", async () => {
+    const { service } = build();
+    const warn = jest.spyOn((service as any).logger, "warn").mockImplementation(() => undefined);
+
+    await service.sendMessageToSteamId("1", "matchmaking:details", {});
+    await service.sendMessageToSteamId("1", "chat:new-message", {});
+
+    expect(warn).not.toHaveBeenCalled();
+  });
+});

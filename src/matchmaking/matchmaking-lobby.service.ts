@@ -365,6 +365,9 @@ export class MatchmakingLobbyService {
         region,
         matchId,
         expiresAt,
+        // Lets the web show the countdown correctly on a device whose own
+        // clock is off (it would otherwise hide the accept popup).
+        serverNow: new Date().toISOString(),
         confirmationId,
         confirmed,
         players: this.matchmaking.getConfirmationPlayerCount(details),
