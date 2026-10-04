@@ -442,7 +442,12 @@ export class MatchmakingLobbyService {
           steamId: player.steam_id,
           event: "matchmaking:details",
           data: {
-            details: await this.getLobbyDetails(lobbyId),
+            // serverNow lets the web start the search timer at 0 on a device
+            // whose own clock is off.
+            details: await this.getLobbyDetails(lobbyId).then(
+              (details) =>
+                details && { ...details, serverNow: new Date().toISOString() },
+            ),
             confirmation: confirmationId && {
               ...confirmationDetails,
               confirmed: confirmationDetails.confirmed.length,
