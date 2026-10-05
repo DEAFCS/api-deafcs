@@ -232,6 +232,7 @@ insert_permissions:
         - name
         - scheduling_mode
         - start
+        - substitutes_enabled
     comment: ""
   - role: tournament_organizer
     permission:
@@ -294,6 +295,7 @@ insert_permissions:
         - name
         - scheduling_mode
         - start
+        - substitutes_enabled
     comment: ""
 select_permissions:
   - role: guest
@@ -316,6 +318,7 @@ select_permissions:
         - scheduling_mode
         - organizer_steam_id
         - start
+        - substitutes_enabled
         - status
         - trophies_enabled
         - individual_check_in_ends_at
@@ -379,6 +382,7 @@ select_permissions:
         - scheduling_mode
         - organizer_steam_id
         - start
+        - substitutes_enabled
         - status
         - trophies_enabled
         - individual_check_in_ends_at
@@ -428,6 +432,7 @@ select_permissions:
         - scheduling_mode
         - organizer_steam_id
         - start
+        - substitutes_enabled
         - status
         - trophies_enabled
         - individual_check_in_ends_at
@@ -490,6 +495,7 @@ update_permissions:
         - name
         - scheduling_mode
         - start
+        - substitutes_enabled
         - status
         - trophies_enabled
         - attendance_check_in_open_before_minutes
@@ -516,6 +522,7 @@ update_permissions:
         - name
         - scheduling_mode
         - start
+        - substitutes_enabled
         - status
         - trophies_enabled
         - attendance_check_in_open_before_minutes

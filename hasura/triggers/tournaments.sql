@@ -207,6 +207,16 @@ BEGIN
             MESSAGE = 'Schedule and check-in timing cannot be changed after check-in has started';
     END IF;
 
+    -- Adapted from 5Stack (substitutes_enabled). Teams are seeded once
+    -- registration closes and may already field substitutes, so taking them
+    -- away then would strand rosters above the new cap. Turning them back ON
+    -- is always allowed.
+    IF OLD.substitutes_enabled AND NOT NEW.substitutes_enabled
+       AND OLD.status NOT IN ('Setup', 'RegistrationOpen') THEN
+        RAISE EXCEPTION USING ERRCODE = '22000',
+            MESSAGE = 'Substitutes can only be turned off before registration closes';
+    END IF;
+
     IF NEW.status IS DISTINCT FROM OLD.status THEN
         -- A league owns the lifecycle of its division/playoff tournaments;
         -- resetting or cancelling one directly corrupts the season. Only allow

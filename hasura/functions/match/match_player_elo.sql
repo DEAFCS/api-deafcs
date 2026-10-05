@@ -18,6 +18,90 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql STABLE;
 
+-- Adapted from 5Stack's match_elo_participants (MIT). A lineup carries its
+-- substitutes whether or not they ever joined the server, so lineup
+-- membership alone cannot tell who played. Anything the game server recorded
+-- against a player in this match can.
+CREATE OR REPLACE FUNCTION public.player_has_match_activity(
+    _match_id UUID,
+    _steam_id BIGINT
+) RETURNS BOOLEAN AS $$
+    SELECT EXISTS (SELECT 1 FROM player_kills WHERE match_id = _match_id AND attacker_steam_id = _steam_id)
+        OR EXISTS (SELECT 1 FROM player_kills WHERE match_id = _match_id AND attacked_steam_id = _steam_id)
+        OR EXISTS (SELECT 1 FROM player_damages WHERE match_id = _match_id AND attacker_steam_id = _steam_id)
+        OR EXISTS (SELECT 1 FROM player_damages WHERE match_id = _match_id AND attacked_steam_id = _steam_id)
+        OR EXISTS (SELECT 1 FROM player_assists WHERE match_id = _match_id AND attacker_steam_id = _steam_id)
+        OR EXISTS (SELECT 1 FROM player_flashes WHERE match_id = _match_id AND attacker_steam_id = _steam_id)
+        OR EXISTS (SELECT 1 FROM player_utility WHERE match_id = _match_id AND attacker_steam_id = _steam_id)
+        OR EXISTS (SELECT 1 FROM player_objectives WHERE match_id = _match_id AND player_steam_id = _steam_id)
+        OR EXISTS (SELECT 1 FROM player_unused_utility WHERE match_id = _match_id AND player_steam_id = _steam_id);
+$$ LANGUAGE sql STABLE;
+
+-- The players a match is rated over.
+--
+-- DEAFCS scoping (deliberately narrower than 5Stack, which filters every
+-- lineup): the activity filter only applies to a lineup that seats MORE
+-- players than the starting lineup, i.e. one carrying substitutes. A lineup at
+-- or under the starting size (every matchmaking match, and every past match
+-- without seated substitutes) is rated exactly as before, so normal ELO and
+-- historical recomputes do not move.
+--
+-- In a lineup with substitutes, a player is rated when they:
+--   * have recorded activity in this match (they played), or
+--   * carry the leaver flag (match_lineup_players.elo_penalty), so an active
+--     player who abandoned still takes the leaver penalty, or
+--   * belong to a lineup with no recorded activity at all (a no-show forfeit,
+--     or a match whose events never arrived): nothing tells its players
+--     apart, so every member keeps the previous behavior.
+-- A substitute who sat out is simply not rated; tournament roster membership
+-- never matters here, only seats in this match.
+--
+-- plpgsql (not sql): this file loads before match_players_per_lineup.sql, and
+-- the starting lineup size is inlined from get_match_type_min_players.
+CREATE OR REPLACE FUNCTION public.match_elo_participants(
+    _match_id UUID
+) RETURNS TABLE (steam_id BIGINT, match_lineup_id UUID) AS $$
+BEGIN
+    RETURN QUERY
+    WITH seated AS (
+        SELECT
+            mlp.steam_id AS player_steam_id,
+            mlp.match_lineup_id AS lineup_id,
+            COALESCE(mlp.elo_penalty, false) AS penalized,
+            COUNT(*) OVER (PARTITION BY mlp.match_lineup_id) AS seated_count,
+            get_match_type_min_players(mo.type) AS starting_size
+        FROM matches m
+        JOIN match_options mo ON mo.id = m.match_options_id
+        JOIN match_lineup_players mlp
+            ON mlp.match_lineup_id IN (m.lineup_1_id, m.lineup_2_id)
+        WHERE m.id = _match_id
+          AND mlp.steam_id IS NOT NULL
+    ),
+    lineup_players AS (
+        SELECT
+            s.*,
+            -- Only asked where it can matter (a lineup with substitutes).
+            CASE
+                WHEN s.seated_count > s.starting_size
+                    THEN public.player_has_match_activity(_match_id, s.player_steam_id)
+                ELSE true
+            END AS played
+        FROM seated s
+    )
+    SELECT DISTINCT lp.player_steam_id, lp.lineup_id
+    FROM lineup_players lp
+    WHERE lp.seated_count <= lp.starting_size
+       OR lp.played
+       OR lp.penalized
+       OR NOT EXISTS (
+           SELECT 1
+           FROM lineup_players teammate
+           WHERE teammate.lineup_id = lp.lineup_id
+             AND teammate.played
+       );
+END;
+$$ LANGUAGE plpgsql STABLE;
+
 CREATE OR REPLACE FUNCTION get_player_elo_for_match(
     match_record public.matches,
     player_record public.players,
@@ -63,8 +147,15 @@ DECLARE
     -- Leaver escalation: forces this player to be scored as a loss below,
     -- independent of their team's actual result.
     _elo_penalty BOOLEAN := false;
+
+    -- Who the match is rated over (see match_elo_participants): the team
+    -- averages use the same set, so a substitute who sat out moves nothing.
+    _participants BIGINT[];
 BEGIN
     SELECT "type" INTO match_type FROM match_options WHERE id = match_record.match_options_id;
+
+    SELECT COALESCE(array_agg(mep.steam_id), ARRAY[]::BIGINT[]) INTO _participants
+    FROM public.match_elo_participants(match_record.id) mep;
 
     _seasons_enabled := seasons_enabled();
 
@@ -186,6 +277,7 @@ BEGIN
             match_lineup_players mlp
         WHERE
             mlp.match_lineup_id = _player_lineup_id
+            AND mlp.steam_id = ANY(_participants)
         GROUP BY
             mlp.steam_id
     ) AS team_elos;
@@ -229,6 +321,7 @@ BEGIN
             match_lineup_players mlp
         WHERE
             mlp.match_lineup_id = _opponent_lineup_id
+            AND mlp.steam_id = ANY(_participants)
         GROUP BY
             mlp.steam_id
     ) AS team_elos;
@@ -480,11 +573,12 @@ BEGIN
     DELETE FROM player_elo WHERE match_id = _match_id AND "type" = match_type;
 
     -- Get all players in this match
+    -- Rated over match_elo_participants, not every seat: a substitute who sat
+    -- out gets no rating (lineups without substitutes are unchanged).
     FOR player_record IN
         SELECT DISTINCT p.*
         FROM players p
-        JOIN match_lineup_players mlp ON p.steam_id = mlp.steam_id
-        WHERE mlp.match_lineup_id IN (match_record.lineup_1_id, match_record.lineup_2_id)
+        JOIN public.match_elo_participants(_match_id) mep ON p.steam_id = mep.steam_id
     LOOP
         -- Calculate ELO change for this player in this match
         elo_data := get_player_elo_for_match(match_record, player_record, _season_id, _is_tournament);
