@@ -47,6 +47,7 @@ select_permissions:
         - created_at
         - checked_in_at
       filter: {}
+      allow_aggregations: true
     comment: ""
   - role: user
     permission:
@@ -59,6 +60,7 @@ select_permissions:
         - created_at
         - checked_in_at
       filter: {}
+      allow_aggregations: true
     comment: ""
 delete_permissions:
   - role: user
