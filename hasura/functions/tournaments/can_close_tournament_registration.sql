@@ -6,7 +6,7 @@ RETURNS boolean
 LANGUAGE plpgsql STABLE
 AS $$
 BEGIN
-    IF tournament.status != 'RegistrationOpen' THEN
+    IF tournament.status NOT IN ('RegistrationOpen', 'CheckInReview') THEN
         RETURN false;
     END IF;
 

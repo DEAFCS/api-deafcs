@@ -1241,10 +1241,7 @@ actions:
     permissions:
       - role: moderator
     comment: >-
-      Removes an abandoned_matches row, lifts the still-active
-      system-issued ban tied to it (if any), and undoes one step of the
-      player's leaver_ban_stage escalation -- see
-      SanctionsService.removeAbandonedMatch.
+      Removes an abandoned_matches row, lifts the still-active system-issued ban tied to it (if any), and undoes one step of the player's leaver_ban_stage escalation -- see SanctionsService.removeAbandonedMatch.
   - name: updateClip
     definition:
       kind: synchronous
@@ -1398,6 +1395,132 @@ actions:
       - role: administrator
       - role: moderator
     comment: Reject a verification application (moderator or administrator).
+  - name: readmitTournamentTeam
+    definition:
+      kind: synchronous
+      handler: "{{HASURA_GRAPHQL_ACTIONS_HOOK}}"
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+      - role: tournament_organizer
+      - role: match_organizer
+      - role: moderator
+      - role: streamer
+      - role: verified_user
+      - role: user
+    comment: Organizer re-admits a team that missed check-in, then re-seeds
+  - name: extendTournamentCheckIn
+    definition:
+      kind: synchronous
+      handler: "{{HASURA_GRAPHQL_ACTIONS_HOOK}}"
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+      - role: tournament_organizer
+      - role: match_organizer
+      - role: moderator
+      - role: streamer
+      - role: verified_user
+      - role: user
+    comment: Organizer pushes the check-in deadline out and reopens registration
+  - name: continueTournamentCheckIn
+    definition:
+      kind: synchronous
+      handler: "{{HASURA_GRAPHQL_ACTIONS_HOOK}}"
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+      - role: tournament_organizer
+      - role: match_organizer
+      - role: moderator
+      - role: streamer
+      - role: verified_user
+      - role: user
+    comment: Organizer proceeds without the teams that missed check-in
+  - name: draftTournamentTeams
+    definition:
+      kind: synchronous
+      handler: "{{HASURA_GRAPHQL_ACTIONS_HOOK}}"
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+      - role: tournament_organizer
+      - role: match_organizer
+      - role: moderator
+      - role: streamer
+      - role: verified_user
+      - role: user
+    comment: Organizer regenerates the free agent teams and re-seeds
+  - name: joinTournamentAsFreeAgent
+    definition:
+      kind: synchronous
+      handler: "{{HASURA_GRAPHQL_ACTIONS_HOOK}}"
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+      - role: tournament_organizer
+      - role: match_organizer
+      - role: moderator
+      - role: streamer
+      - role: verified_user
+      - role: user
+    comment: Register for a tournament that drafts teams, alone or with your lobby
+  - name: leaveTournamentAsFreeAgent
+    definition:
+      kind: synchronous
+      handler: "{{HASURA_GRAPHQL_ACTIONS_HOOK}}"
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+      - role: tournament_organizer
+      - role: match_organizer
+      - role: moderator
+      - role: streamer
+      - role: verified_user
+      - role: user
+    comment: Withdraw from a tournament's free agent pool
+  - name: createTournamentInviteCode
+    definition:
+      kind: synchronous
+      handler: "{{HASURA_GRAPHQL_ACTIONS_HOOK}}"
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+      - role: tournament_organizer
+      - role: match_organizer
+      - role: moderator
+      - role: streamer
+      - role: verified_user
+      - role: user
+    comment: Organizer mints an expiring, use capped invite link for a tournament
+  - name: revokeTournamentInviteCode
+    definition:
+      kind: synchronous
+      handler: "{{HASURA_GRAPHQL_ACTIONS_HOOK}}"
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+      - role: tournament_organizer
+      - role: match_organizer
+      - role: moderator
+      - role: streamer
+      - role: verified_user
+      - role: user
+    comment: Organizer kills a tournament invite link without losing who already used it
+  - name: redeemTournamentInviteCode
+    definition:
+      kind: synchronous
+      handler: "{{HASURA_GRAPHQL_ACTIONS_HOOK}}"
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+      - role: tournament_organizer
+      - role: match_organizer
+      - role: moderator
+      - role: streamer
+      - role: verified_user
+      - role: user
+    comment: Spend a tournament invite link for an unlock on an invite only tournament
 custom_types:
   enums: []
   input_objects:
@@ -1489,4 +1612,6 @@ custom_types:
     - name: StorageSummary
     - name: TableSizeInfo
     - name: NewsPost
+    - name: TournamentInviteCodeOutput
+    - name: TournamentDraftOutput
   scalars: []

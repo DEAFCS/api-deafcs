@@ -70,8 +70,8 @@ describe("tournaments (SQL-driven)", () => {
     // since this suite's fixture players stay at the default 'user' role.
     const [tournament] = await postgres.query<Array<{ id: string }>>(
       `INSERT INTO tournaments
-          (name, start, organizer_steam_id, match_options_id, status, awards_enabled, trophies_enabled, min_role)
-       VALUES ($1, now() + $2::interval, $3, $4, 'Setup', true, true, NULL) RETURNING id`,
+          (name, start, organizer_steam_id, match_options_id, status, awards_enabled, trophies_enabled, min_role, registration_version)
+       VALUES ($1, now() + $2::interval, $3, $4, 'Setup', true, true, NULL, 1) RETURNING id`,
       [fx.nextName("cup"), start, organizer, options.id],
     );
     if (withStage) {

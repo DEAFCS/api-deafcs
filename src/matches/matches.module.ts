@@ -37,6 +37,7 @@ import { RemoveCancelledMatches } from "./jobs/RemoveCancelledMatches";
 import { CheckForTournamentStart } from "./jobs/CheckForTournamentStart";
 import { ProcessTournamentCheckInExpiry } from "./jobs/ProcessTournamentCheckInExpiry";
 import { CheckForScheduledTournamentBrackets } from "./jobs/CheckForScheduledTournamentBrackets";
+import { ProcessTournamentCheckIn } from "./jobs/ProcessTournamentCheckIn";
 import { ProcessTournamentAttendance } from "./jobs/ProcessTournamentAttendance";
 import { TournamentTeamGenerationModule } from "../tournaments/tournament-team-generation.module";
 import { CheckLeagueSeasonTransitions } from "./jobs/CheckLeagueSeasonTransitions";
@@ -187,6 +188,7 @@ import { TournamentCallService } from "./camera/tournament-call.service";
     ProcessTournamentCheckInExpiry,
     CheckForScheduledTournamentBrackets,
     ProcessTournamentAttendance,
+    ProcessTournamentCheckIn,
     CheckLeagueSeasonTransitions,
     ApplyLeagueDefaultSchedules,
     LeagueWeekReminders,
@@ -317,6 +319,8 @@ export class MatchesModule implements NestModule {
         },
       },
     );
+
+    void scheduleMatchQueue.add(ProcessTournamentCheckIn.name, {}, { repeat: { every: 15000 } });
 
     void scheduleMatchQueue.add(
       ProcessTournamentAttendance.name,

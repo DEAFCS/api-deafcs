@@ -60,7 +60,7 @@ export class ProcessTournamentAttendance extends WorkerHost {
              start - (attendance_check_in_close_before_minutes::text || ' minutes')::interval,
            individual_check_in_duration_minutes =
              attendance_check_in_open_before_minutes - attendance_check_in_close_before_minutes
-       WHERE status = 'RegistrationOpen'
+       WHERE registration_version = 1 AND status = 'RegistrationOpen'
          AND start IS NOT NULL
          AND individual_check_in_ends_at IS NULL
          AND start - (attendance_check_in_open_before_minutes::text || ' minutes')::interval <= now()
@@ -86,7 +86,7 @@ export class ProcessTournamentAttendance extends WorkerHost {
               tournament_max_players_per_lineup(t) AS max_players_per_lineup
        FROM public.tournaments t
        LEFT JOIN public.match_options mo ON mo.id = t.match_options_id
-       WHERE t.status = 'RegistrationOpen'
+       WHERE t.registration_version = 1 AND t.status = 'RegistrationOpen'
          AND t.individual_check_in_ends_at IS NOT NULL
          AND t.individual_check_in_ends_at <= now()`,
     );

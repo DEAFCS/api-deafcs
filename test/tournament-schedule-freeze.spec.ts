@@ -66,8 +66,8 @@ describe("tournament attendance schedule freeze (SQL-driven)", () => {
       `INSERT INTO tournaments
          (name, start, organizer_steam_id, match_options_id, status,
           attendance_check_in_open_before_minutes,
-          attendance_check_in_close_before_minutes)
-       VALUES ($1, now() + ($2 || ' minutes')::interval, $3, $4, 'RegistrationOpen', $5, $6)
+          attendance_check_in_close_before_minutes, registration_version)
+       VALUES ($1, now() + ($2 || ' minutes')::interval, $3, $4, 'RegistrationOpen', $5, $6, 1)
        RETURNING id`,
       [
         fx.nextName("cup"),

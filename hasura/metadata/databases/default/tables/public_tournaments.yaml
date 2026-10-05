@@ -113,6 +113,13 @@ array_relationships:
         remote_table:
           name: tournament_trophy_configs
           schema: public
+  - name: free_agents
+    using:
+      foreign_key_constraint_on:
+        column: tournament_id
+        table:
+          name: tournament_free_agents
+          schema: public
 computed_fields:
   - name: can_cancel
     definition:
@@ -195,6 +202,38 @@ computed_fields:
       function:
         name: tournament_min_players_per_lineup
         schema: public
+  - name: can_review_check_in
+    definition:
+      function:
+        name: can_review_tournament_check_in
+        schema: public
+      session_argument: hasura_session
+  - name: check_in_open
+    definition:
+      function:
+        name: tournament_check_in_open
+        schema: public
+  - name: check_in_started
+    definition:
+      function:
+        name: tournament_check_in_started
+        schema: public
+  - name: current_stage
+    definition:
+      function:
+        name: tournament_current_stage
+        schema: public
+  - name: missed_check_in_count
+    definition:
+      function:
+        name: tournament_missed_check_in_count
+        schema: public
+  - name: registration_unlocked
+    definition:
+      function:
+        name: tournament_registration_unlocked_for_session
+        schema: public
+      session_argument: hasura_session
 insert_permissions:
   - role: administrator
     permission:
@@ -233,6 +272,15 @@ insert_permissions:
         - scheduling_mode
         - start
         - substitutes_enabled
+        - registration_type
+        - min_elo
+        - max_elo
+        - invite_only
+        - regions
+        - check_in_required
+        - check_in_setting
+        - check_in_opens_before_minutes
+        - check_in_closes_before_minutes
     comment: ""
   - role: tournament_organizer
     permission:
@@ -296,6 +344,15 @@ insert_permissions:
         - scheduling_mode
         - start
         - substitutes_enabled
+        - registration_type
+        - min_elo
+        - max_elo
+        - invite_only
+        - regions
+        - check_in_required
+        - check_in_setting
+        - check_in_opens_before_minutes
+        - check_in_closes_before_minutes
     comment: ""
 select_permissions:
   - role: guest
@@ -325,6 +382,19 @@ select_permissions:
         - individual_check_in_duration_minutes
         - attendance_check_in_open_before_minutes
         - attendance_check_in_close_before_minutes
+        - registration_type
+        - min_elo
+        - max_elo
+        - invite_only
+        - regions
+        - check_in_required
+        - check_in_setting
+        - check_in_opens_before_minutes
+        - check_in_closes_before_minutes
+        - registration_version
+        - check_in_ends_at
+        - check_in_closed_for
+        - check_in_closing_notified_for
       computed_fields:
         - can_cancel
         - can_close_registration
@@ -340,6 +410,12 @@ select_permissions:
         - max_players_per_lineup
         - meets_min_role
         - min_players_per_lineup
+        - can_review_check_in
+        - check_in_open
+        - check_in_started
+        - current_stage
+        - missed_check_in_count
+        - registration_unlocked
       filter:
         status:
           _neq: Setup
@@ -389,6 +465,19 @@ select_permissions:
         - individual_check_in_duration_minutes
         - attendance_check_in_open_before_minutes
         - attendance_check_in_close_before_minutes
+        - registration_type
+        - min_elo
+        - max_elo
+        - invite_only
+        - regions
+        - check_in_required
+        - check_in_setting
+        - check_in_opens_before_minutes
+        - check_in_closes_before_minutes
+        - registration_version
+        - check_in_ends_at
+        - check_in_closed_for
+        - check_in_closing_notified_for
       computed_fields:
         - can_cancel
         - can_close_registration
@@ -404,6 +493,12 @@ select_permissions:
         - max_players_per_lineup
         - meets_min_role
         - min_players_per_lineup
+        - can_review_check_in
+        - check_in_open
+        - check_in_started
+        - current_stage
+        - missed_check_in_count
+        - registration_unlocked
       filter:
         _or:
           - is_organizer:
@@ -439,6 +534,19 @@ select_permissions:
         - individual_check_in_duration_minutes
         - attendance_check_in_open_before_minutes
         - attendance_check_in_close_before_minutes
+        - registration_type
+        - min_elo
+        - max_elo
+        - invite_only
+        - regions
+        - check_in_required
+        - check_in_setting
+        - check_in_opens_before_minutes
+        - check_in_closes_before_minutes
+        - registration_version
+        - check_in_ends_at
+        - check_in_closed_for
+        - check_in_closing_notified_for
       computed_fields:
         - can_cancel
         - can_close_registration
@@ -454,6 +562,12 @@ select_permissions:
         - max_players_per_lineup
         - meets_min_role
         - min_players_per_lineup
+        - can_review_check_in
+        - check_in_open
+        - check_in_started
+        - current_stage
+        - missed_check_in_count
+        - registration_unlocked
       filter:
         _or:
           - is_organizer:
@@ -500,6 +614,15 @@ update_permissions:
         - trophies_enabled
         - attendance_check_in_open_before_minutes
         - attendance_check_in_close_before_minutes
+        - registration_type
+        - min_elo
+        - max_elo
+        - invite_only
+        - regions
+        - check_in_required
+        - check_in_setting
+        - check_in_opens_before_minutes
+        - check_in_closes_before_minutes
       filter:
         is_organizer:
           _eq: true
@@ -527,6 +650,15 @@ update_permissions:
         - trophies_enabled
         - attendance_check_in_open_before_minutes
         - attendance_check_in_close_before_minutes
+        - registration_type
+        - min_elo
+        - max_elo
+        - invite_only
+        - regions
+        - check_in_required
+        - check_in_setting
+        - check_in_opens_before_minutes
+        - check_in_closes_before_minutes
       filter:
         is_organizer:
           _eq: true

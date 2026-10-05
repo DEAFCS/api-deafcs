@@ -32,6 +32,12 @@ BEGIN
         RETURN false;
     END IF;
 
+    IF tournament.registration_version = 2 THEN
+        IF public.player_meets_tournament_requirements(tournament.id, _steam_id) IS NOT TRUE THEN RETURN false; END IF;
+        IF tournament.invite_only AND NOT public.tournament_registration_unlocked_any(tournament.id, _steam_id) THEN RETURN false; END IF;
+        IF EXISTS (SELECT 1 FROM public.tournament_free_agents fa WHERE fa.tournament_id = tournament.id AND fa.player_steam_id = _steam_id AND fa.status <> 'withdrawn') THEN RETURN false; END IF;
+    END IF;
+
     -- Check if the player is already on a roster for this tournament
     SELECT EXISTS (
         SELECT 1
@@ -95,6 +101,15 @@ BEGIN
             tournament_id = tournament.id
             AND player_steam_id = (hasura_session ->> 'x-hasura-user-id')::bigint
             AND status IN ('Registered', 'Waitlisted', 'Assigned')
+        UNION ALL
+        SELECT 1 FROM public.tournament_free_agents fa
+        WHERE fa.tournament_id = tournament.id
+          AND fa.player_steam_id = (hasura_session ->> 'x-hasura-user-id')::bigint
+          AND fa.status <> 'withdrawn'
+        UNION ALL
+        SELECT 1 FROM public.tournament_teams tt
+        WHERE tt.tournament_id = tournament.id
+          AND tt.owner_steam_id = (hasura_session ->> 'x-hasura-user-id')::bigint
     ) INTO is_participant;
 
     RETURN is_participant;

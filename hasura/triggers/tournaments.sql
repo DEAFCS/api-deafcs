@@ -50,7 +50,7 @@ BEGIN
         IF NEW.status IN ('Setup', 'RegistrationOpen') THEN
             PERFORM public.clear_tournament_roster_image_snapshots(NEW.id);
         ELSIF NEW.status IN ('RegistrationClosed', 'Live')
-              AND OLD.status IN ('Setup', 'RegistrationOpen') THEN
+              AND OLD.status IN ('Setup', 'RegistrationOpen', 'CheckInReview') THEN
             PERFORM public.capture_tournament_roster_image_snapshots(NEW.id);
         END IF;
     END IF;
@@ -97,12 +97,12 @@ BEGIN
     ) THEN
         PERFORM update_tournament_stages(NEW.id);
         PERFORM assign_seeds_to_teams(NEW);
-        
+
         SELECT id INTO first_stage_id
         FROM tournament_stages
         WHERE tournament_id = NEW.id AND "order" = 1
         LIMIT 1;
-        
+
         IF first_stage_id IS NOT NULL THEN
             PERFORM seed_stage(first_stage_id);
         END IF;
@@ -202,9 +202,28 @@ BEGIN
         OR NEW.attendance_check_in_close_before_minutes
              IS DISTINCT FROM OLD.attendance_check_in_close_before_minutes
        )
-       AND public.tournament_attendance_started(OLD) THEN
+       AND OLD.registration_version = 1 AND public.tournament_attendance_started(OLD) THEN
         RAISE EXCEPTION USING ERRCODE = '22000',
             MESSAGE = 'Schedule and check-in timing cannot be changed after check-in has started';
+    END IF;
+
+    -- The new check-in schedule is frozen against OLD, including the mode.
+    IF OLD.registration_version = 2 AND public.tournament_check_in_started(OLD) AND (
+        NEW.start IS DISTINCT FROM OLD.start
+        OR NEW.check_in_required IS DISTINCT FROM OLD.check_in_required
+        OR NEW.check_in_setting IS DISTINCT FROM OLD.check_in_setting
+        OR NEW.check_in_opens_before_minutes IS DISTINCT FROM OLD.check_in_opens_before_minutes
+        OR NEW.check_in_closes_before_minutes IS DISTINCT FROM OLD.check_in_closes_before_minutes
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Schedule and check-in timing cannot be changed after check-in has started';
+    END IF;
+    IF NEW.registration_version IS DISTINCT FROM OLD.registration_version THEN
+        RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Registration engine cannot be changed for an existing tournament';
+    END IF;
+    IF NEW.registration_version = 2 AND EXISTS (SELECT 1 FROM public.match_options mo
+        WHERE mo.id = NEW.match_options_id AND mo.individual_registration_enabled)
+       AND (NEW.registration_type <> 'free_agents' OR NEW.check_in_setting <> 'Players') THEN
+        RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Random tournaments require individual Free Agent registration and check-in';
     END IF;
 
     -- Adapted from 5Stack (substitutes_enabled). Teams are seeded once
@@ -226,6 +245,20 @@ BEGIN
            AND public.is_league_tournament(OLD.id) THEN
             RAISE EXCEPTION USING ERRCODE = '22000',
                 MESSAGE = 'This tournament belongs to a league; cancel or delete the league season instead';
+        END IF;
+
+        IF NEW.status = 'CheckInReview' AND NOT (
+            OLD.registration_version = 2 AND OLD.status = 'RegistrationOpen'
+            AND public.tournament_check_in_window_opened(OLD)
+            AND public.is_tournament_organizer(OLD, nullif(current_setting('hasura.user', true), '')::json)
+        ) THEN
+            RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Cannot hold tournament for check-in review';
+        END IF;
+        IF OLD.status = 'CheckInReview' AND (
+            NEW.status NOT IN ('RegistrationOpen', 'RegistrationClosed', 'Live', 'Cancelled', 'CancelledMinTeams')
+            OR NOT public.is_tournament_organizer(OLD, nullif(current_setting('hasura.user', true), '')::json)
+        ) THEN
+            RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Only an organizer can resolve check-in review';
         END IF;
 
         CASE NEW.status
@@ -251,6 +284,9 @@ BEGIN
                         RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Cannot resume tournament';
                     END IF;
                 ELSE
+                    IF NEW.registration_version = 2 AND NEW.registration_type IN ('free_agents', 'both') THEN
+                        PERFORM draft_tournament_free_agent_teams(NEW.id);
+                    END IF;
                     IF NOT tournament_has_min_teams(NEW) THEN
                         NEW.status = 'CancelledMinTeams';
                     END IF;
@@ -310,6 +346,16 @@ CREATE OR REPLACE FUNCTION public.tbi_tournaments() RETURNS TRIGGER
     LANGUAGE plpgsql
     AS $$
 BEGIN
+    IF NEW.registration_version = 2 AND EXISTS (SELECT 1 FROM public.match_options mo
+        WHERE mo.id = NEW.match_options_id AND mo.individual_registration_enabled) THEN
+        IF EXISTS (SELECT 1 FROM public.match_options mo WHERE mo.id = NEW.match_options_id
+            AND mo.type <> 'Competitive') THEN
+            RAISE EXCEPTION 'Random tournaments require Competitive 5v5';
+        END IF;
+        NEW.registration_type := 'free_agents';
+        NEW.check_in_setting := 'Players';
+    END IF;
+
     IF NEW.discord_notifications_enabled IS NULL THEN
         IF EXISTS (
             SELECT 1

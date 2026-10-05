@@ -118,8 +118,8 @@ describe("Solo Random participant management (SQL-driven)", () => {
     );
     const [tournament] = await postgres.query<Array<{ id: string }>>(
       `INSERT INTO tournaments
-          (name, start, organizer_steam_id, match_options_id, status, min_role)
-       VALUES ($1, now() + interval '1 day', $2, $3, 'Setup', NULL) RETURNING id`,
+          (name, start, organizer_steam_id, match_options_id, status, min_role, registration_version)
+       VALUES ($1, now() + interval '1 day', $2, $3, 'Setup', NULL, 1) RETURNING id`,
       [fx.nextName("solo"), organizer, options.id],
     );
     await postgres.query(

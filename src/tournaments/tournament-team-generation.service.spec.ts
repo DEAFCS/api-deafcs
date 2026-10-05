@@ -57,6 +57,7 @@ const makeService = (signups: Array<Signup>, maxTeams: number | null) => {
 
   const client = {
     query: jest.fn(async (sql: string, params: Array<any> = []) => {
+      if (sql.includes("SELECT registration_version")) return [{ registration_version: 1 }];
       if (sql.includes("COUNT(*)")) {
         return { rows: [{ count: existingTeams }] };
       }
@@ -85,6 +86,7 @@ const makeService = (signups: Array<Signup>, maxTeams: number | null) => {
 
   const postgres = {
     query: jest.fn(async (sql: string) => {
+      if (/SELECT registration_version/.test(sql)) return [{ registration_version: 1 }];
       if (sql.includes("COUNT(*)")) {
         return [{ count: existingTeams }];
       }

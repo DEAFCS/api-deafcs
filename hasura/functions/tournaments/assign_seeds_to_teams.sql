@@ -10,12 +10,18 @@ BEGIN
     SET eligible_at = CASE
             WHEN (SELECT COUNT(*) FROM tournament_team_roster ttr
                   WHERE ttr.tournament_team_id = tt.id) >= min_players
+                 AND (tournament.registration_version = 1
+                      OR NOT public.tournament_check_in_window_opened(tournament)
+                      OR public.tournament_team_checked_in(tt))
             THEN COALESCE(tt.eligible_at, NOW())
             ELSE NULL
         END,
         seed = CASE
             WHEN (SELECT COUNT(*) FROM tournament_team_roster ttr
                   WHERE ttr.tournament_team_id = tt.id) >= min_players
+                 AND (tournament.registration_version = 1
+                      OR NOT public.tournament_check_in_window_opened(tournament)
+                      OR public.tournament_team_checked_in(tt))
             THEN tt.seed
             ELSE NULL
         END

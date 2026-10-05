@@ -12,6 +12,7 @@ import { AwardsService } from "../awards/awards.service";
 import { tournaments_set_input, e_notification_types_enum } from "../../generated";
 import { NotificationsService } from "../notifications/notifications.service";
 import { TournamentTeamGenerationService } from "./tournament-team-generation.service";
+import { TournamentRegistrationController } from "./tournament-registration.controller";
 import { TermsService } from "../terms/terms.service";
 
 // These tables are newer than the generated GraphQL types; event payloads are
@@ -40,6 +41,7 @@ export class TournamentsController {
     private readonly notifications: NotificationsService,
     private readonly teamGeneration: TournamentTeamGenerationService,
     private readonly terms: TermsService,
+    private readonly registration: TournamentRegistrationController,
   ) {}
 
   @HasuraEvent()
@@ -422,6 +424,7 @@ export class TournamentsController {
     tournament_id: string;
   }) {
     const { tournament_id } = data;
+    await this.requireHistoricalRegistration(tournament_id);
 
     await this.terms.assertAccepted(data.user.steam_id);
 
@@ -548,6 +551,7 @@ export class TournamentsController {
     tournament_id: string;
   }) {
     const { tournament_id } = data;
+    await this.requireHistoricalRegistration(tournament_id);
 
     const { tournaments_by_pk: tournament } = await this.hasura.query(
       {
@@ -591,7 +595,12 @@ export class TournamentsController {
   }
 
   @HasuraAction()
-  public async checkIntoTournament(data: { user: User; tournament_id: string }) {
+  public async checkIntoTournament(data: { user: User; tournament_id: string; tournament_team_id?: string }) {
+    const [engine] = await this.postgres.query<Array<{ registration_version: number }>>("SELECT registration_version FROM tournaments WHERE id = $1::uuid", [data.tournament_id]);
+    if (engine?.registration_version === 2) {
+      await this.terms.assertAccepted(data.user.steam_id);
+      return this.registration.checkIntoTournament(data);
+    }
     const { tournament_id } = data;
 
     await this.terms.assertAccepted(data.user.steam_id);
@@ -672,6 +681,7 @@ export class TournamentsController {
     player_steam_id: string;
   }) {
     const { tournament_id } = data;
+    await this.requireHistoricalRegistration(tournament_id);
     const playerSteamId = String(data.player_steam_id ?? "").trim();
 
     if (!/^\d+$/.test(playerSteamId)) {
@@ -783,6 +793,7 @@ export class TournamentsController {
     player_steam_id: string;
   }) {
     const { tournament_id } = data;
+    await this.requireHistoricalRegistration(tournament_id);
     const playerSteamId = String(data.player_steam_id ?? "").trim();
 
     await this.terms.assertAccepted(data.user.steam_id);
@@ -884,6 +895,7 @@ export class TournamentsController {
     player_steam_id: string;
   }) {
     const { tournament_id } = data;
+    await this.requireHistoricalRegistration(tournament_id);
     const playerSteamId = String(data.player_steam_id ?? "").trim();
 
     if (!/^\d+$/.test(playerSteamId)) {
@@ -982,6 +994,13 @@ export class TournamentsController {
     tournament_team_id: string;
   }) {
     const { tournament_team_id } = data;
+    const [engine] = await this.postgres.query<Array<{ tournament_id: string; registration_version: number }>>(
+      "SELECT tt.tournament_id, t.registration_version FROM tournament_teams tt JOIN tournaments t ON t.id = tt.tournament_id WHERE tt.id = $1::uuid", [tournament_team_id],
+    );
+    if (engine?.registration_version === 2) {
+      await this.terms.assertAccepted(data.user.steam_id);
+      return this.registration.checkIntoTournament({ ...data, tournament_id: engine.tournament_id });
+    }
 
     await this.terms.assertAccepted(data.user.steam_id);
 
@@ -1183,5 +1202,9 @@ export class TournamentsController {
         );
       }
     }
+  }
+  private async requireHistoricalRegistration(tournamentId: string) {
+    const [row] = await this.postgres.query<Array<{ registration_version: number }>>("SELECT registration_version FROM tournaments WHERE id = $1::uuid", [tournamentId]);
+    if (row?.registration_version !== 1) throw Error("This tournament uses Free Agent registration");
   }
 }

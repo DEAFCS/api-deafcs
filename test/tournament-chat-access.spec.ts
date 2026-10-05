@@ -74,8 +74,8 @@ describe("tournament chat participant access", () => {
     const optionsId = await fx.matchOptions({ type: "Competitive" });
     const [tournament] = await postgres.query<Array<{ id: string }>>(
       `INSERT INTO tournaments
-         (name, start, organizer_steam_id, match_options_id, status, min_role)
-       VALUES ($1, now() + interval '1 day', $2, $3, $4, NULL)
+         (name, start, organizer_steam_id, match_options_id, status, min_role, registration_version)
+       VALUES ($1, now() + interval '1 day', $2, $3, $4, NULL, 1)
        RETURNING id`,
       [fx.nextName("chat-cup"), organizer, optionsId, status],
     );

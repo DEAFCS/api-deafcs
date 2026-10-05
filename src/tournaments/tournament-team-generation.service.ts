@@ -97,6 +97,10 @@ export class TournamentTeamGenerationService {
     tournamentId: string,
     teamSize: number,
   ): Promise<{ teamsCreated: number; waitlisted: number }> {
+    const [engine] = await this.postgres.query<Array<{ registration_version: number }>>(
+      "SELECT registration_version FROM tournaments WHERE id = $1::uuid", [tournamentId],
+    );
+    if (engine?.registration_version !== 1) throw new Error("New tournaments use the Free Agent draft");
     const existingTeams = await this.postgres.query<Array<{ count: string }>>(
       `SELECT COUNT(*)::int AS count FROM public.tournament_teams WHERE tournament_id = $1`,
       [tournamentId],

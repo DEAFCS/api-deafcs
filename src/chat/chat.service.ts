@@ -905,6 +905,10 @@ export class ChatService {
     id: string,
     steamId: string,
   ): Promise<boolean> {
+    const freeAgents = await this.postgres.query<Array<{ id: string }>>(
+      "SELECT id FROM tournament_free_agents WHERE tournament_id = $1::uuid AND player_steam_id = $2::bigint AND status IN ('registered', 'waitlisted', 'drafted')",
+      [id, steamId],
+    );
     const { tournaments } = await this.hasuraService.query(
       {
         tournaments: {
@@ -912,6 +916,7 @@ export class ChatService {
             where: {
               id: { _eq: id },
               _or: [
+                ...(freeAgents.length ? [{ id: { _eq: id } }] : []),
                 { is_organizer: { _eq: true } },
                 {
                   teams: {
@@ -3351,7 +3356,11 @@ export class ChatService {
           },
         });
 
-        const ids = new Set<string>();
+        const freeAgents = await this.postgres.query<Array<{ player_steam_id: string }>>(
+          "SELECT player_steam_id FROM tournament_free_agents WHERE tournament_id = $1::uuid AND status IN ('registered', 'waitlisted', 'drafted')",
+          [id],
+        );
+        const ids = new Set<string>(freeAgents.map((agent) => String(agent.player_steam_id)));
         for (const roster of tournament_team_roster ?? []) {
           ids.add(String(roster.player_steam_id));
         }

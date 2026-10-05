@@ -33,6 +33,8 @@ export class TournamentFixtures {
   async createTournament(
     stages: Array<StageSpec>,
     matchType = "Wingman",
+    registrationVersion = 1,
+    randomPreset = false,
   ): Promise<{
     id: string;
     organizer: string;
@@ -40,10 +42,10 @@ export class TournamentFixtures {
   }> {
     const organizer = await this.fx.player();
     const [options] = await this.postgres.query<Array<{ id: string }>>(
-      `INSERT INTO match_options (mr, best_of, type, map_pool_id, map_veto, region_veto, regions)
-       SELECT 8, 1, $1, id, false, true, '{TestA}'
+      `INSERT INTO match_options (mr, best_of, type, map_pool_id, map_veto, region_veto, regions, individual_registration_enabled)
+       SELECT 8, 1, $1, id, false, true, '{TestA}', $2
        FROM map_pools WHERE type = $1 AND seed = true RETURNING id`,
-      [matchType],
+      [matchType, randomPreset],
     );
     // The rest of this fixture (and most of the existing suite) predates
     // awards_enabled defaulting to false for new tournaments -- keep the
@@ -65,9 +67,9 @@ export class TournamentFixtures {
     // per-test via direct UPDATEs, so this doesn't affect them.
     const [tournament] = await this.postgres.query<Array<{ id: string }>>(
       `INSERT INTO tournaments
-          (name, start, organizer_steam_id, match_options_id, status, awards_enabled, trophies_enabled, min_role)
-       VALUES ($1, now() + interval '1 day', $2, $3, 'Setup', true, true, NULL) RETURNING id`,
-      [this.fx.nextName("cup"), organizer, options.id],
+          (name, start, organizer_steam_id, match_options_id, status, awards_enabled, trophies_enabled, min_role, registration_version)
+       VALUES ($1, now() + interval '1 day', $2, $3, 'Setup', true, true, NULL, $4) RETURNING id`,
+      [this.fx.nextName("cup"), organizer, options.id, registrationVersion],
     );
     const stageIds: Array<string> = [];
     for (const stage of stages) {

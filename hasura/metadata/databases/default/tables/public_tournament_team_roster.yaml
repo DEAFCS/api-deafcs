@@ -20,6 +20,11 @@ computed_fields:
       function:
         name: tournament_team_roster_target_meets_min_role
         schema: public
+  - name: target_eligible
+    definition:
+      function:
+        name: tournament_team_roster_target_eligible
+        schema: public
 insert_permissions:
   - role: tournament_organizer
     permission:
@@ -146,8 +151,11 @@ select_permissions:
         - tournament_id
         - tournament_team_id
         - roster_image_url_snapshot
+        - checked_in_at
       filter: {}
       allow_aggregations: true
+      computed_fields:
+        - target_eligible
     comment: ""
 update_permissions:
   - role: tournament_organizer

@@ -89,6 +89,12 @@ describe("TournamentsController.deleteTournament", () => {
       {} as any, // teamGeneration
       { assertAccepted: jest.fn() } as any, // terms
     );
+    (controller as any).postgres = {
+      ...postgres,
+      query: async (sql: string, ...args: any[]) => sql.includes("registration_version")
+        ? [{ registration_version: 1, tournament_id: "tid" }]
+        : (postgres as any).query(sql, ...args),
+    };
   });
 
   const queueAuthQueries = () => {
@@ -399,6 +405,12 @@ describe("TournamentsController.checkInTournamentTeam", () => {
       {} as any, // teamGeneration
       terms as any,
     );
+    (controller as any).postgres = {
+      ...postgres,
+      query: async (sql: string, ...args: any[]) => sql.includes("registration_version")
+        ? [{ registration_version: 1, tournament_id: "tid" }]
+        : (postgres as any).query(sql, ...args),
+    };
   });
 
   const team = (overrides: Record<string, unknown> = {}) => ({
@@ -639,6 +651,12 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
       {} as any, // teamGeneration
       { assertAccepted: jest.fn() } as any, // terms
     );
+    (controller as any).postgres = {
+      ...postgres,
+      query: async (sql: string, ...args: any[]) => sql.includes("registration_version")
+        ? [{ registration_version: 1, tournament_id: "tid" }]
+        : (postgres as any).query(sql, ...args),
+    };
   });
 
   it("detaches and deletes cancelled-tournament match rows atomically, then purges S3, without calling delete_matches_by_pk", async () => {
@@ -709,6 +727,12 @@ describe("TournamentsController.checkIntoTournament", () => {
       {} as any, // teamGeneration
       { assertAccepted: jest.fn().mockResolvedValue(undefined) } as any,
     );
+    (controller as any).postgres = {
+      ...postgres,
+      query: async (sql: string, ...args: any[]) => sql.includes("registration_version")
+        ? [{ registration_version: 1, tournament_id: "tid" }]
+        : (postgres as any).query(sql, ...args),
+    };
   });
 
   const tournament = (status: string, endsAt: string | null = futureWindow) =>

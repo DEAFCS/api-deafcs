@@ -1,3 +1,5 @@
+import { TournamentRegistrationController } from "./tournament-registration.controller";
+import { RedisModule } from "../redis/redis.module";
 import { Module } from "@nestjs/common";
 import { TournamentsController } from "./tournaments.controller";
 import { HasuraModule } from "../hasura/hasura.module";
@@ -19,11 +21,12 @@ import { TermsModule } from "../terms/terms.module";
     DiscordTournamentVoiceModule,
     PostgresModule,
     TermsModule,
+    RedisModule,
     AwardsModule,
     NotificationsModule,
     TournamentTeamGenerationModule,
   ],
-  controllers: [TournamentsController],
+  controllers: [TournamentsController, TournamentRegistrationController],
   providers: [loggerFactory()],
 })
 export class TournamentsModule {}

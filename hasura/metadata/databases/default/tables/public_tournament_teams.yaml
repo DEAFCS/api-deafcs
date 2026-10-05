@@ -45,6 +45,11 @@ computed_fields:
         name: can_manage_tournament_team
         schema: public
       session_argument: hasura_session
+  - name: checked_in
+    definition:
+      function:
+        name: tournament_team_checked_in
+        schema: public
 insert_permissions:
   - role: tournament_organizer
     permission:
@@ -130,8 +135,10 @@ select_permissions:
         - short_name
         - team_id
         - tournament_id
+        - is_drafted
       computed_fields:
         - can_manage
+        - checked_in
       filter: {}
       allow_aggregations: true
     comment: ""

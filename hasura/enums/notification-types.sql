@@ -31,3 +31,11 @@ INSERT INTO e_notification_types ("value", "description") VALUES
     ('PlayerWarning', 'You got a warning from admin')
 ON CONFLICT("value") DO UPDATE
     SET "description" = EXCLUDED."description";
+
+INSERT INTO e_notification_types (value, description) VALUES
+('TournamentCheckInOpen','Tournament check-in is open'),
+('TournamentCheckInClosing','Tournament check-in is closing'),
+('TournamentCheckInMissed','Tournament check-in requires review'),
+('TournamentPartySignup','Your lobby joined a tournament'),
+('TournamentInvite','You received a tournament registration invite')
+ON CONFLICT(value) DO NOTHING;

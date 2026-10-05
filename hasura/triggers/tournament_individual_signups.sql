@@ -12,6 +12,9 @@ DECLARE
     _registered_count int;
     _check_in_ends_at timestamptz;
 BEGIN
+    IF EXISTS (SELECT 1 FROM public.tournaments WHERE id = NEW.tournament_id AND registration_version = 2) THEN
+        RAISE EXCEPTION 'New individual tournaments use Free Agent registration';
+    END IF;
     IF NEW.status IS NULL OR NEW.status = 'Registered' THEN
         SELECT ts.max_teams * public.tournament_min_players_per_lineup(t)
         INTO _cap

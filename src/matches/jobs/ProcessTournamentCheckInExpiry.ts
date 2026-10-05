@@ -57,7 +57,7 @@ export class ProcessTournamentCheckInExpiry extends WorkerHost {
       `SELECT t.id, t.individual_check_in_duration_minutes
        FROM public.tournaments t
        JOIN public.match_options mo ON mo.id = t.match_options_id
-       WHERE t.individual_check_in_ends_at IS NOT NULL
+       WHERE t.registration_version = 1 AND t.individual_check_in_ends_at IS NOT NULL
        AND t.individual_check_in_ends_at <= now()
        AND mo.individual_registration_enabled = true
        AND t.status = 'RegistrationClosed'`,

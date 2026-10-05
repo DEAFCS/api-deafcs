@@ -11,6 +11,26 @@ BEGIN
     FROM tournaments
     WHERE id = NEW.tournament_id;
 
+    IF tournament.registration_version = 2 THEN
+        PERFORM pg_advisory_xact_lock(hashtext('deafcs.tournament_registration'), hashtext(NEW.tournament_id::text));
+        IF NOT NEW.is_drafted AND tournament.registration_type = 'free_agents' THEN
+            RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'This tournament only accepts Free Agents';
+        END IF;
+        IF NEW.is_drafted AND current_setting('fivestack.free_agent_draft', true) IS DISTINCT FROM 'true' THEN
+            RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Only the system draft can create drafted teams';
+        END IF;
+        IF NOT NEW.is_drafted AND tournament.invite_only
+           AND nullif(current_setting('hasura.user', true), '')::json ->> 'x-hasura-role' IS NOT NULL
+           AND NOT public.is_tournament_organizer(tournament, nullif(current_setting('hasura.user', true), '')::json)
+           AND NOT public.tournament_registration_unlocked(NEW.tournament_id,
+               nullif(current_setting('hasura.user', true)::jsonb ->> 'x-hasura-user-id', '')::bigint, NEW.team_id) THEN
+            RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'This tournament is invite only';
+        END IF;
+        IF NEW.checked_in_at IS NULL AND public.tournament_check_in_open(tournament) THEN
+            NEW.checked_in_at := now();
+        END IF;
+    END IF;
+
     -- Registering while tournament attendance check-in is already open
     -- counts as automatically present -- mirrors
     -- tbi_tournament_individual_signups' late-signup auto-check-in, same

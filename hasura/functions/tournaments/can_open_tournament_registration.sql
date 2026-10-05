@@ -8,7 +8,7 @@ AS $$
 DECLARE
     has_stages boolean;
 BEGIN
-    IF tournament.status != 'Setup' AND tournament.status != 'RegistrationClosed' AND tournament.status != 'Cancelled' AND tournament.status != 'CancelledMinTeams' THEN
+    IF tournament.status != 'CheckInReview' AND tournament.status != 'Setup' AND tournament.status != 'RegistrationClosed' AND tournament.status != 'Cancelled' AND tournament.status != 'CancelledMinTeams' THEN
         RETURN false;
     END IF;
 
@@ -29,7 +29,7 @@ BEGIN
     IF NOT has_stages THEN
         RETURN false;
     END IF;
-    
+
     RETURN public.is_tournament_organizer(tournament, hasura_session);
 END;
 $$;

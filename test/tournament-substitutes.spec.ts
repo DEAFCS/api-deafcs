@@ -58,10 +58,10 @@ describe("tournament substitutes (SQL-driven)", () => {
     // min_role NULL: fixture players are plain users (see tournament-fixtures).
     const [tournament] = await postgres.query<Array<{ id: string }>>(
       substitutesEnabled === undefined
-        ? `INSERT INTO tournaments (name, start, organizer_steam_id, match_options_id, status, min_role)
-           VALUES ($1, now() + interval '1 day', $2, $3, 'Setup', NULL) RETURNING id`
-        : `INSERT INTO tournaments (name, start, organizer_steam_id, match_options_id, status, min_role, substitutes_enabled)
-           VALUES ($1, now() + interval '1 day', $2, $3, 'Setup', NULL, $4) RETURNING id`,
+        ? `INSERT INTO tournaments (name, start, organizer_steam_id, match_options_id, status, min_role, registration_version)
+           VALUES ($1, now() + interval '1 day', $2, $3, 'Setup', NULL, 1) RETURNING id`
+        : `INSERT INTO tournaments (name, start, organizer_steam_id, match_options_id, status, min_role, substitutes_enabled, registration_version)
+           VALUES ($1, now() + interval '1 day', $2, $3, 'Setup', NULL, $4, 1) RETURNING id`,
       substitutesEnabled === undefined
         ? [fx.nextName("cup"), organizer, options.id]
         : [fx.nextName("cup"), organizer, options.id, substitutesEnabled],
