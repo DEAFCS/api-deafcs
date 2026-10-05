@@ -1,3 +1,4 @@
+import { TournamentRegistrationService } from "./tournament-registration.service";
 import { TournamentRegistrationController } from "./tournament-registration.controller";
 import { RedisModule } from "../redis/redis.module";
 import { Module } from "@nestjs/common";
@@ -27,6 +28,6 @@ import { TermsModule } from "../terms/terms.module";
     TournamentTeamGenerationModule,
   ],
   controllers: [TournamentsController, TournamentRegistrationController],
-  providers: [loggerFactory()],
+  providers: [loggerFactory(), TournamentRegistrationService],
 })
 export class TournamentsModule {}

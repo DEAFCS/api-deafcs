@@ -12,7 +12,7 @@ import { AwardsService } from "../awards/awards.service";
 import { tournaments_set_input, e_notification_types_enum } from "../../generated";
 import { NotificationsService } from "../notifications/notifications.service";
 import { TournamentTeamGenerationService } from "./tournament-team-generation.service";
-import { TournamentRegistrationController } from "./tournament-registration.controller";
+import { TournamentRegistrationService } from "./tournament-registration.service";
 import { TermsService } from "../terms/terms.service";
 
 // These tables are newer than the generated GraphQL types; event payloads are
@@ -41,7 +41,7 @@ export class TournamentsController {
     private readonly notifications: NotificationsService,
     private readonly teamGeneration: TournamentTeamGenerationService,
     private readonly terms: TermsService,
-    private readonly registration: TournamentRegistrationController,
+    private readonly registration: TournamentRegistrationService,
   ) {}
 
   @HasuraEvent()

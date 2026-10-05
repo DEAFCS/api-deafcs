@@ -1,3 +1,4 @@
+import { TournamentRegistrationService } from "../src/tournaments/tournament-registration.service";
 import { TournamentRegistrationController } from "../src/tournaments/tournament-registration.controller";
 import { ProcessTournamentCheckIn } from "../src/matches/jobs/ProcessTournamentCheckIn";
 import { InvitesController } from "../src/invites/invites.controller";
@@ -147,10 +148,11 @@ describe("unified tournament registration (DEAFCS)", () => {
     expect(v.registration_version).toBe(1);
   });
 
+  function registrationService() { return new TournamentRegistrationService(postgres); }
   function registration() {
     return new TournamentRegistrationController({ log: jest.fn() } as any, postgres,
       { notifyPlayers: jest.fn() } as any, {getConnection:()=>({eval:jest.fn().mockResolvedValue(1)})} as any,
-      {assertAccepted:jest.fn()} as any);
+      {assertAccepted:jest.fn()} as any, registrationService());
   }
   function user(steam_id: string, role = 'user') { return {steam_id, role, name:'Fixture'} as any; }
   async function openWindow(id: string, mode = 'Captains') {
@@ -159,7 +161,7 @@ describe("unified tournament registration (DEAFCS)", () => {
   }
   it.each(['Captains','Players','Admin'])('undrafted Free Agents check themselves in under %s', async mode => {
     const t=await cup(); const p=await fx.player(); await signup(t.id,p); await openWindow(t.id,mode);
-    expect(await registration().checkIntoTournament({tournament_id:t.id,user:user(p)})).toEqual({success:true});
+    expect(await registrationService().checkIntoTournament({tournament_id:t.id,user:user(p)})).toEqual({success:true});
     const [r]=await postgres.query<Array<{confirmed:boolean}>>("SELECT checked_in_at IS NOT NULL AS confirmed FROM tournament_free_agents WHERE tournament_id=$1 AND player_steam_id=$2",[t.id,p]);
     expect(r.confirmed).toBe(true);
     await expect(postgres.query("UPDATE tournaments SET start=start + interval '1 hour' WHERE id=$1",[t.id])).rejects.toThrow(/check-in/);
@@ -206,7 +208,7 @@ describe("unified tournament registration (DEAFCS)", () => {
     const members=await postgres.query<Array<{steam:string}>>("SELECT player_steam_id::text AS steam FROM tournament_team_roster WHERE tournament_team_id=$1 ORDER BY role",[tt.id]);
     await postgres.query('UPDATE match_options SET number_of_substitutes=1 WHERE id=(SELECT match_options_id FROM tournaments WHERE id=$1)',[t.id]);
     const sub=await fx.player();await runAsUser(postgres,t.organizer,'admin',q=>q("INSERT INTO tournament_team_roster(tournament_id,tournament_team_id,player_steam_id) VALUES($1,$2,$3)",[t.id,tt.id,sub]));
-    const c=registration();for(const p of members)await c.checkIntoTournament({tournament_id:t.id,tournament_team_id:tt.id,user:user(p.steam)});
+    const c=registrationService();for(const p of members)await c.checkIntoTournament({tournament_id:t.id,tournament_team_id:tt.id,user:user(p.steam)});
     const [r]=await postgres.query<Array<{checked:boolean}>>("SELECT tournament_team_checked_in(tt) AS checked FROM tournament_teams tt WHERE id=$1",[tt.id]);expect(r.checked).toBe(true);
   });
   it('missing teams hold for review, organizer can extend and recipients can confirm',async()=>{
