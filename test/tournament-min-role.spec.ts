@@ -44,6 +44,10 @@ describe("meets_min_role (SQL-driven)", () => {
     role: string,
     steamId = "76561199961000001",
   ) => {
+    if (role !== "guest" && role !== "not-a-real-role") {
+      steamId = await fx.player();
+      await postgres.query("UPDATE players SET role=$1 WHERE steam_id=$2", [role, steamId]);
+    }
     const [row] = await postgres.query<Array<{ allowed: boolean | null }>>(
       "SELECT meets_min_role(t, $2::json) AS allowed FROM tournaments t WHERE id = $1",
       [tournamentId, session(steamId, role)],
@@ -121,6 +125,20 @@ describe("meets_min_role (SQL-driven)", () => {
     expect(await meetsMinRole(t.id, "match_organizer")).toBe(true);
     expect(await meetsMinRole(t.id, "tournament_organizer")).toBe(true);
     expect(await meetsMinRole(t.id, "administrator")).toBe(true);
+  });
+
+  it("denies a downgraded User despite a stale Verified User session", async () => {
+    const t = await tournaments.createTournament([]);
+    await setMinRole(t.id, "verified_user");
+    const player = await fx.player();
+    await postgres.query("UPDATE players SET role='verified_user' WHERE steam_id=$1", [player]);
+    const verdict = async () => (await postgres.query<Array<{allowed:boolean}>>(
+      "SELECT meets_min_role(t,$2::json) AS allowed FROM tournaments t WHERE id=$1",
+      [t.id,session(player,"verified_user")],
+    ))[0].allowed;
+    expect(await verdict()).toBe(true);
+    await postgres.query("UPDATE players SET role='user' WHERE steam_id=$1", [player]);
+    expect(await verdict()).toBe(false);
   });
 
   it("guests are denied whenever a minimum role is configured", async () => {

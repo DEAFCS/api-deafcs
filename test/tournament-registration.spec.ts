@@ -1,3 +1,4 @@
+import { TournamentsController } from "../src/tournaments/tournaments.controller";
 import { TournamentRegistrationService } from "../src/tournaments/tournament-registration.service";
 import { TournamentRegistrationController } from "../src/tournaments/tournament-registration.controller";
 import { ProcessTournamentCheckIn } from "../src/matches/jobs/ProcessTournamentCheckIn";
@@ -198,9 +199,112 @@ describe("unified tournament registration (DEAFCS)", () => {
     const [promoted]=await postgres.query<Array<{status:string;team:string}>>("SELECT status,tournament_team_id AS team FROM tournament_free_agents WHERE tournament_id=$1 AND player_steam_id=$2",[t.id,ps[4]]);expect(promoted).toMatchObject({status:'drafted',team:team.id});
     const waiting=await postgres.query<Array<{status:string}>>("SELECT status FROM tournament_free_agents WHERE tournament_id=$1 AND party_id=$2",[t.id,party]);expect(waiting.map(r=>r.status)).toEqual(['waitlisted','waitlisted']);
   });
+  it('never auto-fills a premade after a member leaves, including promotion and close-time draft retries',async()=>{
+    const t=await cup('Competitive','both');
+    await cups.registerTeam(t.id,await fx.team(4));
+    const [premade]=await postgres.query<Array<{id:string}>>('SELECT id FROM tournament_teams WHERE tournament_id=$1 AND NOT is_drafted',[t.id]);
+    await openWindow(t.id);
+    for(const p of await fx.players(6)) await signup(t.id,p);
+    expect(await draft(t.id)).toBe(1);
+    const [waiting]=await postgres.query<Array<{checked:boolean}>>("SELECT checked_in_at IS NOT NULL AS checked FROM tournament_free_agents WHERE tournament_id=$1 AND status='waitlisted'",[t.id]);
+    expect(waiting.checked).toBe(true);
+    const [member]=await postgres.query<Array<{steam:string}>>("SELECT player_steam_id::text AS steam FROM tournament_team_roster WHERE tournament_team_id=$1 AND role='Member' LIMIT 1",[premade.id]);
+    await postgres.query('DELETE FROM tournament_team_roster WHERE tournament_team_id=$1 AND player_steam_id=$2',[premade.id,member.steam]);
+    async function expectUnfilled(){
+      const [state]=await postgres.query<Array<{size:string,assigned:string,inserted:string}>>('SELECT (SELECT count(*)::text FROM tournament_team_roster WHERE tournament_team_id=$1) AS size,(SELECT count(*)::text FROM tournament_free_agents WHERE tournament_team_id=$1) AS assigned,(SELECT count(*)::text FROM tournament_team_roster r JOIN tournament_free_agents fa ON fa.tournament_id=r.tournament_id AND fa.player_steam_id=r.player_steam_id WHERE r.tournament_team_id=$1) AS inserted',[premade.id]);
+      expect(state).toEqual({size:'4',assigned:'0',inserted:'0'});
+    }
+    await expectUnfilled(); // Covers the real AFTER DELETE automatic promotion.
+    for(const closed of [false,true]){
+      if(closed) await postgres.query("UPDATE tournaments SET check_in_ends_at=now()-interval '1 second' WHERE id=$1",[t.id]);
+      const [promoted]=await postgres.query<Array<{players:string[]|null}>>('SELECT promote_tournament_free_agent($1,$2) AS players',[t.id,premade.id]);
+      expect(promoted.players).toBeNull();
+      expect(await draft(t.id)).toBe(0);
+      await expectUnfilled();
+    }
+  });
+  it.each([false,true])('generated Competitive teams still draft and promote checked-in agents (Random v2: %s)',async random=>{
+    const t=random
+      ? await cups.createTournament([{type:'SingleElimination',order:1,minTeams:4,maxTeams:4}],'Competitive',2,true)
+      : await cup('Competitive','free_agents');
+    if(random) await cups.setStatus(t.id,t.organizer,'RegistrationOpen');
+    await openWindow(t.id,'Players');
+    for(const p of await fx.players(6)) await signup(t.id,p);
+    expect(await draft(t.id)).toBe(1);
+    const [team]=await postgres.query<Array<{id:string}>>('SELECT id FROM tournament_teams WHERE tournament_id=$1 AND is_drafted',[t.id]);
+    const [waiting]=await postgres.query<Array<{steam:string}>>("SELECT player_steam_id::text AS steam FROM tournament_free_agents WHERE tournament_id=$1 AND status='waitlisted'",[t.id]);
+    const [member]=await postgres.query<Array<{steam:string}>>("SELECT player_steam_id::text AS steam FROM tournament_team_roster WHERE tournament_team_id=$1 AND role='Member' LIMIT 1",[team.id]);
+    await postgres.query('DELETE FROM tournament_team_roster WHERE tournament_team_id=$1 AND player_steam_id=$2',[team.id,member.steam]);
+    const [promoted]=await postgres.query<Array<{status:string,team:string,checked:boolean}>>('SELECT status,tournament_team_id AS team,checked_in_at IS NOT NULL AS checked FROM tournament_free_agents WHERE tournament_id=$1 AND player_steam_id=$2',[t.id,waiting.steam]);
+    expect(promoted).toEqual({status:'drafted',team:team.id,checked:true});
+    const [state]=await postgres.query<Array<{size:string,checked:boolean}>>('SELECT (SELECT count(*)::text FROM tournament_team_roster WHERE tournament_team_id=tt.id) AS size,tournament_team_checked_in(tt) AS checked FROM tournament_teams tt WHERE tt.id=$1',[team.id]);
+    expect(state).toEqual({size:'5',checked:true});
+    expect(await draft(t.id)).toBe(0);
+  });
   it('concurrent drafts produce each roster once',async()=>{
     const t=await cup();for(const p of await fx.players(8))await signup(t.id,p);
     const results=await Promise.all([draft(t.id),draft(t.id)]);expect(results.sort()).toEqual([0,4]);expect(await roster(t.id)).toHaveLength(4);
+  });
+
+  it.each([4,5,6,7])('legacy Competitive captain check-in uses the minimum eligible lineup: %i players', async count => {
+    const t=await cups.createTournament([{type:'SingleElimination',order:1,minTeams:4,maxTeams:4}], 'Competitive');
+    await postgres.query('UPDATE match_options SET number_of_substitutes=2 WHERE id=(SELECT match_options_id FROM tournaments WHERE id=$1)',[t.id]);
+    await cups.setStatus(t.id,t.organizer,'RegistrationOpen');
+    await cups.registerTeam(t.id,await fx.team(count-1));
+    const [tt]=await postgres.query<Array<{id:string}>>('SELECT id FROM tournament_teams WHERE tournament_id=$1',[t.id]);
+    await postgres.query("UPDATE tournaments SET individual_check_in_ends_at=now()+interval '10 minutes' WHERE id=$1",[t.id]);
+    const controller=new TournamentsController({log:jest.fn()} as any, {query:async()=>{
+      const [team]=await postgres.query("SELECT tt.*,json_build_object('individual_check_in_ends_at',t.individual_check_in_ends_at) AS tournament FROM tournament_teams tt JOIN tournaments t ON t.id=tt.tournament_id WHERE tt.id=$1",[tt.id]);
+      return {tournament_teams_by_pk:team};
+    }} as any, {} as any, {} as any, {} as any, postgres, {} as any, {} as any, {} as any, {assertAccepted:jest.fn()} as any, registrationService());
+    const [captain]=await postgres.query<Array<{steam:string}>>('SELECT captain_steam_id::text AS steam FROM tournament_teams WHERE id=$1',[tt.id]);
+    const action=controller.checkInTournamentTeam({tournament_team_id:tt.id,user:user(captain.steam)});
+    if(count<5) await expect(action).rejects.toThrow(/minimum eligible lineup/);
+    else await expect(action).resolves.toEqual({success:true});
+    const [state]=await postgres.query<Array<{checked:boolean}>>('SELECT checked_in_at IS NOT NULL AS checked FROM tournament_teams WHERE id=$1',[tt.id]);
+    expect(state.checked).toBe(count>=5);
+  });
+
+  it('legacy five-player Competitive registration during check-in auto-confirms with two optional substitutes',async()=>{
+    const t=await cups.createTournament([{type:'SingleElimination',order:1,minTeams:4,maxTeams:4}],'Competitive');
+    await postgres.query('UPDATE match_options SET number_of_substitutes=2 WHERE id=(SELECT match_options_id FROM tournaments WHERE id=$1)',[t.id]);
+    await cups.setStatus(t.id,t.organizer,'RegistrationOpen');
+    await postgres.query("UPDATE tournaments SET individual_check_in_ends_at=now()+interval '10 minutes' WHERE id=$1",[t.id]);
+    await cups.registerTeam(t.id,await fx.team(4));
+    const [state]=await postgres.query<Array<{checked:boolean,filled:boolean,eligible:boolean}>>('SELECT checked_in_at IS NOT NULL AS checked,tournament_team_lineup_filled(tt) AS filled,eligible_at IS NOT NULL AS eligible FROM tournament_teams tt WHERE tournament_id=$1',[t.id]);
+    expect(state).toEqual({checked:true,filled:true,eligible:true});
+  });
+
+  it.each([4,5,6,7])('Competitive captain check-in with %i of 7 roster slots', async count => {
+    const t=await cup('Competitive','teams');
+    await postgres.query('UPDATE match_options SET number_of_substitutes=2 WHERE id=(SELECT match_options_id FROM tournaments WHERE id=$1)',[t.id]);
+    const team=await fx.team(count-1);
+    await cups.registerTeam(t.id,team);
+    await openWindow(t.id);
+    const [tt]=await postgres.query<Array<{id:string}>>('SELECT id FROM tournament_teams WHERE tournament_id=$1',[t.id]);
+    const action=registrationService().checkIntoTournament({tournament_id:t.id,tournament_team_id:tt.id,user:user(team.owner)});
+    if(count<5) await expect(action).rejects.toThrow(/minimum eligible lineup/);
+    else await expect(action).resolves.toEqual({success:true});
+    const [state]=await postgres.query<Array<{checked:boolean,filled:boolean}>>('SELECT checked_in_at IS NOT NULL AS checked,tournament_team_lineup_filled(tt) AS filled FROM tournament_teams tt WHERE id=$1',[tt.id]);
+    expect(state.checked).toBe(count>=5);
+    expect(state.filled).toBe(count>=5);
+  });
+  it('five-player Competitive registration during the window auto-confirms and is seedable',async()=>{
+    const t=await cup('Competitive','teams');
+    await postgres.query('UPDATE match_options SET number_of_substitutes=2 WHERE id=(SELECT match_options_id FROM tournaments WHERE id=$1)',[t.id]);
+    await openWindow(t.id);
+    await cups.registerTeam(t.id,await fx.team(4));
+    const [state]=await postgres.query<Array<{checked:boolean,filled:boolean,eligible:boolean}>>('SELECT checked_in_at IS NOT NULL AS checked,tournament_team_lineup_filled(tt) AS filled,eligible_at IS NOT NULL AS eligible FROM tournament_teams tt WHERE tournament_id=$1',[t.id]);
+    expect(state).toEqual({checked:true,filled:true,eligible:true});
+  });
+  it('does not silently fill a four-player premade with one checked-in Free Agent',async()=>{
+    const t=await cup('Competitive','both');
+    await cups.registerTeam(t.id,await fx.team(3));
+    await openWindow(t.id);
+    const player=await fx.player();await signup(t.id,player);
+    expect(await draft(t.id)).toBe(0);
+    const [state]=await postgres.query<Array<{players:string,assigned:boolean}>>('SELECT (SELECT count(*)::text FROM tournament_team_roster WHERE tournament_id=$1) AS players,(SELECT tournament_team_id IS NOT NULL FROM tournament_free_agents WHERE tournament_id=$1 AND player_steam_id=$2) AS assigned',[t.id,player]);
+    expect(state).toEqual({players:'4',assigned:false});
   });
   it('Players check-in needs the starting lineup, not inactive substitutes',async()=>{
     const t=await cup('Wingman','teams');const team=await fx.team(1);await cups.registerTeam(t.id,team);await openWindow(t.id,'Players');

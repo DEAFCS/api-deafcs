@@ -387,11 +387,13 @@ describe("TournamentsController.checkInTournamentTeam", () => {
   let hasura: { query: jest.Mock; mutation: jest.Mock };
   let postgres: { query: jest.Mock };
   let terms: { assertAccepted: jest.Mock };
+  let registration: { assertTeamLineupReady: jest.Mock };
 
   beforeEach(() => {
     hasura = { query: jest.fn(), mutation: jest.fn() };
     postgres = { query: jest.fn().mockResolvedValue({ rows: [] }) };
     terms = { assertAccepted: jest.fn().mockResolvedValue(undefined) };
+    registration = { assertTeamLineupReady: jest.fn().mockResolvedValue(undefined) };
 
     controller = new TournamentsController(
       { log: jest.fn(), error: jest.fn() } as any,
@@ -404,6 +406,7 @@ describe("TournamentsController.checkInTournamentTeam", () => {
       {} as any, // notifications
       {} as any, // teamGeneration
       terms as any,
+      registration as any,
     );
     (controller as any).postgres = {
       ...postgres,
@@ -421,6 +424,15 @@ describe("TournamentsController.checkInTournamentTeam", () => {
       individual_check_in_ends_at: futureWindow,
     },
     ...overrides,
+  });
+
+  it("rejects an incomplete eligible lineup before stamping legacy team attendance", async () => {
+    hasura.query.mockResolvedValueOnce({ tournament_teams_by_pk: team() });
+    registration.assertTeamLineupReady.mockRejectedValueOnce(new Error("team needs the minimum eligible lineup before check-in"));
+    await expect(controller.checkInTournamentTeam({ user, tournament_team_id: teamId }))
+      .rejects.toThrow(/minimum eligible lineup/);
+    expect(registration.assertTeamLineupReady).toHaveBeenCalledWith("tid", teamId);
+    expect(postgres.query).not.toHaveBeenCalled();
   });
 
   it("allows the team's captain_steam_id", async () => {

@@ -32,6 +32,10 @@ BEGIN
         RETURN false;
     END IF;
 
+    IF public.player_meets_min_role(tournament.id, _steam_id) IS NOT TRUE THEN
+        RETURN false;
+    END IF;
+
     IF tournament.registration_version = 2 THEN
         IF public.player_meets_tournament_requirements(tournament.id, _steam_id) IS NOT TRUE THEN RETURN false; END IF;
         IF tournament.invite_only AND NOT public.tournament_registration_unlocked_any(tournament.id, _steam_id) THEN RETURN false; END IF;

@@ -271,6 +271,18 @@ describe("tournaments.min_role registration enforcement (Hasura-driven)", () => 
       expect((rows as unknown[]).length).toBe(0);
     });
 
+    it("rechecks stored roles for the public verdict and Join after a downgrade", async () => {
+      const t = await openTournament("verified_user");
+      const player = await fx.player();
+      await setPlayerRole(player, "verified_user");
+      const read = () => gql(`query { tournaments_by_pk(id: "${t.id}") { meets_min_role can_join } }`, "verified_user", player);
+      expect((await read()).data?.tournaments_by_pk).toMatchObject({meets_min_role:true,can_join:true});
+      await setPlayerRole(player, "user");
+      const result = await read();
+      expect(result.errors).toBeUndefined();
+      expect(result.data?.tournaments_by_pk).toEqual({meets_min_role:false,can_join:false});
+    });
+
     it("allows at or above the minimum role", async () => {
       const t = await openTournament("verified_user");
       const team = await fx.team(0);
@@ -697,6 +709,7 @@ describe("tournaments.min_role registration enforcement (Hasura-driven)", () => 
     it("allows at or above the minimum role", async () => {
       const t = await openTournament("verified_user");
       const player = await fx.player();
+      await setPlayerRole(player, "verified_user");
 
       const result = await gql(
         `mutation {

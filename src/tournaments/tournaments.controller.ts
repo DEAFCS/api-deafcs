@@ -1067,6 +1067,8 @@ export class TournamentsController {
       throw Error("check-in is not currently open for this tournament");
     }
 
+    await this.registration.assertTeamLineupReady(team.tournament_id, tournament_team_id);
+
     await this.postgres.query(
       `UPDATE public.tournament_teams SET checked_in_at = now() WHERE id = $1`,
       [tournament_team_id],

@@ -1,16 +1,16 @@
--- Registration eligibility gate for tournaments.min_role. Delegates the
--- actual role-ordering comparison to the existing is_above_role() helper
--- (same ARRAY[...] ordering AuthStore.isRoleAbove/isRoleAbove.ts already
--- use) so there is a single source of truth for role order. NULL min_role
--- means unrestricted; is_above_role already fails closed (NULL/unmatched
--- roles, including guest, deny) since array_position() returns NULL for a
--- role it doesn't recognize and NULL >= x is NULL, which Hasura treats as
--- denied.
+-- Read the acting player's current stored role, not the cached session role.
+-- Role changes must agree with target-player roster admission immediately.
+-- Keep the existing DEAFCS hierarchy in is_above_role; missing players deny.
 CREATE OR REPLACE FUNCTION public.meets_min_role(tournament public.tournaments, hasura_session json)
 RETURNS boolean
 LANGUAGE sql
 STABLE
 AS $$
-    SELECT tournament.min_role IS NULL
-        OR public.is_above_role(tournament.min_role, hasura_session);
+    SELECT tournament.min_role IS NULL OR COALESCE(public.is_above_role(
+        tournament.min_role,
+        json_build_object('x-hasura-role', (
+            SELECT p.role FROM public.players p
+            WHERE p.steam_id::text = hasura_session ->> 'x-hasura-user-id'
+        ))
+    ), false);
 $$;

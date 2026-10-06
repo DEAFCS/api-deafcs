@@ -34,6 +34,25 @@ type CheckInTeam = {
 export class TournamentRegistrationService {
   constructor(private readonly postgres: PostgresService) {}
 
+  public async assertTeamLineupReady(tournamentId: string, teamId: string) {
+    // Substitutes are capacity, not required starters. Recheck stored-player
+    // eligibility so a cached session cannot confirm a downgraded lineup.
+    const [lineup] = await this.postgres.query<Array<{ ready: boolean }>>(
+      `SELECT count(*) FILTER (
+                WHERE public.player_meets_tournament_requirements(t.id, r.player_steam_id)
+              ) >= public.tournament_min_players_per_lineup(t) AS ready
+         FROM tournaments t
+         LEFT JOIN tournament_team_roster r
+           ON r.tournament_id = t.id AND r.tournament_team_id = $2::uuid
+        WHERE t.id = $1::uuid
+        GROUP BY t.id`,
+      [tournamentId, teamId],
+    );
+    if (!lineup?.ready) {
+      throw Error("team needs the minimum eligible lineup before check-in");
+    }
+  }
+
   private hasuraSession(user: User): string {
     return JSON.stringify({"x-hasura-role": user.role, "x-hasura-user-id": user.steam_id});
   }
@@ -124,6 +143,8 @@ export class TournamentRegistrationService {
 
       return { success: true };
     }
+
+    await this.assertTeamLineupReady(tournament_id, team.id);
 
     switch (tournament.check_in_setting) {
       case "Admin": {

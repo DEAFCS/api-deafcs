@@ -66,9 +66,12 @@ BEGIN
     -- The team may already be gone: deleting a tournament_teams row cascades
     -- into its roster, and the parent is removed before the children, so this
     -- runs with no slot left to fill.
+    -- DEAFCS: only FA-generated teams may receive automatic replacements.
+    -- A premade vacancy must stay open for explicit captain/admin recruitment.
     IF NOT EXISTS (
         SELECT 1 FROM public.tournament_teams tt
         WHERE tt.id = _tournament_team_id AND tt.tournament_id = _tournament_id
+          AND tt.is_drafted
     ) THEN
         RETURN NULL;
     END IF;
