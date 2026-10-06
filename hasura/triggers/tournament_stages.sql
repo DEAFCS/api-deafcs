@@ -283,7 +283,23 @@ CREATE TRIGGER tbu_tournament_stages BEFORE UPDATE ON public.tournament_stages F
 CREATE OR REPLACE FUNCTION public.tbd_tournament_stages() RETURNS TRIGGER
     LANGUAGE plpgsql
     AS $$
+DECLARE
+    parent_status text;
 BEGIN
+    -- A direct stage delete must never erase a published/historical bracket.
+    -- tbd_tournaments deletes its stages before removing the parent row.
+    -- Preserve that nested, authorized whole-tournament cleanup path.
+    SELECT status INTO parent_status FROM tournaments WHERE id = OLD.tournament_id;
+    IF FOUND AND pg_trigger_depth() = 1 AND (
+        parent_status NOT IN ('Setup', 'RegistrationOpen') OR EXISTS (
+            SELECT 1 FROM tournament_brackets
+            WHERE tournament_stage_id = OLD.id
+              AND (match_id IS NOT NULL OR tournament_team_id_1 IS NOT NULL OR tournament_team_id_2 IS NOT NULL)
+        )
+    ) THEN
+        RAISE EXCEPTION 'Unable to remove a stage after its bracket has been drawn' USING ERRCODE = '22000';
+    END IF;
+
     DELETE FROM tournament_brackets
         WHERE tournament_stage_id = OLD.id;
 
@@ -332,4 +348,4 @@ $$;
 
 
 DROP TRIGGER IF EXISTS tad_tournament_stages ON public.tournament_stages;
-CREATE TRIGGER tad_tournament_stages AFTER DELETE ON public.tournament_stages FOR EACH ROW EXECUTE FUNCTION public.tad_tournament_stages(); 
+CREATE TRIGGER tad_tournament_stages AFTER DELETE ON public.tournament_stages FOR EACH ROW EXECUTE FUNCTION public.tad_tournament_stages();
