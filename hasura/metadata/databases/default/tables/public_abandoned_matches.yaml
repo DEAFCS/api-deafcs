@@ -2,6 +2,18 @@ table:
   name: abandoned_matches
   schema: public
 select_permissions:
+  - role: moderator
+    permission:
+      columns:
+        - steam_id
+        - abandoned_at
+        - id
+        - match_id
+        - reason
+        - remove_sanction_date
+      filter: {}
+      allow_aggregations: true
+    comment: Staff (moderator and above) see a player's abandoned-match bans next to their sanctions. Deleting stays match_organizer.
   - role: match_organizer
     permission:
       columns:

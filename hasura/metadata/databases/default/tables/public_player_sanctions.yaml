@@ -61,6 +61,22 @@ select_permissions:
           - type:
               _eq: ban
     comment: "Same as guest -- logged-in regular players see the reason and duration of another player's CURRENTLY ACTIVE ban only, not warnings/mutes/gags/history. A separate 'user' entry existed originally but was accidentally dropped when a Dec 2025 commit renamed it to 'guest' instead of adding guest alongside it."
+  - role: moderator
+    permission:
+      columns:
+        - id
+        - player_steam_id
+        - sanctioned_by_steam_id
+        - revoked_by_steam_id
+        - reason
+        - type
+        - created_at
+        - remove_sanction_date
+        - deleted_at
+      computed_fields:
+        - is_active
+      filter: {}
+    comment: Staff (moderator and above) review the full sanction history of any player (bans, warnings, mutes, expired and revoked). Chat evidence (evidence_message_id) stays administrator-only.
   - role: administrator
     permission:
       columns:

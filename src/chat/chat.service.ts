@@ -142,6 +142,19 @@ const MATCH_ENDED_STATUSES: string[] = [
   "Canceled",
 ];
 
+// Post-match chat log: staff (moderators and above) may read a finished
+// match's chats, never a live one. Read access only; sending keeps its own
+// gates.
+export function canStaffReadFinishedMatchChat(
+  matchStatus: string | undefined | null,
+  role: e_player_roles_enum,
+): boolean {
+  return (
+    MATCH_ENDED_STATUSES.includes(matchStatus as string) &&
+    isRoleAbove(role, "moderator")
+  );
+}
+
 @Injectable()
 export class ChatService {
   private redis: Redis;
@@ -221,6 +234,7 @@ export class ChatService {
           matches_by_pk.is_coach === false &&
           matches_by_pk.is_in_lineup === false &&
           matches_by_pk.is_organizer === false &&
+          !canStaffReadFinishedMatchChat(matches_by_pk.status, user.role) &&
           // Captain Pick: the draft's ten players, before they're seated.
           !(await isCaptainPickPlayerOfMatch(
             this.redis,
@@ -256,7 +270,7 @@ export class ChatService {
           user.steam_id,
         );
 
-        // An admin can read either team's private chat, but only once the
+        // Staff (moderator and above) can read either team's private chat, but only once the
         // match is actually over -- unlike the shared Match-type chat
         // above (already effectively admin-visible any time, since
         // is_match_organizer.sql treats every administrator as an
@@ -264,10 +278,10 @@ export class ChatService {
         // strategy chat would be a real fairness problem, not just a
         // formality. Reported: an admin reviewing a finished match for
         // toxicity had no way to open the other team's chat at all.
-        const isFinishedMatchAdmin =
-          MATCH_ENDED_STATUSES.includes(
-            match_lineups_by_pk?.match?.status as string,
-          ) && isRoleAbove(user.role, "administrator");
+        const isFinishedMatchAdmin = canStaffReadFinishedMatchChat(
+          match_lineups_by_pk?.match?.status,
+          user.role,
+        );
 
         if (
           !match_lineups_by_pk ||
@@ -701,6 +715,7 @@ export class ChatService {
             matches_by_pk.is_organizer ||
             matches_by_pk.is_in_lineup,
           ) ||
+          canStaffReadFinishedMatchChat(matches_by_pk.status, user.role) ||
           isCaptainPickPlayerOfMatch(
             this.redis,
             id,
@@ -725,10 +740,10 @@ export class ChatService {
           },
           user.steam_id,
         );
-        const isFinishedMatchAdmin =
-          MATCH_ENDED_STATUSES.includes(
-            match_lineups_by_pk?.match?.status as string,
-          ) && isRoleAbove(user.role, "administrator");
+        const isFinishedMatchAdmin = canStaffReadFinishedMatchChat(
+          match_lineups_by_pk?.match?.status,
+          user.role,
+        );
         return Boolean(
           match_lineups_by_pk &&
           String(match_lineups_by_pk.match_id) === matchId &&
