@@ -156,9 +156,11 @@ export function determineFirstPick<T extends CaptainPickParticipant>(
 }
 
 /**
- * Snake order over every non-captain slot, mirroring the Draft Games Snake
- * pattern (get_draft_game_pattern.sql): 1,2,2,1,1,2,2,1 for 10 players.
- * Includes the final slot, which is never actually picked.
+ * Strict alternating order over every non-captain slot, lower captain first:
+ * 1,2,1,2,1,2,1,2 for 10 players (no snake, no double picks). Includes the
+ * final slot, which is never actually picked: by then one player is left and
+ * only lineup 2 has room, so that player is assigned without a click (exactly
+ * what the eighth alternating pick would be).
  */
 export function buildCaptainPickPattern(
   playerCount: number = CAPTAIN_PICK_PLAYER_COUNT,
@@ -168,20 +170,10 @@ export function buildCaptainPickPattern(
   }
 
   const picks = playerCount - 2;
-  const perTeamPicks = playerCount / 2 - 1;
   const pattern: Array<CaptainPickLineup> = [];
-  const counts = { 1: 0, 2: 0 };
 
   for (let i = 0; i < picks; i++) {
-    const forward = Math.floor(i / 2) % 2 === 0;
-    let lineup: CaptainPickLineup = forward === (i % 2 === 0) ? 1 : 2;
-
-    if (counts[lineup] >= perTeamPicks) {
-      lineup = lineup === 1 ? 2 : 1;
-    }
-
-    counts[lineup]++;
-    pattern.push(lineup);
+    pattern.push(i % 2 === 0 ? 1 : 2);
   }
 
   return pattern;

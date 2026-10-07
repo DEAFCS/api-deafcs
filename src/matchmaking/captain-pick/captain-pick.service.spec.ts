@@ -400,7 +400,7 @@ describe("CaptainPickService", () => {
           pickingCaptainSteamId: steam(2),
           serverNow: new Date(START).toISOString(),
           deadline: new Date(START + 30000).toISOString(),
-          pickOrder: [1, 2, 2, 1, 1, 2, 2],
+          pickOrder: [1, 2, 1, 2, 1, 2, 1],
           // The real match already exists (see "the match shell").
           matchId: (await state()).matchId,
         });
@@ -478,7 +478,7 @@ describe("CaptainPickService", () => {
       await service.startDraft(CONFIRMATION_ID);
     });
 
-    it("follows A B B A A B B and auto-assigns the last player to A", async () => {
+    it("follows A B A B A B A and auto-assigns the last player to B", async () => {
       const turns: string[] = [];
       for (let i = 0; i < 7; i++) {
         const s = await state();
@@ -488,7 +488,7 @@ describe("CaptainPickService", () => {
       }
 
       const s = await state();
-      expect(turns.join("")).toBe("ABBAABB");
+      expect(turns.join("")).toBe("ABABABA");
       expect(s.phase).toBe("CreatingMatch");
       expect(s.draft.selections).toHaveLength(7);
       expect(s.draft.lineups[1]).toHaveLength(5);
@@ -501,6 +501,26 @@ describe("CaptainPickService", () => {
       // Seven timed picks only: no timer and no 8th selection.
       expect(s.timer).toBeNull();
       expect(queue.byName("CaptainPickTimeout")).toHaveLength(7);
+    });
+
+    it("hands every pick to the other captain and gives the last player to B, exactly the eighth alternating pick", async () => {
+      for (let i = 0; i < 7; i++) {
+        await pickNext();
+      }
+
+      const s = await state();
+      const lineups = s.draft.selections.map((selection) => selection.lineup);
+      expect(lineups).toEqual([1, 2, 1, 2, 1, 2, 1]);
+      for (let i = 1; i < lineups.length; i++) {
+        expect(lineups[i]).not.toBe(lineups[i - 1]);
+      }
+      // Best-available picks: A (#2) takes #3 #5 #7 #9, B (#1) takes #4 #6 #8 and the leftover #10.
+      expect(s.draft.lineups[1]).toEqual([steam(2), steam(3), steam(5), steam(7), steam(9)]);
+      expect(s.draft.lineups[2]).toEqual([steam(1), steam(4), steam(6), steam(8), steam(10)]);
+      // Captains are still the two highest ELO, the lower one first.
+      expect(s.draft.captains[1].steam_id).toBe(steam(2));
+      expect(s.draft.captains[2].steam_id).toBe(steam(1));
+      expect(service.toPublicState(s).firstPickLineup).toBe(1);
     });
 
     it("records who picked and when", async () => {
@@ -624,6 +644,21 @@ describe("CaptainPickService", () => {
         { pickIndex: 0, lineup: 1, steam_id: steam(3), auto: true },
       ]);
       expect(service.toPublicState(s).picks[0].auto).toBe(true);
+    });
+
+    it("moves to the other captain after every timeout, ending with the last player on B", async () => {
+      const turns: number[] = [];
+      for (let i = 0; i < 7; i++) {
+        const before = await state();
+        turns.push(getPickingLineup(before.draft.pickIndex as number) as number);
+        expect(service.toPublicState(before).pickingLineup).toBe(turns[i]);
+        await timeout();
+      }
+
+      expect(turns).toEqual([1, 2, 1, 2, 1, 2, 1]);
+      const s = await state();
+      expect(s.draft.selections.map((selection) => selection.lineup)).toEqual(turns);
+      expect(s.draft.lineups[2].at(-1)).toBe(steam(10));
     });
 
     it("breaks ELO ties by earlier queue time, then steam id", async () => {
@@ -1792,6 +1827,20 @@ describe("CaptainPickService", () => {
       expect(team2.progress.available).toHaveLength(6);
       expect(redis.published.filter((p) => p.channel === "captain-pick-progress").at(-1).message)
         .toEqual({ matchId });
+    });
+
+    it("reports strict alternating turns to spectators, pick after pick", async () => {
+      await service.startDraft(CONFIRMATION_ID);
+      const matchId = (await state()).matchId;
+      const seen: Array<number | null> = [];
+      for (let i = 0; i < 7; i++) {
+        const progress = (await service.getSpectatorProgress(matchId)).progress;
+        expect(progress.pickOrder).toEqual([1, 2, 1, 2, 1, 2, 1]);
+        expect(progress.pickIndex).toBe(i);
+        seen.push(progress.pickingLineup);
+        await pickNext();
+      }
+      expect(seen).toEqual([1, 2, 1, 2, 1, 2, 1]);
     });
 
     it("does not leak a foreign, nonexistent or uncreated shell", async () => {

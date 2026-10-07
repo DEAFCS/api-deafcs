@@ -161,19 +161,29 @@ describe("Captain Pick rules", () => {
   });
 
   describe("pick order", () => {
-    it("matches the Draft Games Competitive snake pattern", () => {
-      expect(buildCaptainPickPattern(10)).toEqual([1, 2, 2, 1, 1, 2, 2, 1]);
-      expect(buildCaptainPickPattern()).toEqual([1, 2, 2, 1, 1, 2, 2, 1]);
+    it("is strictly alternating, lower captain (lineup 1) first", () => {
+      expect(buildCaptainPickPattern(10)).toEqual([1, 2, 1, 2, 1, 2, 1, 2]);
+      expect(buildCaptainPickPattern()).toEqual([1, 2, 1, 2, 1, 2, 1, 2]);
     });
 
-    it("has exactly seven timed selections: A B B A A B B", () => {
-      expect(getManualPickOrder()).toEqual([1, 2, 2, 1, 1, 2, 2]);
+    it("never gives the same captain two picks in a row", () => {
+      for (const count of [4, 6, 8, 10, 12]) {
+        const pattern = buildCaptainPickPattern(count);
+        for (let i = 1; i < pattern.length; i++) {
+          expect(pattern[i]).not.toBe(pattern[i - 1]);
+        }
+        expect(pattern[0]).toBe(1);
+      }
+    });
+
+    it("has exactly seven timed selections: A B A B A B A", () => {
+      expect(getManualPickOrder()).toEqual([1, 2, 1, 2, 1, 2, 1]);
       expect(getManualPickOrder()).toHaveLength(7);
     });
 
     it("maps pick indexes to lineups and ends after the seventh", () => {
       expect([0, 1, 2, 3, 4, 5, 6].map((i) => getPickingLineup(i))).toEqual([
-        1, 2, 2, 1, 1, 2, 2,
+        1, 2, 1, 2, 1, 2, 1,
       ]);
       expect(getPickingLineup(7)).toBeNull();
       expect(getPickingLineup(-1)).toBeNull();
@@ -296,7 +306,7 @@ describe("Captain Pick rules", () => {
         draft = applyCaptainAutoPick(draft);
       }
 
-      expect(pickingLineups).toEqual([1, 2, 2, 1, 1, 2, 2]);
+      expect(pickingLineups).toEqual([1, 2, 1, 2, 1, 2, 1]);
       expect(draft.pickIndex).toBeNull();
       expect(draft.available).toHaveLength(0);
       expect(draft.selections).toHaveLength(7);
@@ -308,8 +318,42 @@ describe("Captain Pick rules", () => {
       expect(new Set(everyone).size).toBe(CAPTAIN_PICK_PLAYER_COUNT);
 
       // Auto-picks always take the best remaining player, so the one left
-      // over (the lowest ELO) lands on lineup 1 without a selection.
-      expect(draft.lineups[1].at(-1)).toBe("76561198000000010");
+      // over (the lowest ELO) lands on lineup 2 without a selection: exactly
+      // what the eighth alternating pick (Captain B) would have been.
+      expect(draft.lineups[2].at(-1)).toBe("76561198000000010");
+    });
+
+    it("with best-available picks the ELO ranks split #2 #3 #5 #7 #9 vs #1 #4 #6 #8 #10", () => {
+      let draft = createCaptainPickDraft(tenPlayers());
+      // tenPlayers() ids end in the ELO rank (…01 is the highest ELO).
+      const rank = (steamId: string) => Number(steamId.slice(-2));
+      while (draft.pickIndex !== null) draft = applyCaptainAutoPick(draft);
+
+      expect(draft.lineups[1].map(rank).sort((a, b) => a - b)).toEqual([2, 3, 5, 7, 9]);
+      expect(draft.lineups[2].map(rank).sort((a, b) => a - b)).toEqual([1, 4, 6, 8, 10]);
+      // Captains are still the two highest ELO, the lower one first.
+      expect(rank(draft.captains[1].steam_id)).toBe(2);
+      expect(rank(draft.captains[2].steam_id)).toBe(1);
+      // Selections alternate and no lineup ever picks twice in a row.
+      const lineups = draft.selections.map((selection) => selection.lineup);
+      expect(lineups).toEqual([1, 2, 1, 2, 1, 2, 1]);
+    });
+
+    it("hands each next turn to the other captain after every pick, manual or timed out", () => {
+      let draft = createCaptainPickDraft(tenPlayers());
+      const turns: number[] = [];
+      for (let i = 0; i < 7; i++) {
+        turns.push(getPickingLineup(draft.pickIndex!)!);
+        draft =
+          i % 2 === 0
+            ? applyCaptainPick(draft, draft.available[draft.available.length - 1].steam_id)
+            : applyCaptainAutoPick(draft);
+      }
+      expect(turns).toEqual([1, 2, 1, 2, 1, 2, 1]);
+      expect(draft.pickIndex).toBeNull();
+      expect(draft.selections.map((selection) => selection.auto)).toEqual([
+        false, true, false, true, false, true, false,
+      ]);
     });
 
     it("records manual picks in order and never mutates the previous draft", () => {
