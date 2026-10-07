@@ -22,7 +22,18 @@ WITH friend_relationships AS (
   FROM friends f
 )
 SELECT DISTINCT ON (p.steam_id, fr.friend_steam_id)
-  p.*,
+  -- Keep the friend contract explicit: new players columns must not leak into
+  -- this view or make fresh installs disagree with existing installations.
+  p.steam_id,
+  p.name,
+  p.avatar_url,
+  p.custom_avatar_url,
+  p.country,
+  p.created_at,
+  p.discord_id,
+  p.name_registered,
+  p.profile_url,
+  p.role,
   fr.status,
   fr.friend_steam_id,
   fr.invited_by_steam_id,
