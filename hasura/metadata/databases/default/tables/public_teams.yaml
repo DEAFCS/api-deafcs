@@ -124,6 +124,7 @@ select_permissions:
       columns:
         - avatar_url
         - captain_steam_id
+        - created_at
         - id
         - is_organization
         - name
@@ -159,6 +160,10 @@ update_permissions:
       check: {}
     comment: ""
 delete_permissions:
+  - role: administrator
+    permission:
+      filter: {}
+    comment: Site administrators moderate any team (disband), matching can_remove_from_team.
   - role: user
     permission:
       filter:

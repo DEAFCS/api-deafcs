@@ -38,6 +38,46 @@ describe("team Admin Hasura metadata", () => {
     );
   });
 
+  it("gives site administrators exactly the moderation can_remove / can_change_role promise", () => {
+    const roster = metadata("tables/public_team_roster.yaml");
+    const teams = metadata("tables/public_teams.yaml");
+    const pick = (list: any[], role: string) =>
+      list.find((entry: any) => entry.role === role);
+
+    // roster: delete and update, never insert; no extra columns (roster_image_url
+    // stays out of every role's reach).
+    expect(pick(roster.delete_permissions, "administrator").permission.filter).toEqual({});
+    const rosterUpdate = pick(roster.update_permissions, "administrator").permission;
+    expect(rosterUpdate.filter).toEqual({});
+    expect(rosterUpdate.columns.sort()).toEqual(["coach", "role", "status"]);
+    expect(pick(roster.insert_permissions, "administrator")).toBeUndefined();
+
+    // teams: a site administrator may delete, not rewrite a team.
+    expect(pick(teams.delete_permissions, "administrator").permission.filter).toEqual({});
+    expect(pick(teams.update_permissions, "administrator")).toBeUndefined();
+
+    // Nobody else gained anything: the user rules are unchanged (owner / Admin).
+    expect(JSON.stringify(pick(teams.delete_permissions, "user").permission.filter)).toBe(
+      '{"owner_steam_id":{"_eq":"x-hasura-user-id"}}',
+    );
+    for (const entry of [...roster.delete_permissions, ...roster.update_permissions]) {
+      if (entry.role !== "user" && entry.role !== "administrator") {
+        throw new Error("unexpected team_roster writer: " + entry.role);
+      }
+    }
+  });
+
+  it("exposes teams.created_at read-only", () => {
+    const teams = metadata("tables/public_teams.yaml");
+    const select = teams.select_permissions.find((entry: any) => entry.role === "guest");
+    expect(select.permission.columns).toContain("created_at");
+    for (const list of [teams.insert_permissions, teams.update_permissions]) {
+      for (const entry of list) {
+        expect(entry.permission.columns).not.toContain("created_at");
+      }
+    }
+  });
+
   it("exposes orphan recovery only to site administrators", () => {
     const recovery = metadata("functions/public_recover_team_admin.yaml");
     expect(recovery.configuration).toMatchObject({

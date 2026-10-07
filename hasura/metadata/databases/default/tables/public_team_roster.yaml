@@ -44,6 +44,15 @@ select_permissions:
       filter: {}
     comment: ""
 update_permissions:
+  - role: administrator
+    permission:
+      columns:
+        - coach
+        - role
+        - status
+      filter: {}
+      check: {}
+    comment: Site administrators moderate any roster (never roster_image_url); tbud_team_roster_admin_guard still protects the last Admin.
   - role: user
     permission:
       columns:
@@ -73,6 +82,10 @@ update_permissions:
                   _eq: Admin
     comment: ""
 delete_permissions:
+  - role: administrator
+    permission:
+      filter: {}
+    comment: Site administrators remove any member; tbud_team_roster_admin_guard still protects the last Admin.
   - role: user
     permission:
       filter:
