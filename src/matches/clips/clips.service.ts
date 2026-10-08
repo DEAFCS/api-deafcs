@@ -1257,7 +1257,17 @@ export class ClipsService {
     if (claimed !== "OK") {
       return false;
     }
-    await this.incrementClipViewsByFile(file);
+    try {
+      await this.incrementClipViewsByFile(file);
+    } catch (error) {
+      // Release the claim so a failed increment does not swallow this
+      // viewer's view for the whole dedupe window.
+      await this.redisManager
+        .getConnection()
+        .del(dedupeKey)
+        .catch(() => {});
+      throw error;
+    }
     return true;
   }
 
