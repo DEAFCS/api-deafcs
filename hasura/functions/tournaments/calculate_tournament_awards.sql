@@ -173,7 +173,14 @@ BEGIN
       RETURNING placement,id
     ) INSERT INTO _award_calc_occurrences SELECT placement,id FROM upserted;
 
-    -- Team recipients plus only historical roster players who appeared in a completed official match for that entry.
+    -- Team recipients, plus the players who actually took part in the tournament
+    -- for that entry. Being on the roster, or seated in a lineup, is not enough:
+    -- a substitute who never played gets no placement award, one who played a
+    -- single match does. "Took part" is the same rule that decides who is rated
+    -- for ELO (match_elo_participants): recorded activity in a completed
+    -- official match when the lineup carries substitutes, flagged leavers, and
+    -- every seat when nothing in the lineup was recorded or the lineup is at
+    -- the starting size. No minimum matches, no minutes, no substitute rules.
     INSERT INTO public.award_recipients(occurrence_id,team_id,tournament_team_id)
     SELECT o.occurrence_id,tt.team_id,tt.id FROM _award_calc_occurrences o
     JOIN public.tournament_teams tt ON tt.id=CASE o.placement WHEN 1 THEN _winning_team_id WHEN 2 THEN _runner_up_team_id ELSE _third_team_id END
@@ -188,8 +195,9 @@ BEGIN
       SELECT 1 FROM public.tournament_stages ts
       JOIN public.tournament_brackets b ON b.tournament_stage_id=ts.id
       JOIN public.matches m ON m.id=b.match_id AND m.winning_lineup_id IS NOT NULL
-      JOIN public.match_lineup_players lp ON lp.steam_id=r.player_steam_id
-       AND lp.match_lineup_id=CASE WHEN b.tournament_team_id_1=r.tournament_team_id THEN m.lineup_1_id ELSE m.lineup_2_id END
+      JOIN LATERAL public.match_elo_participants(m.id) ep
+        ON ep.steam_id=r.player_steam_id
+       AND ep.match_lineup_id=CASE WHEN b.tournament_team_id_1=r.tournament_team_id THEN m.lineup_1_id ELSE m.lineup_2_id END
       WHERE ts.tournament_id=_tournament_id
         AND r.tournament_team_id IN (b.tournament_team_id_1,b.tournament_team_id_2)
     ) ON CONFLICT DO NOTHING;
