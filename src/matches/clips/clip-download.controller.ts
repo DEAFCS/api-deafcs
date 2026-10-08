@@ -10,12 +10,19 @@ import {
 import { Request, Response } from "express";
 import { S3Service } from "../../s3/s3.service";
 import { HasuraService } from "../../hasura/hasura.service";
+import { ClipsService } from "./clips.service";
+import {
+  clipViewerKey,
+  createClipViewMeter,
+  shouldTrackClipView,
+} from "./clip-view-tracking";
 
 @Controller("/clips/:clipId")
 export class ClipDownloadController {
   constructor(
     private readonly s3: S3Service,
     private readonly hasura: HasuraService,
+    private readonly clips: ClipsService,
     private readonly logger: Logger,
   ) {}
 
@@ -24,6 +31,8 @@ export class ClipDownloadController {
     @Param("clipId") clipId: string,
     @Query("name") name: string | undefined,
     @Query("dl") dl: string | undefined,
+    @Query("download") download: string | undefined,
+    @Query("noview") noview: string | undefined,
     @Req() request: Request,
     @Res() response: Response,
   ) {
@@ -32,6 +41,13 @@ export class ClipDownloadController {
       response.status(404).json({ error: "not found" });
       return;
     }
+    const track = shouldTrackClipView({
+      method: request.method,
+      dl,
+      download,
+      noview,
+      userAgent: request.headers["user-agent"],
+    });
     await this.stream(
       clip.file,
       "video/mp4",
@@ -39,6 +55,7 @@ export class ClipDownloadController {
       dl === "1",
       request,
       response,
+      track ? clip.file : null,
     );
   }
 
@@ -84,6 +101,7 @@ export class ClipDownloadController {
     forceDownload: boolean,
     request: Request,
     response: Response,
+    countViewFor: string | null = null,
   ) {
     let stat;
     try {
@@ -130,12 +148,20 @@ export class ClipDownloadController {
         );
         response.setHeader("Content-Length", String(length));
         const stream = await this.s3.getPartial(key, range.start, length);
-        this.pipeWithCleanup(stream, response);
+        this.pipeWithCleanup(
+          stream,
+          response,
+          this.viewMeter(countViewFor, range.start, size, request),
+        );
       } else {
         response.status(200);
         response.setHeader("Content-Length", String(size));
         const stream = await this.s3.get(key);
-        this.pipeWithCleanup(stream, response);
+        this.pipeWithCleanup(
+          stream,
+          response,
+          this.viewMeter(countViewFor, 0, size, request),
+        );
       }
     } catch (error) {
       this.logger.error(
@@ -175,10 +201,43 @@ export class ClipDownloadController {
     return { start, end };
   }
 
-  private pipeWithCleanup(stream: NodeJS.ReadableStream, response: Response) {
+  // Counts one view when this response has delivered the middle of the file.
+  // Behind Cloudflare the client address is in cf-connecting-ip; the viewer is
+  // only ever identified by a hash of address + user agent.
+  private viewMeter(
+    file: string | null,
+    rangeStart: number,
+    size: number,
+    request: Request,
+  ) {
+    if (!file) {
+      return null;
+    }
+    const cfIp = request.headers["cf-connecting-ip"];
+    const ip = (Array.isArray(cfIp) ? cfIp[0] : cfIp) ?? request.ip;
+    const clientKey = clipViewerKey(ip, request.headers["user-agent"]);
+    return createClipViewMeter(rangeStart, size, () => {
+      this.clips.registerStreamedClipView(file, clientKey).catch((error) => {
+        this.logger.warn(
+          `failed to count play for ${file}: ${(error as Error)?.message}`,
+        );
+      });
+    });
+  }
+
+  private pipeWithCleanup(
+    stream: NodeJS.ReadableStream,
+    response: Response,
+    meter: { add: (bytes: number) => void } | null = null,
+  ) {
     response.on("close", () => {
       (stream as unknown as { destroy?: () => void }).destroy?.();
     });
+    if (meter) {
+      stream.on("data", (chunk: Buffer | string) => {
+        meter.add(Buffer.byteLength(chunk));
+      });
+    }
     stream.pipe(response);
   }
 }
