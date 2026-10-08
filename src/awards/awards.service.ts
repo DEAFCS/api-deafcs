@@ -51,6 +51,18 @@ export interface GrantAwardInput {
   awarded_by_steam_id: string;
 }
 
+export interface TournamentMvpCandidate {
+  player_steam_id: string;
+  player_name: string;
+  tournament_team_id: string | null;
+  team_name: string | null;
+  matches_played: number;
+  rating: number;
+  kills: number;
+  deaths: number;
+  assists: number;
+}
+
 interface TournamentAwardRow {
   id: string;
   tournament_id: string;
@@ -392,6 +404,58 @@ export class AwardsService {
       [recipientId, steamId, reason.trim()],
     );
   }
+  // Manual tournament MVP. The rules live in the database functions
+  // (hasura/functions/tournaments/tournament_mvp.sql); the caller has already
+  // checked that the user may manage this tournament.
+  public async listTournamentMvpCandidates(
+    tournamentId: string,
+  ): Promise<TournamentMvpCandidate[]> {
+    return await this.postgres.query<TournamentMvpCandidate[]>(
+      "SELECT * FROM public.tournament_mvp_candidates($1)",
+      [tournamentId],
+    );
+  }
+
+  public async setTournamentMvp(input: {
+    tournament_id: string;
+    player_steam_id: string;
+    actor_steam_id: string;
+    note?: string | null;
+  }): Promise<void> {
+    await this.runMvpFunction(
+      "SELECT public.set_tournament_mvp($1, $2, $3, $4)",
+      [
+        input.tournament_id,
+        input.player_steam_id,
+        input.actor_steam_id,
+        input.note ?? null,
+      ],
+    );
+  }
+
+  public async clearTournamentMvp(input: {
+    tournament_id: string;
+    actor_steam_id: string;
+    note?: string | null;
+  }): Promise<void> {
+    await this.runMvpFunction(
+      "SELECT public.clear_tournament_mvp($1, $2, $3)",
+      [input.tournament_id, input.actor_steam_id, input.note ?? null],
+    );
+  }
+
+  // The functions raise 22000 with a message written for the user.
+  private async runMvpFunction(sql: string, params: unknown[]): Promise<void> {
+    try {
+      await this.postgres.query(sql, params as never);
+    } catch (error) {
+      if ((error as { code?: string })?.code === "22000") {
+        throw new BadRequestException((error as Error).message);
+      }
+      throw error;
+    }
+  }
+
   public async setTournamentAward(input: {
     tournament_id: string;
     placement: number;

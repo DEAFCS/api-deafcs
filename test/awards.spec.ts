@@ -495,22 +495,25 @@ describe("awards (SQL-driven)", () => {
       expect(await calculatedPlacements(t.id)).toEqual([1, 2, 3]);
     });
 
-    it("calculates MVP for 5v5 and remains idempotent", async () => {
+    // The tournament MVP is chosen by hand (set_tournament_mvp, covered by
+    // tournament-manual-mvp.spec.ts); the calculation never creates one, even
+    // for a 5v5 tournament whose winners have rated matches.
+    it("never calculates an MVP for 5v5, and remains idempotent", async () => {
       const t = await playedOutCupWithThirdPlace("Competitive");
 
       await seedWinningRosterImpact(t.id);
       await postgres.query("SELECT calculate_tournament_awards($1)", [t.id]);
-      expect(await calculatedPlacements(t.id)).toEqual([0, 1, 2, 3]);
+      expect(await calculatedPlacements(t.id)).toEqual([1, 2, 3]);
 
       await postgres.query("SELECT calculate_tournament_awards($1)", [t.id]);
-      expect(await calculatedPlacements(t.id)).toEqual([0, 1, 2, 3]);
+      expect(await calculatedPlacements(t.id)).toEqual([1, 2, 3]);
     });
 
-    it("removes an invalid calculated MVP on recalc without touching manual grants", async () => {
+    it("recalculation does not touch manual grants", async () => {
       const t = await playedOutCupWithThirdPlace("Competitive");
       await seedWinningRosterImpact(t.id);
       await postgres.query("SELECT calculate_tournament_awards($1)", [t.id]);
-      expect(await calculatedPlacements(t.id)).toEqual([0, 1, 2, 3]);
+      expect(await calculatedPlacements(t.id)).toEqual([1, 2, 3]);
 
       const awardId = await createAward("Organizer's Pick");
       const [seat] = await postgres.query<

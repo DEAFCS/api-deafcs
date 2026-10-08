@@ -1763,6 +1763,39 @@ type Mutation {
 }
 
 type Mutation {
+  setTournamentMvp(
+    tournament_id: uuid!
+    player_steam_id: bigint!
+    note: String
+  ): SuccessOutput
+}
+
+type Mutation {
+  clearTournamentMvp(
+    tournament_id: uuid!
+    note: String
+  ): SuccessOutput
+}
+
+type Query {
+  tournamentMvpCandidates(
+    tournament_id: uuid!
+  ): [TournamentMvpCandidate!]!
+}
+
+type TournamentMvpCandidate {
+  player_steam_id: String!
+  player_name: String!
+  tournament_team_id: uuid
+  team_name: String
+  matches_played: Int!
+  rating: Float!
+  kills: Int!
+  deaths: Int!
+  assists: Int!
+}
+
+type Mutation {
   setTournamentAward(
     tournament_id: uuid!
     placement: Int!

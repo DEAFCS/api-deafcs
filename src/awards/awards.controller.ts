@@ -148,6 +148,54 @@ export class AwardsController {
     return await this.awards.setTournamentAward(data);
   }
 
+  // Manual tournament MVP: only the tournament's organizer, its co-organizers
+  // and site administrators (requireOrganizer). Not moderators, not team
+  // managers, and not the site-wide organizer role unless they organize this
+  // tournament.
+  @HasuraAction()
+  public async tournamentMvpCandidates(data: {
+    tournament_id: string;
+    user?: User;
+  }) {
+    const user = this.requireUser(data.user);
+    await this.awards.requireOrganizer(data.tournament_id, user);
+    return await this.awards.listTournamentMvpCandidates(data.tournament_id);
+  }
+
+  @HasuraAction()
+  public async setTournamentMvp(data: {
+    tournament_id: string;
+    player_steam_id: string;
+    note?: string | null;
+    user?: User;
+  }) {
+    const user = this.requireUser(data.user);
+    await this.awards.requireOrganizer(data.tournament_id, user);
+    await this.awards.setTournamentMvp({
+      tournament_id: data.tournament_id,
+      player_steam_id: String(data.player_steam_id),
+      actor_steam_id: user.steam_id,
+      note: data.note,
+    });
+    return { success: true };
+  }
+
+  @HasuraAction()
+  public async clearTournamentMvp(data: {
+    tournament_id: string;
+    note?: string | null;
+    user?: User;
+  }) {
+    const user = this.requireUser(data.user);
+    await this.awards.requireOrganizer(data.tournament_id, user);
+    await this.awards.clearTournamentMvp({
+      tournament_id: data.tournament_id,
+      actor_steam_id: user.steam_id,
+      note: data.note,
+    });
+    return { success: true };
+  }
+
   @Post("awards/:awardId")
   @UseInterceptors(FileInterceptor("file"))
   public async uploadAwardImage(

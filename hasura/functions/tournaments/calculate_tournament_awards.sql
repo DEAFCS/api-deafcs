@@ -33,7 +33,6 @@ DECLARE
     _runner_up_team_id uuid;
     _third_team_id uuid;
     _award_third boolean := false;
-    _mvp_steam_id bigint;
 BEGIN
     SELECT awards_enabled INTO _awards_enabled
     FROM public.tournaments WHERE id = _tournament_id;
@@ -44,12 +43,14 @@ BEGIN
     USING public.award_occurrences o
     WHERE r.occurrence_id = o.id
       AND o.tournament_id = _tournament_id
-      AND o.source = 'tournament_calculated';
+      AND o.source = 'tournament_calculated'
+      AND o.placement IS DISTINCT FROM 0;
 
     IF _awards_enabled IS DISTINCT FROM true THEN
         DELETE FROM public.award_occurrences o
         WHERE o.tournament_id = _tournament_id
           AND o.source = 'tournament_calculated'
+          AND o.placement IS DISTINCT FROM 0
           AND NOT EXISTS (
               SELECT 1 FROM public.award_recipients r
               WHERE r.occurrence_id = o.id
@@ -193,40 +194,16 @@ BEGIN
         AND r.tournament_team_id IN (b.tournament_team_id_1,b.tournament_team_id_2)
     ) ON CONFLICT DO NOTHING;
 
-    -- MVP is reserved for 5v5 tournaments and is chosen from players who
-    -- actually appeared for the winning entry. Recalculation already clears
-    -- all calculated recipients above, so changing a tournament away from 5v5
-    -- also removes its former calculated MVP without touching manual awards.
-    IF _winning_team_id IS NOT NULL
-       AND (
-         SELECT public.tournament_min_players_per_lineup(t)
-         FROM public.tournaments t
-         WHERE t.id = _tournament_id
-       ) = 5 THEN
-      SELECT pe.steam_id INTO _mvp_steam_id
-      FROM public.player_elo pe
-      JOIN public.tournament_brackets b ON b.match_id=pe.match_id
-      JOIN public.tournament_stages ts ON ts.id=b.tournament_stage_id AND ts.tournament_id=_tournament_id
-      JOIN public.matches m ON m.id=b.match_id AND m.winning_lineup_id IS NOT NULL
-      JOIN public.tournament_team_roster r ON r.player_steam_id=pe.steam_id AND r.tournament_id=_tournament_id AND r.tournament_team_id=_winning_team_id
-      JOIN public.match_lineup_players lp ON lp.steam_id=pe.steam_id
-       AND lp.match_lineup_id=CASE WHEN b.tournament_team_id_1=_winning_team_id THEN m.lineup_1_id ELSE m.lineup_2_id END
-      WHERE _winning_team_id IN (b.tournament_team_id_1,b.tournament_team_id_2)
-      GROUP BY pe.steam_id ORDER BY AVG(COALESCE(pe.impact,1.0)) DESC,SUM(COALESCE(pe.impact,1.0)) DESC,pe.steam_id LIMIT 1;
-      IF _mvp_steam_id IS NOT NULL THEN
-        INSERT INTO public.award_occurrences(award_id,tournament_id,placement,source,effective_at,calculation_key)
-        SELECT public.resolve_tournament_award(_tournament_id,0),_tournament_id,0,'tournament_calculated',COALESCE(start,now()),'tournament:'||_tournament_id||':mvp'
-        FROM public.tournaments WHERE id=_tournament_id
-        ON CONFLICT(calculation_key) DO UPDATE SET award_id=excluded.award_id,effective_at=excluded.effective_at,updated_at=now()
-        RETURNING id INTO _final_stage_id;
-        INSERT INTO public.award_recipients(occurrence_id,player_steam_id,tournament_team_id)
-        VALUES(_final_stage_id,_mvp_steam_id,_winning_team_id) ON CONFLICT DO NOTHING;
-      END IF;
-    END IF;
+    -- The tournament MVP is NOT calculated here. DEAFCS chooses it by hand
+    -- after the tournament has finished (set_tournament_mvp). Placement 0 rows
+    -- are therefore never created, replaced or deleted by this function, so a
+    -- chosen MVP survives every recalculation and any MVP row that already
+    -- exists is left exactly as it is.
 
     DELETE FROM public.award_occurrences o
     WHERE o.tournament_id = _tournament_id
       AND o.source = 'tournament_calculated'
+      AND o.placement IS DISTINCT FROM 0
       AND NOT EXISTS (
           SELECT 1 FROM public.award_recipients r
           WHERE r.occurrence_id = o.id
