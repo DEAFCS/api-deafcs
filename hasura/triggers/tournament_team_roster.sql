@@ -289,3 +289,36 @@ CREATE TRIGGER taiud_tournament_team_roster_check_in
     AFTER INSERT OR DELETE OR UPDATE OF checked_in_at ON public.tournament_team_roster
     FOR EACH ROW
     EXECUTE FUNCTION public.taiud_tournament_team_roster_check_in();
+
+-- A roster change must reach the team's matches that exist but have not
+-- started. Round 1 is created when registration closes, so a roster edited
+-- between close and start (or before a later round is played) would otherwise
+-- leave the lineup seating players who were removed and missing players who
+-- were added. The work is in refresh_unstarted_tournament_team_lineups, which
+-- only touches Scheduled and WaitingForCheckIn matches. A cascade from a
+-- deleted team or tournament is skipped (the team row is already gone).
+CREATE OR REPLACE FUNCTION public.taid_tournament_team_roster_refresh_lineups() RETURNS TRIGGER
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    -- A removed tournament captain is replaced first, so the refresh below
+    -- already seats the new captain.
+    IF TG_OP = 'DELETE' THEN
+        PERFORM public.replace_removed_tournament_captain(
+            OLD.tournament_team_id,
+            OLD.player_steam_id
+        );
+    END IF;
+
+    PERFORM public.refresh_unstarted_tournament_team_lineups(
+        COALESCE(NEW.tournament_team_id, OLD.tournament_team_id)
+    );
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS taid_tournament_team_roster_refresh_lineups ON public.tournament_team_roster;
+CREATE TRIGGER taid_tournament_team_roster_refresh_lineups
+    AFTER INSERT OR DELETE ON public.tournament_team_roster
+    FOR EACH ROW
+    EXECUTE FUNCTION public.taid_tournament_team_roster_refresh_lineups();

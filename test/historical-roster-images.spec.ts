@@ -23,6 +23,12 @@ describe("historical tournament roster image snapshots", () => {
     await seedRegionWithServer(postgres, "TestA");
   }, 600_000);
 
+  afterEach(async () => {
+    await postgres.query(
+      "ALTER TABLE tournament_team_roster ENABLE TRIGGER taid_tournament_team_roster_refresh_lineups",
+    );
+  });
+
   afterAll(async () => {
     await db?.stop();
   });
@@ -386,6 +392,14 @@ describe("historical tournament roster image snapshots", () => {
   }, 120_000);
 
   it("maps both tournament sides, recomputes pre-play moves, and preserves Live/Finished history", async () => {
+    // This test moves lineup seats by hand to exercise the snapshot triggers on
+    // match_lineup_players. A roster insert now also seats the new player
+    // (taid_tournament_team_roster_refresh_lineups, covered by
+    // tournament-roster-lineup-refresh.spec.ts), which would collide with the
+    // manual moves below, so the refresh is switched off for this test only.
+    await postgres.query(
+      "ALTER TABLE tournament_team_roster DISABLE TRIGGER taid_tournament_team_roster_refresh_lineups",
+    );
     const tournament = await createTournament();
     const teams = await createTeams(1);
     await setGeneralImagesForTeams(teams);

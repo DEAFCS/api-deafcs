@@ -106,8 +106,11 @@ BEGIN
 
         IF _pair_count > 0 THEN
             FOR i IN 1.._pair_count LOOP
+                -- checked_in is cleared: the seat now belongs to a different
+                -- player, who must not inherit the previous player's check-in.
                 UPDATE match_lineup_players
-                   SET steam_id = _new_extra_steam_ids[i]
+                   SET steam_id = _new_extra_steam_ids[i],
+                       checked_in = false
                  WHERE id = _old_extra_ids[i];
             END LOOP;
         END IF;
