@@ -232,6 +232,19 @@ delete_permissions:
                               _eq: Admin
                     - owner_steam_id:
                         _eq: X-Hasura-User-Id
+                    - team:
+                        owner_steam_id:
+                          _eq: X-Hasura-User-Id
+                    - team:
+                        captain_steam_id:
+                          _eq: X-Hasura-User-Id
+                    - team:
+                        roster:
+                          _and:
+                            - player_steam_id:
+                                _eq: X-Hasura-User-Id
+                            - role:
+                                _eq: Admin
           - tournament:
               status:
                 _nin:
@@ -256,6 +269,29 @@ delete_permissions:
                     _eq: true
               - player_steam_id:
                   _eq: X-Hasura-User-Id
+              # Team management: the owner of the tournament entry, the team
+              # owner, the permanent team captain and a team Admin. Same set
+              # that may add a player (insert_permissions) and that
+              # can_manage_tournament_team reports to the web.
+              - tournament_team:
+                  owner_steam_id:
+                    _eq: X-Hasura-User-Id
+              - tournament_team:
+                  team:
+                    owner_steam_id:
+                      _eq: X-Hasura-User-Id
+              - tournament_team:
+                  team:
+                    captain_steam_id:
+                      _eq: X-Hasura-User-Id
+              - tournament_team:
+                  team:
+                    roster:
+                      _and:
+                        - player_steam_id:
+                            _eq: X-Hasura-User-Id
+                        - role:
+                            _eq: Admin
           - tournament:
               status:
                 _nin:
