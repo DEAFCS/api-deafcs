@@ -13,18 +13,24 @@ export class CancelInvalidTournaments extends WorkerHost {
     super();
   }
 
-  // An open tournament that is short of teams at its scheduled start is
-  // cancelled, but only after the Free Agent pool has had its say:
-  // cancel_invalid_tournaments asks the real draft how many teams the pool would
-  // make (and discards the answer), so a Free Agents or Both tournament whose
-  // complete teams still exist only as sign-ups is not cancelled for the teams
-  // it has not drafted yet. Everything else keeps the old rule.
+  // The scheduled start of an open tournament, two steps in this order:
+  //
+  // 1. A tournament that is short of teams at its start time is cancelled, but
+  //    only after the Free Agent pool has had its say: cancel_invalid_tournaments
+  //    asks the real draft how many teams the pool would make (and discards the
+  //    answer), so a Free Agents or Both tournament whose complete teams still
+  //    exist only as sign-ups is not cancelled for teams it has not drafted yet.
+  // 2. A version 2 tournament WITHOUT check-in that is still open at its start
+  //    time is started (start_due_tournaments): the same transition as the
+  //    organizer's Start button, which closes registration, drafts the pool,
+  //    seeds and draws the bracket and goes Live. With check-in on, the check-in
+  //    job closes registration and CheckForTournamentStart starts it instead.
   async process(): Promise<number> {
-    const [row] = await this.postgres.query<
+    const [cancelledRow] = await this.postgres.query<
       Array<{ cancelled: number }>
     >(`SELECT public.cancel_invalid_tournaments() AS cancelled`);
 
-    const cancelled = Number(row?.cancelled ?? 0);
+    const cancelled = Number(cancelledRow?.cancelled ?? 0);
 
     if (cancelled > 0) {
       this.logger.log(
@@ -32,6 +38,16 @@ export class CancelInvalidTournaments extends WorkerHost {
       );
     }
 
-    return cancelled;
+    const [startedRow] = await this.postgres.query<
+      Array<{ started: number }>
+    >(`SELECT public.start_due_tournaments() AS started`);
+
+    const started = Number(startedRow?.started ?? 0);
+
+    if (started > 0) {
+      this.logger.log(`${started} tournaments started at their scheduled time`);
+    }
+
+    return cancelled + started;
   }
 }

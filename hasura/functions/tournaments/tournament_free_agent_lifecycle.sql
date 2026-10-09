@@ -130,3 +130,65 @@ BEGIN
      WHERE tournament_id = _tournament_id AND seed IS NOT NULL;
 END;
 $$;
+
+-- The scheduled start of a tournament WITHOUT check-in. With check-in on, the
+-- check-in job closes registration at its deadline and CheckForTournamentStart
+-- makes the tournament Live; with it off nothing closes RegistrationOpen, so a
+-- valid tournament would sit open past its start until an organizer clicked
+-- Close or Start.
+--
+-- This starts it exactly like the manual Start: status -> Live. The one
+-- canonical transition (tbu_tournaments / tau_tournaments) then drafts the Free
+-- Agent pool, checks the minimum on the final team set (a genuinely short field
+-- becomes CancelledMinTeams in the same step), seeds and draws the bracket.
+-- Nothing of that is reimplemented here.
+--
+-- Safe to run every minute and next to a manual Start: the row is locked and
+-- re-checked, so one tournament is started once, the pool is drafted once, and
+-- a tournament someone else already moved is skipped. Version 1 tournaments
+-- (their own attendance job) and check-in tournaments (their own path) are not
+-- touched. Returns the number of tournaments it moved.
+CREATE OR REPLACE FUNCTION public.start_due_tournaments()
+RETURNS integer
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    _candidate record;
+    _started integer := 0;
+BEGIN
+    FOR _candidate IN
+        SELECT t.id
+          FROM public.tournaments t
+         WHERE t.registration_version = 2
+           AND t.status = 'RegistrationOpen'
+           AND NOT t.check_in_required
+           AND t.start <= now()
+         ORDER BY t.start
+    LOOP
+        BEGIN
+            PERFORM 1 FROM public.tournaments t
+             WHERE t.id = _candidate.id
+               AND t.status = 'RegistrationOpen'
+               AND NOT t.check_in_required
+               AND t.start <= now()
+               FOR UPDATE SKIP LOCKED;
+
+            IF NOT FOUND THEN
+                CONTINUE;
+            END IF;
+
+            UPDATE public.tournaments
+               SET status = 'Live'
+             WHERE id = _candidate.id AND status = 'RegistrationOpen';
+
+            _started := _started + 1;
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Leave it as it was; the next pass asks again.
+                RAISE WARNING 'start_due_tournaments: % skipped: %', _candidate.id, SQLERRM;
+        END;
+    END LOOP;
+
+    RETURN _started;
+END;
+$$;

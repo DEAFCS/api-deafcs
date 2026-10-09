@@ -114,36 +114,41 @@ describe("Free Agent tournament lifecycle: min-team decision and reset (SQL-driv
   }
 
   describe("Free Agents only", () => {
+    it("the probe only asks: it drafts nothing and marks nobody", async () => {
+      const t = await cup();
+      await signup(t.id, 50);
+      const [r] = await postgres.query<Array<{ ok: boolean }>>(
+        "SELECT tournament_would_have_min_teams($1) AS ok",
+        [t.id],
+      );
+      expect(r.ok).toBe(true);
+      expect(await teamCount(t.id)).toEqual({ all: 0, drafted: 0 });
+      expect(await poolStatuses(t.id)).toEqual({ registered: 50 });
+    });
+
     it("50 eligible solo players in 5v5 are not cancelled at the start time, and become 10 teams", async () => {
       const t = await cup();
       await signup(t.id, 50);
       await startPassed(t.id);
 
-      expect(await runJob()).toBe(0);
-      expect(await status(t.id)).toBe("RegistrationOpen");
-      // The probe drafts and discards: nothing was created or marked.
-      expect(await teamCount(t.id)).toEqual({ all: 0, drafted: 0 });
-      expect(await poolStatuses(t.id)).toEqual({ registered: 50 });
-
-      await cups.setStatus(t.id, t.organizer, "RegistrationClosed");
-      expect(await teamCount(t.id)).toEqual({ all: 10, drafted: 10 });
-      expect(new Set(await bracketTeams(t.id)).size).toBe(10);
-      await cups.setStatus(t.id, t.organizer, "Live");
+      // The scheduled start (check-in off) starts it: drafted, drawn, Live.
+      expect(await runJob()).toBe(1);
       expect(await status(t.id)).toBe("Live");
       expect(await teamCount(t.id)).toEqual({ all: 10, drafted: 10 });
+      expect(new Set(await bracketTeams(t.id)).size).toBe(10);
+      expect(await poolStatuses(t.id)).toEqual({ drafted: 50 });
     });
 
-    it("20 solo players make exactly 4 teams and are kept", async () => {
+    it("20 solo players make exactly 4 teams and are started, not cancelled", async () => {
       const t = await cup();
       await signup(t.id, 20);
       await startPassed(t.id);
-      expect(await runJob()).toBe(0);
-      expect(await status(t.id)).toBe("RegistrationOpen");
-      await cups.setStatus(t.id, t.organizer, "RegistrationClosed");
+      expect(await runJob()).toBe(1);
+      expect(await status(t.id)).toBe("Live");
       expect((await teamCount(t.id)).all).toBe(4);
     });
 
-    it("19 solo players make only 3 complete teams, so the decision uses 3, not 19 / 5", async () => {
+        it("19 solo players make only 3 complete teams, so the decision uses 3, not 19 / 5", async () => {
       const t = await cup();
       await signup(t.id, 19);
       await startPassed(t.id);
@@ -181,19 +186,15 @@ describe("Free Agent tournament lifecycle: min-team decision and reset (SQL-driv
       expect(await teamCount(t.id)).toEqual({ all: 0, drafted: 0 });
     });
 
-    it("running the job again changes nothing (no duplicate teams, no repeated cancel)", async () => {
+    it("running the job again changes nothing (no duplicate teams, no repeated start)", async () => {
       const t = await cup();
       await signup(t.id, 20);
       await startPassed(t.id);
-      await runJob();
-      await runJob();
-      expect(await teamCount(t.id)).toEqual({ all: 0, drafted: 0 });
-      await cups.setStatus(t.id, t.organizer, "RegistrationClosed");
-      expect((await teamCount(t.id)).drafted).toBe(4);
-      // Already closed: the job has nothing to look at.
+      expect(await runJob()).toBe(1);
       expect(await runJob()).toBe(0);
-      await cups.setStatus(t.id, t.organizer, "Live");
-      expect((await teamCount(t.id)).drafted).toBe(4);
+      expect(await runJob()).toBe(0);
+      expect(await teamCount(t.id)).toEqual({ all: 4, drafted: 4 });
+      expect(await status(t.id)).toBe("Live");
     });
   });
 
@@ -204,10 +205,8 @@ describe("Free Agent tournament lifecycle: min-team decision and reset (SQL-driv
       await signup(t.id, 4);
       await startPassed(t.id);
 
-      expect(await runJob()).toBe(0);
-      expect(await status(t.id)).toBe("RegistrationOpen");
-
-      await cups.setStatus(t.id, t.organizer, "RegistrationClosed");
+      expect(await runJob()).toBe(1);
+      expect(await status(t.id)).toBe("Live");
       expect(await teamCount(t.id)).toEqual({ all: 5, drafted: 2 });
       const inBracket = await bracketTeams(t.id);
       expect(new Set(inBracket).size).toBe(5);
