@@ -551,14 +551,16 @@ export class TournamentRegistrationController {
   }
 
   // Organizer controls over the free agent pool, before the draft. The pool
-  // is frozen and drafted when registration closes, so only an open
-  // registration (or a held check-in review, which has not drafted yet) can be
-  // edited; a drafted entry is a member of a generated team and is changed
+  // is frozen and drafted when registration closes, so only the statuses that
+  // come before the draft can be edited: Setup (registration not open yet), an
+  // open registration, and a held check-in review. Players still sign
+  // themselves up only while registration is open. A drafted entry is a member of a generated team and is changed
   // through that team's roster, never through the pool. Authorization is the
   // tournament's organizers, co-organizers and site administrators
   // (is_tournament_organizer); eligibility, the one-roster rule, invite access
   // and the party rules are the same triggers a self-registration runs.
   private static readonly FREE_AGENT_POOL_EDITABLE = [
+    "Setup",
     "RegistrationOpen",
     "CheckInReview",
   ];
@@ -579,9 +581,13 @@ export class TournamentRegistrationController {
       throw Error("this tournament does not accept free agents");
     }
 
-    // The pool only accepts a new entry while registration is open (the same
-    // rule the insert trigger enforces for a player joining themselves).
-    if (tournament.status !== "RegistrationOpen") {
+    // The insert trigger enforces the same windows for the organizer's
+    // session; this gives the clearer message first.
+    if (
+      !TournamentRegistrationController.FREE_AGENT_POOL_EDITABLE.includes(
+        tournament.status,
+      )
+    ) {
       throw Error("the free agent pool is locked");
     }
 
@@ -608,14 +614,21 @@ export class TournamentRegistrationController {
       );
     }
 
-    await this.postgres.query(
-      `INSERT INTO tournament_free_agents (tournament_id, player_steam_id)
-       VALUES ($1::uuid, $2::bigint)
-       ON CONFLICT (tournament_id, player_steam_id)
-       DO UPDATE SET status = 'registered', tournament_team_id = NULL
-                WHERE tournament_free_agents.status = 'withdrawn'`,
-      [tournament_id, player_steam_id],
-    );
+    // The write carries the organizer's own session: the insert trigger lets
+    // staff into a pool that is not open to players (Setup, check-in review).
+    await this.postgres.transaction(async (client) => {
+      await client.query(`SELECT set_config('hasura.user', $1, true)`, [
+        this.hasuraSession(data.user),
+      ]);
+      await client.query(
+        `INSERT INTO tournament_free_agents (tournament_id, player_steam_id)
+         VALUES ($1::uuid, $2::bigint)
+         ON CONFLICT (tournament_id, player_steam_id)
+         DO UPDATE SET status = 'registered', tournament_team_id = NULL
+                  WHERE tournament_free_agents.status = 'withdrawn'`,
+        [tournament_id, player_steam_id],
+      );
+    });
 
     this.logger.log(
       `[${tournament_id}] ${data.user.steam_id} added ${player_steam_id} to the free agent pool`,

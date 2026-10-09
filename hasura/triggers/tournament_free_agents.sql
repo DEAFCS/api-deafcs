@@ -14,8 +14,23 @@ BEGIN
         RETURN NEW;
     END IF;
 
+    _session := nullif(current_setting('hasura.user', true), '')::json;
+
+    -- Players sign themselves up only while registration is open. The
+    -- tournament's organizers, co-organizers and site administrators manage the
+    -- pool for as long as it has not been drafted: before registration opens
+    -- (Setup) and in a held check-in review. The draft runs when registration
+    -- closes or the tournament starts, so from then on the pool is frozen for
+    -- everyone.
     IF _tournament.registration_version <> 2
-       OR _tournament.status <> 'RegistrationOpen' THEN
+       OR (
+           _tournament.status <> 'RegistrationOpen'
+           AND NOT (
+               _tournament.status IN ('Setup', 'CheckInReview')
+               AND (_session ->> 'x-hasura-role') IS NOT NULL
+               AND public.is_tournament_organizer(_tournament, _session)
+           )
+       ) THEN
         RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Free agent registration is closed';
     END IF;
 
@@ -23,8 +38,6 @@ BEGIN
         WHERE r.tournament_id = NEW.tournament_id AND r.player_steam_id = NEW.player_steam_id) THEN
         RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Player is already on a tournament roster';
     END IF;
-
-    _session := nullif(current_setting('hasura.user', true), '')::json;
 
     -- A session with no role is an internal write and stays unrestricted, the
     -- same shape tbd_tournament_team uses; only a real request is gated.
