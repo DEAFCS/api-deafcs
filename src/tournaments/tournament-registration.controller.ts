@@ -550,6 +550,122 @@ export class TournamentRegistrationController {
     return { success: true };
   }
 
+  // Organizer controls over the free agent pool, before the draft. The pool
+  // is frozen and drafted when registration closes, so only an open
+  // registration (or a held check-in review, which has not drafted yet) can be
+  // edited; a drafted entry is a member of a generated team and is changed
+  // through that team's roster, never through the pool. Authorization is the
+  // tournament's organizers, co-organizers and site administrators
+  // (is_tournament_organizer); eligibility, the one-roster rule, invite access
+  // and the party rules are the same triggers a self-registration runs.
+  private static readonly FREE_AGENT_POOL_EDITABLE = [
+    "RegistrationOpen",
+    "CheckInReview",
+  ];
+
+  @HasuraAction()
+  public async addTournamentFreeAgent(data: {
+    user: User;
+    tournament_id: string;
+    player_steam_id: string;
+  }) {
+    const { tournament_id } = data;
+    const player_steam_id = String(data.player_steam_id);
+    const tournament = await this.getTournamentAccess(tournament_id, data.user);
+
+    this.requireOrganizer(tournament);
+
+    if (!["free_agents", "both"].includes(tournament.registration_type)) {
+      throw Error("this tournament does not accept free agents");
+    }
+
+    // The pool only accepts a new entry while registration is open (the same
+    // rule the insert trigger enforces for a player joining themselves).
+    if (tournament.status !== "RegistrationOpen") {
+      throw Error("the free agent pool is locked");
+    }
+
+    const [player] = await this.postgres.query<Array<{ steam_id: string }>>(
+      `SELECT steam_id::text AS steam_id FROM players WHERE steam_id = $1::bigint`,
+      [player_steam_id],
+    );
+
+    if (!player) {
+      throw Error("player not found");
+    }
+
+    const [existing] = await this.postgres.query<Array<{ status: string }>>(
+      `SELECT status FROM tournament_free_agents
+        WHERE tournament_id = $1::uuid AND player_steam_id = $2::bigint`,
+      [tournament_id, player_steam_id],
+    );
+
+    if (existing && existing.status !== "withdrawn") {
+      throw Error(
+        existing.status === "drafted"
+          ? "this player has already been drafted onto a team"
+          : "this player is already in the free agent pool",
+      );
+    }
+
+    await this.postgres.query(
+      `INSERT INTO tournament_free_agents (tournament_id, player_steam_id)
+       VALUES ($1::uuid, $2::bigint)
+       ON CONFLICT (tournament_id, player_steam_id)
+       DO UPDATE SET status = 'registered', tournament_team_id = NULL
+                WHERE tournament_free_agents.status = 'withdrawn'`,
+      [tournament_id, player_steam_id],
+    );
+
+    this.logger.log(
+      `[${tournament_id}] ${data.user.steam_id} added ${player_steam_id} to the free agent pool`,
+    );
+
+    return { success: true };
+  }
+
+  @HasuraAction()
+  public async removeTournamentFreeAgent(data: {
+    user: User;
+    tournament_id: string;
+    player_steam_id: string;
+  }) {
+    const { tournament_id } = data;
+    const player_steam_id = String(data.player_steam_id);
+    const tournament = await this.getTournamentAccess(tournament_id, data.user);
+
+    this.requireOrganizer(tournament);
+
+    if (
+      !TournamentRegistrationController.FREE_AGENT_POOL_EDITABLE.includes(
+        tournament.status,
+      )
+    ) {
+      throw Error("the free agent pool is locked");
+    }
+
+    const removed = await this.postgres.query<Array<{ id: string }>>(
+      `DELETE FROM tournament_free_agents
+        WHERE tournament_id = $1::uuid
+          AND player_steam_id = $2::bigint
+          AND status IN ('registered', 'waitlisted')
+      RETURNING id::text AS id`,
+      [tournament_id, player_steam_id],
+    );
+
+    if (removed.length === 0) {
+      throw Error(
+        "this player is not in the free agent pool, or has already been drafted onto a team",
+      );
+    }
+
+    this.logger.log(
+      `[${tournament_id}] ${data.user.steam_id} removed ${player_steam_id} from the free agent pool`,
+    );
+
+    return { success: true };
+  }
+
   // Chooses the active players of a tournament match lineup. The rules (exactly
   // the starting size, only the tournament roster, the captain stays, only
   // before the match starts) and who may choose (the team's captain, owner or

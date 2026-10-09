@@ -1893,6 +1893,20 @@ type Mutation {
 }
 
 type Mutation {
+  addTournamentFreeAgent(
+    tournament_id: uuid!
+    player_steam_id: String!
+  ): SuccessOutput
+}
+
+type Mutation {
+  removeTournamentFreeAgent(
+    tournament_id: uuid!
+    player_steam_id: String!
+  ): SuccessOutput
+}
+
+type Mutation {
   setMatchStartingLineup(
     match_id: uuid!
     match_lineup_id: uuid!
