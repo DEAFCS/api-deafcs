@@ -90,6 +90,12 @@ BEGIN
         return NEW;
     END IF;
 
+    -- Reset to Setup: the teams the Free Agent draft generated and the pool
+    -- entries it placed or waitlisted go back to a reusable state.
+    IF NEW.status = 'Setup' AND OLD.status IN ('Cancelled', 'CancelledMinTeams') THEN
+        PERFORM public.reset_tournament_generated_state(NEW.id);
+    END IF;
+
     -- The Free Agent draft has already run by now (tbu_tournaments, BEFORE this
     -- trigger, on the way into RegistrationClosed or Live), so every generated
     -- team exists when the bracket is sized, seeded and drawn below. A team
