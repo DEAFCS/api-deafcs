@@ -208,10 +208,12 @@ describe("MatchesController.checkIntoMatch authorization", () => {
   const setup = (match: { status: string; can_check_in: boolean } | null) => {
     const controller = Object.create(MatchesController.prototype) as any;
     controller.terms = { assertAccepted: jest.fn() };
-    // A refusal is checked for a pending starting-lineup confirmation first;
+    // Checking in confirms a pending starting lineup in one transaction;
     // nothing is pending unless a test says so.
+    const client = { query: jest.fn().mockResolvedValue({ rows: [] }) };
     controller.postgres = {
-      query: jest.fn().mockResolvedValue([{ pending: false }]),
+      client,
+      transaction: jest.fn(async (fn: any) => fn(client)),
     };
     controller.hasura = {
       query: jest.fn().mockResolvedValue({ matches_by_pk: match }),
@@ -317,13 +319,26 @@ describe("MatchesController.checkIntoMatch authorization", () => {
     );
   });
 
-  it("tells a team with substitutes to confirm its starting lineup instead of a bare refusal", async () => {
-    const controller = setup({ status: "WaitingForCheckIn", can_check_in: false });
-    controller.postgres.query.mockResolvedValue([{ pending: true }]);
+  it("confirms the starting lineup and checks in together when the team has substitutes", async () => {
+    const controller = setup({ status: "WaitingForCheckIn", can_check_in: true });
+    controller.postgres.client.query
+      .mockResolvedValueOnce({ rows: [{ id: "lineup-1", seated: 5, size: 5 }] })
+      .mockResolvedValue({ rows: [] });
 
-    await expect(call(controller)).rejects.toThrow(
-      "confirm the starting lineup before checking in",
-    );
+    await call(controller);
+
+    const sql = controller.postgres.client.query.mock.calls.map((c: any) => c[0]);
+    expect(sql[1]).toMatch(/starting_lineup_confirmed_at = now()/);
+    expect(sql[2]).toMatch(/checked_in = true/);
+  });
+
+  it("does not check in a lineup that is not exactly the starting size", async () => {
+    const controller = setup({ status: "WaitingForCheckIn", can_check_in: true });
+    controller.postgres.client.query.mockResolvedValueOnce({
+      rows: [{ id: "lineup-1", seated: 4, size: 5 }],
+    });
+
+    await expect(call(controller)).rejects.toThrow("exactly 5 active players");
     expect(controller.hasura.mutation).not.toHaveBeenCalled();
   });
 });

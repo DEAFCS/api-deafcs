@@ -2430,26 +2430,17 @@ export class MatchesController {
     }
 
     if (!matches_by_pk.can_check_in) {
-      // A tournament team with substitutes has to confirm its starting lineup
-      // before anyone on it can check in; say so rather than a bare refusal.
-      const pending = await this.postgres.query<Array<{ pending: boolean }>>(
-        `SELECT EXISTS (
-           SELECT 1
-             FROM match_lineups ml
-             INNER JOIN match_lineup_players mlp ON mlp.match_lineup_id = ml.id
-            WHERE ml.match_id = $1::uuid
-              AND mlp.steam_id = $2::bigint
-              AND match_lineup_needs_starting_lineup_confirmation(ml)
-         ) AS pending`,
-        [data.match_id, data.user.steam_id],
-      );
-
-      if (pending[0]?.pending) {
-        throw Error("confirm the starting lineup before checking in");
-      }
-
       throw Error("you are not allowed to check in to this match");
     }
+
+    // A tournament team with substitutes confirms its starting lineup by
+    // checking in: the lineup it is seated with must be exactly the starting
+    // size, and the confirmation and the check-in are one transaction, so a team
+    // is never checked in on an unconfirmed lineup (nor confirmed without it).
+    await this.confirmStartingLineupWithCheckIn(
+      data.match_id,
+      data.user.steam_id,
+    );
 
     const { update_match_lineup_players } = await this.hasura.mutation({
       update_match_lineup_players: {
@@ -2517,6 +2508,53 @@ export class MatchesController {
     return {
       success: (update_match_lineup_players?.affected_rows ?? 0) > 0,
     };
+  }
+
+  private async confirmStartingLineupWithCheckIn(
+    matchId: string,
+    steamId: string,
+  ): Promise<void> {
+    await this.postgres.transaction(async (client) => {
+      const { rows } = await client.query<{
+        id: string;
+        seated: number;
+        size: number;
+      }>(
+        `SELECT ml.id::text AS id,
+                (SELECT count(*) FROM match_lineup_players p
+                  WHERE p.match_lineup_id = ml.id)::int AS seated,
+                match_min_players_per_lineup(m) AS size
+           FROM match_lineups ml
+           JOIN matches m ON m.id = ml.match_id
+           JOIN match_lineup_players mlp ON mlp.match_lineup_id = ml.id
+          WHERE m.id = $1::uuid
+            AND m.status = 'WaitingForCheckIn'
+            AND mlp.steam_id = $2::bigint
+            AND match_lineup_needs_starting_lineup_confirmation(ml)
+            FOR UPDATE OF ml`,
+        [matchId, steamId],
+      );
+
+      for (const row of rows) {
+        // Exactly the active size: a lineup that is not (a match created before
+        // starting lineups, or a roster change) has to be chosen first.
+        if (row.seated !== row.size) {
+          throw Error(
+            `the starting lineup needs exactly ${row.size} active players`,
+          );
+        }
+
+        await client.query(
+          `UPDATE match_lineups SET starting_lineup_confirmed_at = now() WHERE id = $1::uuid`,
+          [row.id],
+        );
+        await client.query(
+          `UPDATE match_lineup_players SET checked_in = true
+            WHERE match_lineup_id = $1::uuid AND steam_id = $2::bigint`,
+          [row.id, steamId],
+        );
+      }
+    });
   }
 
   @HasuraEvent()

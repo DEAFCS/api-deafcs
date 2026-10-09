@@ -728,7 +728,7 @@ describe("tournament match starting lineup (SQL-driven)", () => {
       expect(await needs(c.lineup1)).toBe(true);
     });
 
-    it("nobody on an unconfirmed lineup can check in, then they can", async () => {
+    it("a player on an unconfirmed lineup can check in at once (checking in confirms it), but the lineup is not ready until it is confirmed", async () => {
       const c = await build();
       const [lineupPlayer] = await postgres.query<Array<{ steam_id: string }>>(
         "SELECT steam_id::text FROM match_lineup_players WHERE match_lineup_id = $1 LIMIT 1",
@@ -745,9 +745,27 @@ describe("tournament match starting lineup (SQL-driven)", () => {
       await postgres.query("ALTER TABLE matches DISABLE TRIGGER USER");
       await postgres.query("UPDATE matches SET status = 'WaitingForCheckIn' WHERE id = $1", [c.matchId]);
       await postgres.query("ALTER TABLE matches ENABLE TRIGGER USER");
-      expect(await can()).toBe(false);
+      expect(await can()).toBe(true);
+      await checkInAll(c.lineup1);
+      expect(await isReady(c.lineup1)).toBe(false);
       await choose(c, c.lineup1, await seats(c.lineup1));
       expect(await can()).toBe(true);
+      expect(await isReady(c.lineup1)).toBe(true);
+    });
+
+    it("a team that has checked in cannot change its lineup any more, an organizer still can", async () => {
+      const c = await build();
+      await setting(c.matchId, "Players");
+      const captain = await captainOf(c.tt1);
+      const others = (await roster(c.tt1)).map((r) => r.steam_id).filter((s) => s !== captain);
+      await choose(c, c.lineup1, [captain, others[0]]);
+      await checkInAll(c.lineup1);
+      expect(await isReady(c.lineup1)).toBe(true);
+      await expect(
+        choose(c, c.lineup1, [captain, others[1]], captain, "user"),
+      ).rejects.toThrow(/locked once the team has checked in/i);
+      await choose(c, c.lineup1, [captain, others[1]]);
+      expect((await seats(c.lineup1)).sort()).toEqual([captain, others[1]].sort());
     });
 
     it("changing a confirmed lineup before the lock works and keeps it confirmed", async () => {

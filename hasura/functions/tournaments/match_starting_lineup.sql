@@ -237,6 +237,24 @@ BEGIN
             MESSAGE = 'The starting lineup is locked once the match has started';
     END IF;
 
+    -- A team that has checked in plays with the lineup it checked in with: the
+    -- team's own staff cannot change it any more. Tournament organizers and
+    -- site administrators keep that as the recovery path.
+    IF public.is_match_lineup_ready(
+           (SELECT ml FROM public.match_lineups ml WHERE ml.id = _match_lineup_id)
+       )
+       AND NOT public.is_tournament_organizer(
+           (SELECT t FROM public.tournaments t
+              INNER JOIN public.tournament_stages ts ON ts.tournament_id = t.id
+              INNER JOIN public.tournament_brackets tb ON tb.tournament_stage_id = ts.id
+             WHERE tb.match_id = _match_id
+             LIMIT 1),
+           hasura_session
+       ) THEN
+        RAISE EXCEPTION USING ERRCODE = '22000',
+            MESSAGE = 'The lineup is locked once the team has checked in';
+    END IF;
+
     _size := public.match_min_players_per_lineup(_match);
 
     SELECT COALESCE(array_agg(DISTINCT s), ARRAY[]::bigint[]) INTO _distinct

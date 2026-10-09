@@ -13,17 +13,10 @@ BEGIN
         RETURN false;
     END IF;
 
-    -- Nobody checks in for a lineup that still has to confirm its starters.
-    IF EXISTS (
-        SELECT 1
-        FROM match_lineups ml
-        INNER JOIN match_lineup_players mlp ON mlp.match_lineup_id = ml.id
-        WHERE ml.match_id = match.id
-          AND mlp.steam_id = (hasura_session ->> 'x-hasura-user-id')::bigint
-          AND match_lineup_needs_starting_lineup_confirmation(ml)
-    ) THEN
-        RETURN false;
-    END IF;
+    -- A team with substitutes does not confirm its starters in a separate step:
+    -- checking in IS the confirmation (checkIntoMatch confirms the lineup the
+    -- team is seated with and checks in, in one transaction), so nothing here
+    -- blocks the check-in before that.
 
     SELECT check_in_setting INTO _check_in_setting FROM match_options WHERE id = match.match_options_id;
 
