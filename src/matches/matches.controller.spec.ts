@@ -208,6 +208,11 @@ describe("MatchesController.checkIntoMatch authorization", () => {
   const setup = (match: { status: string; can_check_in: boolean } | null) => {
     const controller = Object.create(MatchesController.prototype) as any;
     controller.terms = { assertAccepted: jest.fn() };
+    // A refusal is checked for a pending starting-lineup confirmation first;
+    // nothing is pending unless a test says so.
+    controller.postgres = {
+      query: jest.fn().mockResolvedValue([{ pending: false }]),
+    };
     controller.hasura = {
       query: jest.fn().mockResolvedValue({ matches_by_pk: match }),
       mutation: jest.fn().mockResolvedValue({
@@ -310,6 +315,16 @@ describe("MatchesController.checkIntoMatch authorization", () => {
     expect(body).not.toMatch(
       /is_organizer: true|can_start: true|isOrganizer\(/,
     );
+  });
+
+  it("tells a team with substitutes to confirm its starting lineup instead of a bare refusal", async () => {
+    const controller = setup({ status: "WaitingForCheckIn", can_check_in: false });
+    controller.postgres.query.mockResolvedValue([{ pending: true }]);
+
+    await expect(call(controller)).rejects.toThrow(
+      "confirm the starting lineup before checking in",
+    );
+    expect(controller.hasura.mutation).not.toHaveBeenCalled();
   });
 });
 
