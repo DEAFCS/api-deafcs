@@ -68,8 +68,10 @@ $$;
 -- captain is the match captain when seated. A captain who sits a match out
 -- stays the tournament captain (and keeps managing the lineup, which is
 -- checked against the tournament team, not the seat); the match captain, the
--- seat that checks in and picks in the veto, is then the seated Admin with the
--- lowest steam id, or the current match captain if they are still seated.
+-- seat that checks in and picks in the veto, is then the seated tournament
+-- roster Admin with the lowest steam id, or, with no Admin seated, the seated
+-- player with the lowest steam id. Deterministic, never dependent on who
+-- happened to hold the flag before.
 CREATE OR REPLACE FUNCTION public.tournament_set_lineup_captain(
     _match_lineup_id uuid,
     _tournament_captain bigint
@@ -91,8 +93,7 @@ BEGIN
                  ON ttr.tournament_team_id = public.tournament_match_lineup_team(_match_lineup_id)
                 AND ttr.player_steam_id = mlp.steam_id
          WHERE mlp.match_lineup_id = _match_lineup_id
-         ORDER BY mlp.captain DESC,
-                  CASE WHEN ttr.role = 'Admin' THEN 0 ELSE 1 END,
+         ORDER BY CASE WHEN ttr.role = 'Admin' THEN 0 ELSE 1 END,
                   mlp.steam_id
          LIMIT 1;
     END IF;

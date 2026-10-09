@@ -373,6 +373,124 @@ describe("tournament match starting lineup (SQL-driven)", () => {
     });
   });
 
+  describe("tournament captain and match captain", () => {
+    const sorted = (xs: string[]) => [...xs].sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1));
+    const matchCaptains = async (lineupId: string) =>
+      (
+        await postgres.query<Array<{ steam_id: string }>>(
+          "SELECT steam_id::text FROM match_lineup_players WHERE match_lineup_id = $1 AND captain",
+          [lineupId],
+        )
+      ).map((r) => r.steam_id);
+    const tournamentCaptain = async (ttId: string) => captainOf(ttId);
+    const setRole = (ttId: string, steam: string, role: string) =>
+      postgres.query(
+        "UPDATE tournament_team_roster SET role = $3 WHERE tournament_team_id = $1 AND player_steam_id = $2",
+        [ttId, steam, role],
+      );
+    const isCaptain = async (matchId: string, steam: string) => {
+      const [r] = await postgres.query<Array<{ ok: boolean }>>(
+        "SELECT is_captain(m, $2::json) AS ok FROM matches m WHERE m.id = $1",
+        [matchId, session(steam)],
+      );
+      return r.ok;
+    };
+
+    // A roster of four where the captain sits out and every other player is a
+    // plain Member until a test promotes one.
+    const benchCaptain = async () => {
+      const c = await build();
+      const captain = await captainOf(c.tt1);
+      for (const r of await roster(c.tt1)) await setRole(c.tt1, r.steam_id, "Member");
+      const others = sorted((await roster(c.tt1)).map((r) => r.steam_id).filter((x) => x !== captain));
+      return { c, captain, others };
+    };
+
+    it("the tournament captain, when seated, is the match captain", async () => {
+      const c = await build();
+      const captain = await captainOf(c.tt1);
+      expect(await matchCaptains(c.lineup1)).toEqual([captain]);
+    });
+
+    it("a seated tournament roster Admin becomes the match captain when the captain sits out", async () => {
+      const { c, captain, others } = await benchCaptain();
+      await setRole(c.tt1, others[2], "Admin");
+
+      await choose(c, c.lineup1, [others[0], others[2]], captain, "user");
+
+      expect(await matchCaptains(c.lineup1)).toEqual([others[2]]);
+      expect(await tournamentCaptain(c.tt1)).toBe(captain);
+    });
+
+    it("with no Admin seated, the lowest steam id among the seated players is the match captain", async () => {
+      const { c, captain, others } = await benchCaptain();
+
+      await choose(c, c.lineup1, [others[2], others[1]], captain, "user");
+
+      expect(await matchCaptains(c.lineup1)).toEqual([others[1]]);
+    });
+
+    it("the choice does not depend on who held the flag before", async () => {
+      const { c, captain, others } = await benchCaptain();
+      await choose(c, c.lineup1, [others[2], others[1]], captain, "user");
+      expect(await matchCaptains(c.lineup1)).toEqual([others[1]]);
+      // Swap the flag holder out: the other seated player takes over, deterministically.
+      await choose(c, c.lineup1, [others[2], others[0]], captain, "user");
+      expect(await matchCaptains(c.lineup1)).toEqual([others[0]]);
+      expect((await matchCaptains(c.lineup1)).length).toBe(1);
+    });
+
+    it("the benched captain cannot do the seat-only match actions; the stand-in can", async () => {
+      const { c, captain, others } = await benchCaptain();
+      await choose(c, c.lineup1, [others[0], others[1]], captain, "user");
+      const standIn = (await matchCaptains(c.lineup1))[0];
+
+      expect(await isCaptain(c.matchId, captain)).toBe(false);
+      expect(await isCaptain(c.matchId, standIn)).toBe(true);
+      const [onLineup] = await postgres.query<Array<{ ok: boolean }>>(
+        "SELECT is_captain_on_lineup(ml, $2::json) AS ok FROM match_lineups ml WHERE ml.id = $1",
+        [c.lineup1, session(captain)],
+      );
+      expect(onLineup.ok).toBe(false);
+
+      await postgres.query("ALTER TABLE matches DISABLE TRIGGER USER");
+      await postgres.query("UPDATE matches SET status = 'WaitingForCheckIn' WHERE id = $1", [c.matchId]);
+      await postgres.query("ALTER TABLE matches ENABLE TRIGGER USER");
+      await postgres.query(
+        "UPDATE match_options SET check_in_setting = 'Captains' WHERE id = (SELECT match_options_id FROM matches WHERE id = $1)",
+        [c.matchId],
+      );
+      const canCheckIn = async (steam: string) => {
+        const [r] = await postgres.query<Array<{ ok: boolean }>>(
+          "SELECT can_check_in(m, $2::json) AS ok FROM matches m WHERE m.id = $1",
+          [c.matchId, session(steam)],
+        );
+        return r.ok;
+      };
+      expect(await canCheckIn(captain)).toBe(false);
+      expect(await canCheckIn(standIn)).toBe(true);
+    });
+
+    it("the benched captain can still manage the lineup and stays the tournament captain", async () => {
+      const { c, captain, others } = await benchCaptain();
+      await choose(c, c.lineup1, [others[0], others[1]], captain, "user");
+      await choose(c, c.lineup1, [others[1], others[2]], captain, "user");
+      expect(await tournamentCaptain(c.tt1)).toBe(captain);
+      expect((await seats(c.lineup1)).sort()).toEqual([others[1], others[2]].sort());
+    });
+
+    it("a roster change that refills a seat keeps exactly one match captain", async () => {
+      const { c, captain, others } = await benchCaptain();
+      await choose(c, c.lineup1, [others[0], others[1]], captain, "user");
+      await postgres.query(
+        "DELETE FROM tournament_team_roster WHERE tournament_team_id = $1 AND player_steam_id = $2",
+        [c.tt1, others[0]],
+      );
+      expect((await matchCaptains(c.lineup1)).length).toBe(1);
+      expect(await tournamentCaptain(c.tt1)).toBe(captain);
+    });
+  });
+
   describe("who may choose", () => {
     const sub = async (c: Cup) => {
       const captain = await captainOf(c.tt1);
