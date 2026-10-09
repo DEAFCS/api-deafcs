@@ -758,15 +758,24 @@ update_permissions:
           _eq: true
     comment: ""
 delete_permissions:
+  # A match a tournament bracket points at is never deleted directly: the bracket
+  # would keep its slot (and possibly a winner) with no match to reset. Tournament
+  # matches are cancelled or reset from the bracket; internal flows that remove
+  # them (reset, restructuring, deleting the tournament) do not go through here.
   - role: administrator
     permission:
-      filter: {}
+      filter:
+        _not:
+          tournament_brackets: {}
     comment: ""
   - role: user
     permission:
       filter:
-        is_organizer:
-          _eq: true
+        _and:
+          - is_organizer:
+              _eq: true
+          - _not:
+              tournament_brackets: {}
     comment: ""
 event_triggers:
   - name: match_events

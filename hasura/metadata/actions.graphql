@@ -41,6 +41,18 @@ type Query {
 }
 
 type Mutation {
+  RecreateTournamentBracketMatch(
+    bracket_id: uuid!
+    scheduled_at: timestamptz
+  ): RecreateTournamentBracketMatchOutput
+}
+
+type RecreateTournamentBracketMatchOutput {
+  success: Boolean!
+  match_id: uuid
+}
+
+type Mutation {
   ResetTournamentMatch(
     match_id: uuid!
     winning_lineup_id: uuid

@@ -52,6 +52,9 @@ import { SYSTEM_STEAM_ID } from "./disconnect-budget/constants";
 import { TermsService } from "src/terms/terms.service";
 
 // Played terminal statuses: a match that actually produced a result.
+export const TOURNAMENT_MATCH_DELETE_MESSAGE =
+  "Tournament matches must be reset or cancelled from the tournament bracket.";
+
 const ELO_VOIDABLE_STATUSES = ["Finished", "Forfeit", "Tie", "Surrendered"];
 
 @Controller("matches")
@@ -2238,6 +2241,52 @@ export class MatchesController {
     };
   }
 
+  // Recreates the match of a bracket slot whose match row is gone (see
+  // recreate_tournament_bracket_match). Organizers and site administrators only.
+  @HasuraAction()
+  public async RecreateTournamentBracketMatch(data: {
+    user: User;
+    bracket_id: string;
+    scheduled_at?: string | null;
+  }) {
+    const { bracket_id, user, scheduled_at } = data;
+
+    const [access] = await this.postgres.query<Array<{ ok: boolean }>>(
+      `SELECT COALESCE(is_tournament_organizer(t, $2::json), false) AS ok
+         FROM tournament_brackets tb
+         JOIN tournament_stages ts ON ts.id = tb.tournament_stage_id
+         JOIN tournaments t ON t.id = ts.tournament_id
+        WHERE tb.id = $1::uuid`,
+      [
+        bracket_id,
+        JSON.stringify({
+          "x-hasura-role": user.role,
+          "x-hasura-user-id": user.steam_id,
+        }),
+      ],
+    );
+
+    if (!access) {
+      throw Error("bracket not found");
+    }
+
+    if (!access.ok) {
+      throw Error("you are not a tournament organizer");
+    }
+
+    const resolvedScheduledAt =
+      scheduled_at && scheduled_at.trim().length > 0 ? scheduled_at : null;
+
+    const [created] = await this.postgres.query<
+      Array<{ match_id: string }>
+    >(
+      `SELECT recreate_tournament_bracket_match($1::uuid, $2::timestamptz) AS match_id`,
+      [bracket_id, resolvedScheduledAt],
+    );
+
+    return { success: true, match_id: created.match_id };
+  }
+
   /**
    * TODO - does not need to be a action
    */
@@ -2833,6 +2882,21 @@ export class MatchesController {
 
     if (matches_by_pk.status === "Live") {
       throw Error("cannot delete a live match");
+    }
+
+    // A match a tournament bracket points at is never hard-deleted from here:
+    // the bracket would keep its slot, its teams and possibly its winner with no
+    // match left to reset. Tournament matches are cancelled, reset or given a
+    // free win from the tournament bracket instead.
+    const [bracket] = await this.postgres.query<Array<{ linked: boolean }>>(
+      `SELECT EXISTS (
+         SELECT 1 FROM tournament_brackets WHERE match_id = $1::uuid
+       ) AS linked`,
+      [match_id],
+    );
+
+    if (bracket?.linked) {
+      throw Error(TOURNAMENT_MATCH_DELETE_MESSAGE);
     }
 
     await this.clips.deleteClipsForMatch(match_id);
