@@ -90,13 +90,24 @@ BEGIN
         return NEW;
     END IF;
 
+    -- The Free Agent draft has already run by now (tbu_tournaments, BEFORE this
+    -- trigger, on the way into RegistrationClosed or Live), so every generated
+    -- team exists when the bracket is sized, seeded and drawn below. A team
+    -- created after this point has no slot: it would be in the tournament and
+    -- nowhere in the bracket.
+    --
+    -- CheckInReview is a source status: continuing out of a check-in review is
+    -- the first time such a tournament closes, so it has to be seeded here.
     IF (
         NEW.status IS DISTINCT FROM OLD.status AND
         NEW.status IN ('Live', 'RegistrationClosed') AND
-        OLD.status IN ('Setup', 'RegistrationOpen')
+        OLD.status IN ('Setup', 'RegistrationOpen', 'CheckInReview')
     ) THEN
-        PERFORM update_tournament_stages(NEW.id);
+        -- Seed before sizing: update_tournament_stages reads eligible_at and
+        -- assign_seeds_to_teams is what writes it, so sizing first would build
+        -- the bracket from a count that still includes every no-show.
         PERFORM assign_seeds_to_teams(NEW);
+        PERFORM update_tournament_stages(NEW.id);
 
         SELECT id INTO first_stage_id
         FROM tournament_stages
@@ -278,13 +289,30 @@ BEGIN
                 IF NOT can_close_tournament_registration(OLD, current_setting('hasura.user', true)::json) THEN
                     RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Cannot close tournament registration';
                 END IF;
+                -- Registration closing is the moment the Free Agent pool is
+                -- frozen and drafted, BEFORE the bracket: tau_tournaments (AFTER
+                -- this trigger) sizes, seeds and draws it from the teams that
+                -- exist by then. Independent of whether check-in is on. The
+                -- draft takes the registration advisory lock and the row lock,
+                -- so it cannot interleave with a late sign-up or another draft.
+                IF OLD.status IN ('Setup', 'RegistrationOpen', 'CheckInReview')
+                   AND NEW.registration_version = 2
+                   AND NEW.registration_type IN ('free_agents', 'both') THEN
+                    PERFORM draft_tournament_free_agent_teams(NEW.id);
+                END IF;
             WHEN 'Live' THEN
                 IF OLD.status = 'Paused' THEN
                     IF NOT can_resume_tournament(OLD, current_setting('hasura.user', true)::json) THEN
                         RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Cannot resume tournament';
                     END IF;
                 ELSE
-                    IF NEW.registration_version = 2 AND NEW.registration_type IN ('free_agents', 'both') THEN
+                    -- Only a start that skips RegistrationClosed drafts here
+                    -- (it is still before the bracket is drawn). From
+                    -- RegistrationClosed the draft already ran and the bracket
+                    -- exists, so drafting now would create teams with no slot.
+                    IF OLD.status IN ('Setup', 'RegistrationOpen', 'CheckInReview')
+                       AND NEW.registration_version = 2
+                       AND NEW.registration_type IN ('free_agents', 'both') THEN
                         PERFORM draft_tournament_free_agent_teams(NEW.id);
                     END IF;
                     IF NOT tournament_has_min_teams(NEW) THEN
