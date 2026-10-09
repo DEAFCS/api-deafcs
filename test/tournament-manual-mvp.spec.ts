@@ -67,6 +67,8 @@ describe("manual tournament MVP (SQL-driven)", () => {
     lineup2: string;
     seats1: string[];
     seats2: string[];
+    // Rostered on team 1 but not in the match lineup: the substitutes.
+    bench1: string[];
   };
 
   const stages = [
@@ -132,6 +134,19 @@ describe("manual tournament MVP (SQL-driven)", () => {
        SELECT $1, id, 1 FROM maps ORDER BY name LIMIT 1 RETURNING id`,
       [bracket.match_id],
     );
+    const seats1 = await seats(bracket.lineup_1_id);
+    const [tt1] = await postgres.query<Array<{ id: string }>>(
+      "SELECT public.tournament_match_lineup_team($1) AS id",
+      [bracket.lineup_1_id],
+    );
+    const bench1 = (
+      await postgres.query<Array<{ steam_id: string }>>(
+        "SELECT player_steam_id::text AS steam_id FROM tournament_team_roster WHERE tournament_team_id = $1 ORDER BY player_steam_id",
+        [tt1.id],
+      )
+    )
+      .map((r) => r.steam_id)
+      .filter((steam) => !seats1.includes(steam));
     return {
       id: t.id,
       organizer: t.organizer,
@@ -140,9 +155,28 @@ describe("manual tournament MVP (SQL-driven)", () => {
       mapId: map.id,
       lineup1: bracket.lineup_1_id,
       lineup2: bracket.lineup_2_id,
-      seats1: await seats(bracket.lineup_1_id),
+      seats1,
       seats2: await seats(bracket.lineup_2_id),
+      bench1,
     };
+  };
+
+  // Puts a substitute into team 1's starting lineup in place of `out`, before
+  // the match starts: the only way a substitute becomes part of a match.
+  const swapIn = async (s: Setup, substitute: string, out: string) => {
+    await postgres.query(
+      "SELECT public.set_match_starting_lineup($1, $2, $3::bigint[], $4::json)",
+      [
+        s.matchId,
+        s.lineup1,
+        (await seats(s.lineup1)).filter((x) => x !== out).concat(substitute),
+        JSON.stringify({
+          "x-hasura-role": "administrator",
+          "x-hasura-user-id": s.organizer,
+        }),
+      ],
+    );
+    s.seats1 = await seats(s.lineup1);
   };
 
   // Forces Finished without playing the bracket out; the user triggers on
@@ -350,11 +384,12 @@ describe("manual tournament MVP (SQL-driven)", () => {
       expect((await activeMvp(s.id))[0].player_steam_id).toBe(s.seats2[3]);
     });
 
-    it("a player who was only seated and never played is rejected", async () => {
+    it("a rostered substitute who never played is rejected", async () => {
       const s = await setup({ subs: 2, mates: 5 });
-      expect(s.seats1).toHaveLength(6);
-      const starters = s.seats1.slice(0, 5);
-      const idle = s.seats1[5];
+      expect(s.seats1).toHaveLength(5);
+      const starters = s.seats1;
+      const idle = s.bench1[0];
+      expect(idle).toBeDefined();
       await play(s, starters, s.seats2);
       await markFinished(s.id);
 
@@ -364,8 +399,13 @@ describe("manual tournament MVP (SQL-driven)", () => {
 
     it("a substitute who actually played is allowed, with no special rule", async () => {
       const s = await setup({ subs: 2, mates: 5 });
-      const substitute = s.seats1[5];
-      await play(s, [...s.seats1.slice(0, 4), substitute], s.seats2);
+      const substitute = s.bench1[0];
+      const [captain] = await postgres.query<Array<{ steam_id: string }>>(
+        "SELECT steam_id::text FROM match_lineup_players WHERE match_lineup_id = $1 AND captain = false ORDER BY steam_id DESC LIMIT 1",
+        [s.lineup1],
+      );
+      await swapIn(s, substitute, captain.steam_id);
+      await play(s, s.seats1, s.seats2);
       await markFinished(s.id);
 
       await expect(choose(s, substitute)).resolves.toBeDefined();
@@ -542,19 +582,29 @@ describe("manual tournament MVP (SQL-driven)", () => {
       expect(row.tournament_team_id).not.toBeNull();
     });
 
-    it("a seated substitute appears once they play", async () => {
+    it("a substitute in the starting lineup appears once they play", async () => {
       const s = await setup({ subs: 2, mates: 5 });
-      await play(s, s.seats1.slice(0, 5), s.seats2);
+      const substitute = s.bench1[0];
+      const [out] = await postgres.query<Array<{ steam_id: string }>>(
+        "SELECT steam_id::text FROM match_lineup_players WHERE match_lineup_id = $1 AND captain = false ORDER BY steam_id DESC LIMIT 1",
+        [s.lineup1],
+      );
+      await swapIn(s, substitute, out.steam_id);
+      await play(
+        s,
+        s.seats1.filter((x) => x !== substitute),
+        s.seats2,
+      );
       await markFinished(s.id);
       expect(
         (await service.listTournamentMvpCandidates(s.id)).map(
           (c) => c.player_steam_id,
         ),
-      ).not.toContain(s.seats1[5]);
+      ).not.toContain(substitute);
 
       await fx.kill(
         { matchId: s.matchId, mapId: s.mapId },
-        s.seats1[5],
+        substitute,
         s.seats2[0],
       );
 
@@ -562,7 +612,7 @@ describe("manual tournament MVP (SQL-driven)", () => {
         (await service.listTournamentMvpCandidates(s.id)).map(
           (c) => c.player_steam_id,
         ),
-      ).toContain(s.seats1[5]);
+      ).toContain(substitute);
     });
   });
 

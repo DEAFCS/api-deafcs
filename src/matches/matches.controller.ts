@@ -2381,6 +2381,24 @@ export class MatchesController {
     }
 
     if (!matches_by_pk.can_check_in) {
+      // A tournament team with substitutes has to confirm its starting lineup
+      // before anyone on it can check in; say so rather than a bare refusal.
+      const pending = await this.postgres.query<Array<{ pending: boolean }>>(
+        `SELECT EXISTS (
+           SELECT 1
+             FROM match_lineups ml
+             INNER JOIN match_lineup_players mlp ON mlp.match_lineup_id = ml.id
+            WHERE ml.match_id = $1::uuid
+              AND mlp.steam_id = $2::bigint
+              AND match_lineup_needs_starting_lineup_confirmation(ml)
+         ) AS pending`,
+        [data.match_id, data.user.steam_id],
+      );
+
+      if (pending[0]?.pending) {
+        throw Error("confirm the starting lineup before checking in");
+      }
+
       throw Error("you are not allowed to check in to this match");
     }
 

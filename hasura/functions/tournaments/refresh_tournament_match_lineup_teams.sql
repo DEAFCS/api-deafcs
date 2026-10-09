@@ -29,7 +29,9 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT match_max_players_per_lineup(match) INTO _max_players_per_lineup;
+    -- The STARTING size, not starters plus substitutes: a match lineup holds
+    -- the active players only (see match_starting_lineup.sql).
+    SELECT match_min_players_per_lineup(match) INTO _max_players_per_lineup;
 
     FOR _lineup IN
         SELECT * FROM (VALUES
@@ -54,28 +56,14 @@ BEGIN
         SELECT tt.captain_steam_id INTO _captain_steam_id
         FROM tournament_teams tt WHERE tt.id = _lineup.tournament_team_id;
 
-        SELECT COALESCE(array_agg(x.player_steam_id), ARRAY[]::bigint[]) INTO _desired
-        FROM (
-            SELECT ttr.player_steam_id
-            FROM tournament_team_roster ttr
-            INNER JOIN tournament_teams tt
-              ON tt.id = ttr.tournament_team_id
-            LEFT JOIN team_roster tr
-              ON tr.team_id = tt.team_id
-             AND tr.player_steam_id = ttr.player_steam_id
-            WHERE ttr.tournament_team_id = _lineup.tournament_team_id
-              AND NOT is_admin_sanctioned((SELECT p FROM players p WHERE p.steam_id = ttr.player_steam_id))
-            ORDER BY
-                CASE WHEN ttr.player_steam_id = _captain_steam_id THEN 0 ELSE 1 END,
-                CASE tr.status
-                    WHEN 'Starter' THEN 1
-                    WHEN 'Substitute' THEN 2
-                    WHEN 'Benched' THEN 3
-                    ELSE 4
-                END,
-                ttr.player_steam_id
-            LIMIT _max_players_per_lineup
-        ) x;
+        -- Players already seated stay seated (right after the captain), so a
+        -- roster change elsewhere never undoes the starting lineup the team
+        -- chose; only a seat whose player left the roster is refilled.
+        _desired := public.tournament_default_starters(
+            _lineup.tournament_team_id,
+            _lineup.match_lineup_id,
+            _max_players_per_lineup
+        );
 
         -- Rows currently seated in this lineup that the new roster doesn't
         -- want, oldest-steam-id-first for determinism -- these are the ones
@@ -135,9 +123,20 @@ BEGIN
             END LOOP;
         END IF;
 
-        UPDATE match_lineup_players
-           SET captain = (steam_id = _captain_steam_id)
-         WHERE match_lineup_id = _lineup.match_lineup_id;
+        PERFORM public.tournament_set_lineup_captain(
+            _lineup.match_lineup_id,
+            _captain_steam_id
+        );
+
+        -- A confirmation covers the players that were confirmed: when a seat
+        -- changed hands because the roster changed, the team confirms again.
+        IF _pair_count > 0
+           OR COALESCE(array_length(_new_extra_steam_ids, 1), 0) > 0
+           OR COALESCE(array_length(_old_extra_ids, 1), 0) > 0 THEN
+            UPDATE match_lineups
+               SET starting_lineup_confirmed_at = NULL
+             WHERE id = _lineup.match_lineup_id;
+        END IF;
     END LOOP;
 END;
 $$;

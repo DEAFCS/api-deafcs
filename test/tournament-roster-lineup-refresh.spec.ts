@@ -52,8 +52,9 @@ describe("tournament roster changes refresh pre-start match lineups (SQL-driven)
   };
 
   // Four Competitive teams with `mates` extra members each; allowance of 2, so
-  // the roster and the match cap at 7. Registration is closed, so round 1
-  // exists and is seated.
+  // the roster caps at 7. A match seats the five starters only; the rest of the
+  // roster is the bench. Registration is closed, so round 1 exists and is
+  // seated.
   const seed = async (mates: number): Promise<Fixture> => {
     const organizer = await fx.player();
     const [options] = await postgres.query<Array<{ id: string }>>(
@@ -178,15 +179,20 @@ describe("tournament roster changes refresh pre-start match lineups (SQL-driven)
     return player;
   };
 
-  const expectSameSeatsAsRoster = async (f: Fixture) => {
+  // Every seat is a rostered player, none twice; the bench is the rest.
+  const expectSeatsFromRoster = async (f: Fixture, size = 5) => {
     const lineup = (await seated(f.lineup1)).map((r) => r.steam_id).sort();
-    expect(lineup).toEqual((await roster(f.tt1)).sort());
+    const rostered = await roster(f.tt1);
+    expect(lineup).toHaveLength(Math.min(size, rostered.length));
+    for (const steam of lineup) expect(rostered).toContain(steam);
     expect(new Set(lineup).size).toBe(lineup.length);
   };
+  const expectSameSeatsAsRoster = expectSeatsFromRoster;
 
-  it("seats the whole roster when the draw is published (baseline)", async () => {
+  it("seats the five starters when the draw is published, the substitute stays on the roster (baseline)", async () => {
     const f = await seed(5);
-    expect((await seated(f.lineup1)).length).toBe(6);
+    expect((await roster(f.tt1)).length).toBe(6);
+    expect((await seated(f.lineup1)).length).toBe(5);
     await expectSameSeatsAsRoster(f);
   });
 
@@ -203,14 +209,15 @@ describe("tournament roster changes refresh pre-start match lineups (SQL-driven)
     await expectSameSeatsAsRoster(f);
   });
 
-  it("a newly added eligible player is seated, up to the cap", async () => {
+  it("a newly added player joins the bench, the starting lineup stays as chosen", async () => {
     const f = await seed(5);
+    const before = (await seated(f.lineup1)).map((r) => r.steam_id);
     const added = await addToRoster(f, f.tt1);
 
     const lineup = await seated(f.lineup1);
-    expect(lineup.map((r) => r.steam_id)).toContain(added);
-    expect(lineup.length).toBe(7);
-    await expectSameSeatsAsRoster(f);
+    expect(lineup.map((r) => r.steam_id)).not.toContain(added);
+    expect(lineup.map((r) => r.steam_id)).toEqual(before);
+    expect(await roster(f.tt1)).toContain(added);
   });
 
   it("keeps exactly one captain, the tournament captain, through a swap", async () => {
@@ -233,15 +240,17 @@ describe("tournament roster changes refresh pre-start match lineups (SQL-driven)
       [f.lineup1],
     );
     const captain = await captainOf(f.tt1);
-    const victim = (await roster(f.tt1)).find((s) => s !== captain)!;
+    const seatedBefore = (await seated(f.lineup1)).map((r) => r.steam_id);
+    const bench = (await roster(f.tt1)).find((s) => !seatedBefore.includes(s))!;
+    const victim = seatedBefore.find((s) => s !== captain)!;
     await removeFromRoster(f, f.tt1, victim);
-    const added = await addToRoster(f, f.tt1);
 
+    // The bench player takes the vacated seat and must check in for themselves.
     const lineup = await seated(f.lineup1);
-    expect(lineup.find((r) => r.steam_id === added)?.checked_in).toBe(false);
+    expect(lineup.find((r) => r.steam_id === bench)?.checked_in).toBe(false);
     // The players who were already seated and checked in keep their check-in.
     expect(
-      lineup.filter((r) => r.steam_id !== added).every((r) => r.checked_in),
+      lineup.filter((r) => r.steam_id !== bench).every((r) => r.checked_in),
     ).toBe(true);
   });
 
@@ -326,7 +335,7 @@ describe("tournament roster changes refresh pre-start match lineups (SQL-driven)
     expect(lineup.filter((r) => r.captain).map((r) => r.steam_id)).toEqual([
       newCaptain,
     ]);
-    expect(lineup.length).toBe(6);
+    expect(lineup.length).toBe(5);
     await expectSameSeatsAsRoster(f);
   });
 

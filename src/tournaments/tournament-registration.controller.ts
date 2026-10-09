@@ -550,6 +550,35 @@ export class TournamentRegistrationController {
     return { success: true };
   }
 
+  // Chooses the active players of a tournament match lineup. The rules (exactly
+  // the starting size, only the tournament roster, the captain stays, only
+  // before the match starts) and who may choose (the team's captain, owner or
+  // Admin, and the tournament's organizers and site administrators) live in
+  // set_match_starting_lineup, so a direct database write cannot bypass them.
+  @HasuraAction()
+  public async setMatchStartingLineup(data: {
+    user: User;
+    match_id: string;
+    match_lineup_id: string;
+    steam_ids: Array<string>;
+  }) {
+    await this.terms.assertAccepted(data.user.steam_id);
+
+    await this.postgres.query(
+      `SELECT set_match_starting_lineup(
+         $1::uuid, $2::uuid, $3::bigint[], $4::json
+       )`,
+      [
+        data.match_id,
+        data.match_lineup_id,
+        (data.steam_ids ?? []).map((steamId) => String(steamId)),
+        this.hasuraSession(data.user),
+      ],
+    );
+
+    return { success: true };
+  }
+
   private requireRegistrationUnlocked(tournament: TournamentAccess) {
     if (!tournament.invite_only) {
       return;

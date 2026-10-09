@@ -10,7 +10,8 @@ import { TournamentFixtures } from "./utils/tournament-fixtures";
 // Winner, runner-up and third place go to the players who actually took part
 // in the tournament, not to everyone on the roster. A substitute who was only
 // registered or seated never played and gets no placement award; one who
-// plays a single match does. Team recipients, the manual tournament MVP and
+// plays a single match does (by being put into the starting lineup, which is
+// the only way into a match). Team recipients, the manual tournament MVP and
 // every non-tournament award are not affected.
 describe("tournament placement awards go to players who took part (SQL-driven)", () => {
   let db: SqlTestDb;
@@ -52,9 +53,9 @@ describe("tournament placement awards go to players who took part (SQL-driven)",
   type Cup = { id: string; stageId: string };
 
   // Four teams of seven (five starters plus two substitutes), a single
-  // elimination bracket with a third-place match. Every match is played by
-  // each team's first five seated players unless `plays` says otherwise; the
-  // last two seats (the substitutes) never take part.
+  // elimination bracket with a third-place match. A match seats the five
+  // starting players only, so the two substitutes of each team are never in a
+  // match unless `extraPlayer` puts one into a starting lineup.
   const playCup = async ({
     withEvents = true,
     extraPlayer,
@@ -87,7 +88,7 @@ describe("tournament placement awards go to players who took part (SQL-driven)",
     await tournaments.setStatus(t.id, t.organizer, "RegistrationClosed");
     await tournaments.setStatus(t.id, t.organizer, "Live");
 
-    const idle = new Set<string>();
+    const everSeated = new Set<string>();
     let sub: string | null = null;
     const stageId = t.stageIds[0];
 
@@ -108,14 +109,54 @@ describe("tournament placement awards go to players who took part (SQL-driven)",
         [stageId, round],
       );
       for (const b of brackets) {
-        const one = await seats(b.l1);
+        let one = await seats(b.l1);
         const two = await seats(b.l2);
-        expect(one).toHaveLength(7);
-        expect(two).toHaveLength(7);
-        const activeOne = one.slice(0, 5);
-        const activeTwo = two.slice(0, 5);
-        one.slice(5).forEach((s) => idle.add(s));
-        two.slice(5).forEach((s) => idle.add(s));
+        expect(one).toHaveLength(5);
+        expect(two).toHaveLength(5);
+
+        let swappedIn: string | null = null;
+        if (
+          extraPlayer &&
+          extraPlayer.round === round &&
+          extraPlayer.matchNumber === b.match_number
+        ) {
+          // A substitute is put into the starting lineup in place of a
+          // starter who is not the captain.
+          const [bench] = await postgres.query<Array<{ steam_id: string }>>(
+            `SELECT ttr.player_steam_id::text AS steam_id
+               FROM tournament_team_roster ttr
+              WHERE ttr.tournament_team_id = public.tournament_match_lineup_team($1)
+                AND ttr.player_steam_id::text <> ALL($2::text[])
+              ORDER BY ttr.player_steam_id LIMIT 1`,
+            [b.l1, one],
+          );
+          const [dropped] = await postgres.query<Array<{ steam_id: string }>>(
+            `SELECT steam_id::text FROM match_lineup_players
+              WHERE match_lineup_id = $1 AND captain = false
+              ORDER BY steam_id DESC LIMIT 1`,
+            [b.l1],
+          );
+          swappedIn = bench.steam_id;
+          await postgres.query(
+            "SELECT set_match_starting_lineup($1, $2, $3::bigint[], $4::json)",
+            [
+              b.match_id,
+              b.l1,
+              one.filter((s) => s !== dropped.steam_id).concat(swappedIn),
+              JSON.stringify({
+                "x-hasura-role": "administrator",
+                "x-hasura-user-id": t.organizer,
+              }),
+            ],
+          );
+          one = await seats(b.l1);
+          expect(one).toContain(swappedIn);
+          expect(one).toHaveLength(5);
+        }
+        one.forEach((s) => everSeated.add(s));
+        two.forEach((s) => everSeated.add(s));
+        const activeOne = one;
+        const activeTwo = two;
 
         if (withEvents) {
           const [map] = await postgres.query<Array<{ id: string }>>(
@@ -128,20 +169,22 @@ describe("tournament placement awards go to players who took part (SQL-driven)",
             await fx.kill(ctx, activeOne[i], activeTwo[i]);
             await fx.kill(ctx, activeTwo[i], activeOne[i]);
           }
-          if (
-            extraPlayer &&
-            extraPlayer.round === round &&
-            extraPlayer.matchNumber === b.match_number
-          ) {
-            sub = one[5];
-            await fx.kill(ctx, one[5], activeTwo[0]);
+          if (swappedIn) {
+            sub = swappedIn;
           }
         }
         await tournaments.winMatch(b.match_id);
       }
     }
     expect(await tournaments.tournamentStatus(t.id)).toBe("Finished");
-    if (sub) idle.delete(sub);
+    const rostered = await postgres.query<Array<{ steam_id: string }>>(
+      "SELECT player_steam_id::text AS steam_id FROM tournament_team_roster WHERE tournament_id = $1",
+      [t.id],
+    );
+    const idle = new Set(
+      rostered.map((r) => r.steam_id).filter((s) => !everSeated.has(s)),
+    );
+    expect(idle.size).toBe(sub ? 7 : 8);
     return { id: t.id, stageId, idle, sub };
   };
 
@@ -246,12 +289,13 @@ describe("tournament placement awards go to players who took part (SQL-driven)",
     expect(teamRecipients[0].count).toBe(3);
   });
 
-  it("when a match recorded no events at all, its seated players stay eligible (nothing tells them apart)", async () => {
+  it("when a match recorded no events at all, its seated starters stay eligible and substitutes do not", async () => {
     const cup = await playCup({ withEvents: false });
-    // Lineups of seven with no activity anywhere: no one can be told apart, so
-    // the seats stand, as for ELO. Nobody is invented from outside the lineup.
+    // Lineups of five with no activity anywhere: the seats are the starters,
+    // so they stand, as for ELO. The unseated substitutes are not invented.
     const winners = await playerRecipients(cup.id, 1);
-    expect(winners).toHaveLength(7);
+    expect(winners).toHaveLength(5);
+    for (const idle of cup.idle) expect(winners).not.toContain(idle);
   });
 
   it("never touches the manual tournament MVP", async () => {

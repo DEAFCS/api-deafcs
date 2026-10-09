@@ -56,6 +56,16 @@ $$ LANGUAGE sql STABLE;
 -- A substitute who sat out is simply not rated; tournament roster membership
 -- never matters here, only seats in this match.
 --
+-- Tournament matches seat only the starting lineup (see
+-- hasura/functions/tournaments/match_starting_lineup.sql), so a tournament
+-- lineup is normally at or under the starting size and every seat is rated,
+-- free win and forfeit included. The "no activity at all" fallback below keeps
+-- rating every seat for a NON-tournament lineup. A tournament lineup that is
+-- still over the starting size (a match created before starting lineups
+-- existed) must not fall back to rating its substitutes: with no activity it
+-- is rated over the default starters instead (captain first, then the owning
+-- team's roster order).
+--
 -- plpgsql (not sql): this file loads before match_players_per_lineup.sql, and
 -- the starting lineup size is inlined from get_match_type_min_players.
 CREATE OR REPLACE FUNCTION public.match_elo_participants(
@@ -69,11 +79,29 @@ BEGIN
             mlp.match_lineup_id AS lineup_id,
             COALESCE(mlp.elo_penalty, false) AS penalized,
             COUNT(*) OVER (PARTITION BY mlp.match_lineup_id) AS seated_count,
-            get_match_type_min_players(mo.type) AS starting_size
+            get_match_type_min_players(mo.type) AS starting_size,
+            EXISTS (
+                SELECT 1 FROM tournament_brackets tb WHERE tb.match_id = m.id
+            ) AS is_tournament,
+            ROW_NUMBER() OVER (
+                PARTITION BY mlp.match_lineup_id
+                ORDER BY
+                    COALESCE(mlp.captain, false) DESC,
+                    CASE tr.status
+                        WHEN 'Starter' THEN 1
+                        WHEN 'Substitute' THEN 2
+                        WHEN 'Benched' THEN 3
+                        ELSE 4
+                    END,
+                    mlp.steam_id
+            ) AS default_rank
         FROM matches m
         JOIN match_options mo ON mo.id = m.match_options_id
         JOIN match_lineup_players mlp
             ON mlp.match_lineup_id IN (m.lineup_1_id, m.lineup_2_id)
+        LEFT JOIN match_lineups ml ON ml.id = mlp.match_lineup_id
+        LEFT JOIN team_roster tr
+            ON tr.team_id = ml.team_id AND tr.player_steam_id = mlp.steam_id
         WHERE m.id = _match_id
           AND mlp.steam_id IS NOT NULL
     ),
@@ -93,11 +121,17 @@ BEGIN
     WHERE lp.seated_count <= lp.starting_size
        OR lp.played
        OR lp.penalized
-       OR NOT EXISTS (
-           SELECT 1
-           FROM lineup_players teammate
-           WHERE teammate.lineup_id = lp.lineup_id
-             AND teammate.played
+       OR (
+           NOT EXISTS (
+               SELECT 1
+               FROM lineup_players teammate
+               WHERE teammate.lineup_id = lp.lineup_id
+                 AND teammate.played
+           )
+           -- Nothing tells the players of a tournament lineup apart, but the
+           -- team's own default starters are still the ones who were meant to
+           -- play; a substitute is never swept in by the fallback.
+           AND (NOT lp.is_tournament OR lp.default_rank <= lp.starting_size)
        );
 END;
 $$ LANGUAGE plpgsql STABLE;

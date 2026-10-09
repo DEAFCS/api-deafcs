@@ -86,6 +86,11 @@ computed_fields:
       function:
         name: get_team_name
         schema: public
+  - name: needs_starting_lineup_confirmation
+    definition:
+      function:
+        name: match_lineup_needs_starting_lineup_confirmation
+        schema: public
 insert_permissions:
   - role: user
     permission:
@@ -111,6 +116,7 @@ select_permissions:
         - is_picking_region_veto
         - is_ready
         - name
+        - needs_starting_lineup_confirmation
       filter: {}
       allow_aggregations: true
     comment: ""

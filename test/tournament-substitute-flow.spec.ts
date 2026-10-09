@@ -10,9 +10,9 @@ import { TournamentFixtures } from "./utils/tournament-fixtures";
 
 // The whole substitute path in one tournament: a roster swap before the match,
 // the lineup that results, who actually plays, and who is rated afterwards.
-// Seated is not played: a player who only sat in the lineup is not rated when
-// the lineup carries substitutes, and nothing about a normal 5-player match
-// changes.
+// A match seats the starting size only; substitutes stay on the tournament
+// roster, are not rated for a match they did not start, and nothing about a
+// normal 5-player match changes.
 describe("substitute flow: roster swap, lineup, play, ELO (SQL-driven)", () => {
   let db: SqlTestDb;
   let postgres: PostgresService;
@@ -89,11 +89,23 @@ describe("substitute flow: roster swap, lineup, play, ELO (SQL-driven)", () => {
       [t.id],
     );
 
-    // Both sides start with six seated: five starters and one substitute.
+    // Both sides seat their five starters; the sixth rostered player stays on
+    // the bench of the tournament roster.
     const team1Before = await seats(bracket.lineup_1_id);
     const team2 = await seats(bracket.lineup_2_id);
-    expect(team1Before).toHaveLength(6);
-    expect(team2).toHaveLength(6);
+    expect(team1Before).toHaveLength(5);
+    expect(team2).toHaveLength(5);
+    const rosterOf = async (tournamentTeamId: string) =>
+      (
+        await postgres.query<Array<{ steam_id: string }>>(
+          "SELECT player_steam_id::text AS steam_id FROM tournament_team_roster WHERE tournament_team_id = $1",
+          [tournamentTeamId],
+        )
+      ).map((r) => r.steam_id);
+    const bench1 = (await rosterOf(bracket.tt1)).filter(
+      (s) => !team1Before.includes(s),
+    );
+    expect(bench1).toHaveLength(1);
 
     // Team 1's organizer pulls one starter off the roster; the lineup follows,
     // and the substitute is now one of the five who play.
@@ -111,6 +123,7 @@ describe("substitute flow: roster swap, lineup, play, ELO (SQL-driven)", () => {
     const team1 = await seats(bracket.lineup_1_id);
     expect(team1).toHaveLength(5);
     expect(team1).not.toContain(removed);
+    expect(team1).toContain(bench1[0]);
     expect(new Set(team1).size).toBe(5);
     const [captains] = await postgres.query<Array<{ count: number }>>(
       "SELECT count(*)::int AS count FROM match_lineup_players WHERE match_lineup_id = $1 AND captain",
@@ -118,15 +131,14 @@ describe("substitute flow: roster swap, lineup, play, ELO (SQL-driven)", () => {
     );
     expect(captains.count).toBe(1);
 
-    // Play: team 1's five, and five of team 2's six (one never plays).
+    // Play: both sides' five.
     const [map] = await postgres.query<Array<{ id: string }>>(
       `INSERT INTO match_maps (match_id, map_id, "order")
        SELECT $1, id, 1 FROM maps ORDER BY name LIMIT 1 RETURNING id`,
       [bracket.match_id],
     );
     const ctx = { matchId: bracket.match_id, mapId: map.id };
-    const team2Active = team2.slice(0, 5);
-    const team2Idle = team2[5];
+    const team2Active = team2;
     for (let i = 0; i < 5; i++) {
       await fx.kill(ctx, team1[i], team2Active[i]);
       await fx.kill(ctx, team2Active[i], team1[i]);
@@ -143,7 +155,6 @@ describe("substitute flow: roster swap, lineup, play, ELO (SQL-driven)", () => {
 
     const ratedPlayers = await rated(bracket.match_id);
     expect(new Set(ratedPlayers)).toEqual(new Set([...team1, ...team2Active]));
-    expect(ratedPlayers).not.toContain(team2Idle);
     expect(ratedPlayers).not.toContain(removed);
     // One rating row per participant: no duplicate stats.
     expect(ratedPlayers).toHaveLength(10);

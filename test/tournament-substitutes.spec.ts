@@ -295,16 +295,18 @@ describe("tournament substitutes (SQL-driven)", () => {
       );
     });
 
-    it("on: a Competitive match seats the starters plus substitutes, up to 7", async () => {
+    it("on: a Competitive match still allows substitutes (cap 7) but seats the five starters", async () => {
       const tournament = await createTournament({ type: "Competitive", substitutes: 2 });
 
-      // Teams of 8 (owner + 7): the roster and the match cap at 5 + 2.
+      // Teams of 8 (owner + 7): the roster caps at 5 + 2 and the match
+      // allows up to 7, but a match is played by the five starters; the rest
+      // of the roster is the bench until the team swaps them in.
       const matches = await seedBracket(tournament, 7);
 
       for (const match of matches) {
         expect(match.max_players).toBe(7);
-        expect(await seatedCount(match.lineup_1_id)).toBe(7);
-        expect(await seatedCount(match.lineup_2_id)).toBe(7);
+        expect(await seatedCount(match.lineup_1_id)).toBe(5);
+        expect(await seatedCount(match.lineup_2_id)).toBe(5);
       }
     });
 

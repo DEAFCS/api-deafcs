@@ -1893,6 +1893,14 @@ type Mutation {
 }
 
 type Mutation {
+  setMatchStartingLineup(
+    match_id: uuid!
+    match_lineup_id: uuid!
+    steam_ids: [String!]!
+  ): SuccessOutput
+}
+
+type Mutation {
   createTournamentInviteCode(
     tournament_id: uuid!
     expires_in_minutes: Int

@@ -159,8 +159,12 @@ CREATE OR REPLACE FUNCTION public.schedule_tournament_match(bracket public.tourn
      RETURNING lineup_1_id, lineup_2_id
        INTO _lineup_1_id, _lineup_2_id;
 
-     -- Cap by the match's own options (a clone), not the tournament default.
-     SELECT match_max_players_per_lineup(m)
+     -- Seat the STARTING size, by the match's own options (a clone). The
+     -- tournament roster may carry substitutes; a match is played by exactly
+     -- the starting lineup, which the team's staff can change until the match
+     -- starts (set_match_starting_lineup). Substitutes stay on the tournament
+     -- roster only.
+     SELECT match_min_players_per_lineup(m)
      INTO _max_players_per_lineup
      FROM matches m
      WHERE m.id = _match_id;
