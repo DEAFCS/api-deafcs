@@ -2,6 +2,7 @@ import {
   TournamentCallService,
   TournamentCallError,
   TOURNAMENT_CALL_FULL_MESSAGE,
+  TOURNAMENT_CALL_MAX_PARTICIPANTS,
 } from "./tournament-call.service";
 import { ChatLobbyType } from "../../chat/enums/ChatLobbyTypes";
 import { User } from "../../auth/types/User";
@@ -184,7 +185,7 @@ describe("TournamentCallService - access", () => {
     t.grant(T1, "1");
     const result = await t.service.join(T1, user("1"));
     expect(result.token).toMatch(/^[0-9a-f-]{36}$/);
-    expect(result.max).toBe(5);
+    expect(result.max).toBe(4);
     expect(t.chat.canAccessTournamentChat).toHaveBeenCalledWith(T1, "1");
   });
 
@@ -247,67 +248,78 @@ describe("TournamentCallService - access", () => {
   });
 });
 
-describe("TournamentCallService - capacity (max 5)", () => {
-  it("users 1-5 can join and publish, user 6 is rejected with a friendly message", async () => {
+describe("TournamentCallService - capacity (max 4)", () => {
+  it("users 1-4 can join and publish, user 5 is rejected with a friendly message", async () => {
     const t = setup();
-    t.grant(T1, "1", "2", "3", "4", "5", "6");
-    for (const id of ["1", "2", "3", "4", "5"]) {
+    t.grant(T1, "1", "2", "3", "4", "5");
+    for (const id of ["1", "2", "3", "4"]) {
       await t.joinAndPublish(T1, user(id));
     }
-    expect(await t.service.getParticipants(T1)).toHaveLength(5);
-    await expect(t.service.join(T1, user("6"))).rejects.toThrow(
+    expect(await t.service.getParticipants(T1)).toHaveLength(4);
+    await expect(t.service.join(T1, user("5"))).rejects.toThrow(
       TOURNAMENT_CALL_FULL_MESSAGE,
     );
-    expect(TOURNAMENT_CALL_FULL_MESSAGE).toBe("Webcam room is full (5/5).");
+    expect(TOURNAMENT_CALL_FULL_MESSAGE).toBe("Webcam room is full (4/4).");
+    expect(TOURNAMENT_CALL_MAX_PARTICIPANTS).toBe(4);
+  });
+
+  it("reports max 4 to the client", async () => {
+    const t = setup();
+    t.grant(T1, "1");
+    await expect(t.service.join(T1, user("1"))).resolves.toMatchObject({
+      max: 4,
+    });
+    await expect(
+      t.service.getParticipantsForUser(T1, user("1")),
+    ).resolves.toMatchObject({ max: 4 });
   });
 
   it("counts people still joining (reserved, camera not live yet) toward the cap", async () => {
     const t = setup();
-    t.grant(T1, "1", "2", "3", "4", "5", "6");
-    for (const id of ["1", "2", "3", "4", "5"])
-      await t.service.join(T1, user(id));
-    await expect(t.service.join(T1, user("6"))).rejects.toThrow(
+    t.grant(T1, "1", "2", "3", "4", "5");
+    for (const id of ["1", "2", "3", "4"]) await t.service.join(T1, user(id));
+    await expect(t.service.join(T1, user("5"))).rejects.toThrow(
       TOURNAMENT_CALL_FULL_MESSAGE,
     );
   });
 
   it("re-checks the cap at publish time", async () => {
     const t = setup();
-    t.grant(T1, "1", "2", "3", "4", "5", "6");
-    const { token } = await t.service.join(T1, user("6"));
-    // 6's reservation lapses while they sit on the device picker...
-    t.redis.hashes.get(`tournament-call:reserve:${T1}`)!.delete("6");
-    for (const id of ["1", "2", "3", "4", "5"])
+    t.grant(T1, "1", "2", "3", "4", "5");
+    const { token } = await t.service.join(T1, user("5"));
+    // 5's reservation lapses while they sit on the device picker...
+    t.redis.hashes.get(`tournament-call:reserve:${T1}`)!.delete("5");
+    for (const id of ["1", "2", "3", "4"])
       await t.joinAndPublish(T1, user(id));
     await expect(t.service.proxyWhip(token, "sdp")).rejects.toThrow(
       TOURNAMENT_CALL_FULL_MESSAGE,
     );
-    expect(t.live.has(TournamentCallService.pathFor(T1, "6"))).toBe(false);
+    expect(t.live.has(TournamentCallService.pathFor(T1, "5"))).toBe(false);
   });
 
   it("an existing participant re-joining does not need a new slot", async () => {
     const t = setup();
-    t.grant(T1, "1", "2", "3", "4", "5");
-    for (const id of ["1", "2", "3", "4", "5"])
+    t.grant(T1, "1", "2", "3", "4");
+    for (const id of ["1", "2", "3", "4"])
       await t.joinAndPublish(T1, user(id));
     await expect(t.service.join(T1, user("3"))).resolves.toBeTruthy();
   });
 
   it("leaving frees a slot", async () => {
     const t = setup();
-    t.grant(T1, "1", "2", "3", "4", "5", "6");
+    t.grant(T1, "1", "2", "3", "4", "5");
     const tokens: Record<string, string> = {};
-    for (const id of ["1", "2", "3", "4", "5"])
+    for (const id of ["1", "2", "3", "4"])
       tokens[id] = await t.joinAndPublish(T1, user(id));
     await t.service.hangupForToken(tokens["2"]);
-    expect(await t.service.getParticipants(T1)).toHaveLength(4);
-    await expect(t.joinAndPublish(T1, user("6"))).resolves.toBeTruthy();
+    expect(await t.service.getParticipants(T1)).toHaveLength(3);
+    await expect(t.joinAndPublish(T1, user("5"))).resolves.toBeTruthy();
   });
 
   it("a dropped connection (mediamtx path gone) frees a slot", async () => {
     const t = setup();
-    t.grant(T1, "1", "2", "3", "4", "5", "6");
-    for (const id of ["1", "2", "3", "4", "5"])
+    t.grant(T1, "1", "2", "3", "4", "5");
+    for (const id of ["1", "2", "3", "4"])
       await t.joinAndPublish(T1, user(id));
     // Any participant listing while "4" is live releases their join-time
     // reservation (mediamtx presence counts them from then on).
@@ -317,15 +329,56 @@ describe("TournamentCallService - capacity (max 5)", () => {
     );
     // Browser closed: mediamtx drops the publisher, slot is free at once.
     t.live.delete(TournamentCallService.pathFor(T1, "4"));
-    expect(await t.service.getParticipants(T1)).toHaveLength(4);
-    await expect(t.joinAndPublish(T1, user("6"))).resolves.toBeTruthy();
+    expect(await t.service.getParticipants(T1)).toHaveLength(3);
+    await expect(t.joinAndPublish(T1, user("5"))).resolves.toBeTruthy();
+  });
+
+  it("a reconnect while mediamtx still holds the old publisher evicts it and never shows the person twice", async () => {
+    const t = setup();
+    t.grant(T1, "1", "2", "3", "4");
+    const tokens: Record<string, string> = {};
+    for (const id of ["1", "2", "3", "4"])
+      tokens[id] = await t.joinAndPublish(T1, user(id));
+    const path = TournamentCallService.pathFor(T1, "3");
+    t.media.kickPath.mockClear();
+
+    // Phone woke up: same token publishes again while the old path is
+    // still marked live. The room is full, but 3 only replaces themselves.
+    await expect(t.service.proxyWhip(tokens["3"], "sdp")).resolves.toBe(
+      "answer-sdp",
+    );
+    expect(t.media.kickPath).toHaveBeenCalledWith(path);
+    const participants = await t.service.getParticipants(T1);
+    expect(participants.filter((p) => p.steamId === "3")).toHaveLength(1);
+    expect(participants).toHaveLength(4);
+  });
+
+  it("a first-time publish does not evict anything", async () => {
+    const t = setup();
+    t.grant(T1, "1");
+    await t.joinAndPublish(T1, user("1"));
+    expect(t.media.kickPath).not.toHaveBeenCalled();
+  });
+
+  it("a stale reservation cannot block the cap past its expiry", async () => {
+    const t = setup();
+    t.grant(T1, "1", "2", "3", "4", "5");
+    for (const id of ["1", "2", "3"]) await t.joinAndPublish(T1, user(id));
+    await t.service.join(T1, user("4")); // never publishes
+    await expect(t.service.join(T1, user("5"))).rejects.toThrow(
+      TOURNAMENT_CALL_FULL_MESSAGE,
+    );
+    // The 90s reservation expiry (or a hangup) frees it again.
+    const hash = t.redis.hashes.get(`tournament-call:reserve:${T1}`)!;
+    hash.set("4", String(Date.now() - 1));
+    await expect(t.service.join(T1, user("5"))).resolves.toBeTruthy();
   });
 
   it("rooms are per tournament", async () => {
     const t = setup();
-    t.grant(T1, "1", "2", "3", "4", "5");
+    t.grant(T1, "1", "2", "3", "4");
     t.grant(T2, "9");
-    for (const id of ["1", "2", "3", "4", "5"])
+    for (const id of ["1", "2", "3", "4"])
       await t.joinAndPublish(T1, user(id));
     await expect(t.joinAndPublish(T2, user("9"))).resolves.toBeTruthy();
     expect(await t.service.getParticipants(T2)).toEqual([
@@ -340,11 +393,41 @@ describe("TournamentCallService - capacity (max 5)", () => {
     const [script, numKeys, key, , , max, self] = t.redis.eval.mock.calls[0];
     expect(numKeys).toBe(1);
     expect(key).toBe(`tournament-call:reserve:${T1}`);
-    expect(max).toBe("5");
+    expect(max).toBe("4");
     expect(self).toBe("1");
     expect(script).toContain("HGETALL");
     expect(script).toContain("if count >= max then return 0 end");
     expect(script).toContain("redis.call('HSET', KEYS[1], self, expiresAt)");
+  });
+});
+
+describe("TournamentCallService - link status", () => {
+  it("reports ready while live and a plain not-ready (no reason) when the connection dropped", async () => {
+    const t = setup();
+    t.grant(T1, "1");
+    const token = await t.joinAndPublish(T1, user("1"));
+    await expect(t.service.getStatusForToken(token)).resolves.toMatchObject({
+      ready: true,
+      steamId: "1",
+    });
+    t.live.delete(TournamentCallService.pathFor(T1, "1"));
+    const dropped = await t.service.getStatusForToken(token);
+    expect(dropped.ready).toBe(false);
+    expect(dropped.reason).toBeUndefined();
+  });
+
+  it("tells a removed or expired link apart from a dropped connection", async () => {
+    const t = setup();
+    t.grant(T1, "1", "admin");
+    const token = await t.joinAndPublish(T1, user("1"));
+    await t.service.kick(T1, "1", user("admin", "administrator"));
+    await expect(t.service.getStatusForToken(token)).resolves.toEqual({
+      ready: false,
+      reason: "expired",
+    });
+    await expect(
+      t.service.getStatusForToken("not-a-token"),
+    ).resolves.toEqual({ ready: false, reason: "expired" });
   });
 });
 
@@ -389,14 +472,14 @@ describe("TournamentCallService - kick", () => {
 
   it("kick frees the slot, only touches the webcam room, and allows rejoining", async () => {
     const t = setup();
-    t.grant(T1, "1", "2", "3", "4", "5", "6", "admin");
+    t.grant(T1, "1", "2", "3", "4", "5", "admin");
     const tokens: Record<string, string> = {};
-    for (const id of ["1", "2", "3", "4", "5"])
+    for (const id of ["1", "2", "3", "4"])
       tokens[id] = await t.joinAndPublish(T1, user(id));
     await t.service.kick(T1, "3", user("admin", "administrator"));
 
-    expect(await t.service.getParticipants(T1)).toHaveLength(4);
-    await expect(t.joinAndPublish(T1, user("6"))).resolves.toBeTruthy();
+    expect(await t.service.getParticipants(T1)).toHaveLength(3);
+    await expect(t.joinAndPublish(T1, user("5"))).resolves.toBeTruthy();
     // The kicked player's old link is dead...
     await expect(t.service.proxyWhip(tokens["3"], "sdp")).rejects.toThrow(
       /invalid or expired/,
