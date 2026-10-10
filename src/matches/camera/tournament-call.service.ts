@@ -8,6 +8,7 @@ import { ChatLobbyType } from "../../chat/enums/ChatLobbyTypes";
 import { User } from "../../auth/types/User";
 import {
   LobbyCallService,
+  MAX_PARTICIPANTS,
   type LobbyCallParticipant,
 } from "./lobby-call.service";
 
@@ -23,7 +24,7 @@ import {
 //   participants, assigned organizers, administrators) plus the tournament
 //   chat lifecycle (open until 24h after Finished)
 // - join tokens live in Redis with a TTL (no DB table / migration)
-// - the 4-person cap is re-checked atomically at publish time
+// - the 5-person cap is re-checked atomically at publish time
 // - administrators and this tournament's organizers can kick someone out
 //   of the webcam room only (not the tournament, not the chat)
 // - it never rings anyone: no popup, push, or notification is sent. The
@@ -35,11 +36,7 @@ export type TournamentCallParticipant = LobbyCallParticipant;
 
 export class TournamentCallError extends Error {}
 
-// The tournament webcam room holds at most 4 people (a 2x2 grid). The
-// matchmaking lobby call keeps its own, larger MAX_PARTICIPANTS.
-export const TOURNAMENT_CALL_MAX_PARTICIPANTS = 4;
-
-export const TOURNAMENT_CALL_FULL_MESSAGE = `Webcam room is full (${TOURNAMENT_CALL_MAX_PARTICIPANTS}/${TOURNAMENT_CALL_MAX_PARTICIPANTS}).`;
+export const TOURNAMENT_CALL_FULL_MESSAGE = `Webcam room is full (${MAX_PARTICIPANTS}/${MAX_PARTICIPANTS}).`;
 
 // Tokens outlive any realistic support session but never the tournament.
 const TOKEN_TTL_SECONDS = 12 * 60 * 60;
@@ -190,7 +187,7 @@ export class TournamentCallService {
       this.reservationKey(tournamentId),
       String(now),
       String(now + RESERVATION_TTL_MS),
-      String(TOURNAMENT_CALL_MAX_PARTICIPANTS),
+      String(MAX_PARTICIPANTS),
       String(steamId),
       ...liveSteamIds.map(String),
     );
@@ -256,7 +253,7 @@ export class TournamentCallService {
       token,
       participants,
       canKick: await this.canKick(tournamentId, user),
-      max: TOURNAMENT_CALL_MAX_PARTICIPANTS,
+      max: MAX_PARTICIPANTS,
     };
   }
 
@@ -286,23 +283,14 @@ export class TournamentCallService {
     if (!lookup)
       throw new TournamentCallError("invalid or expired webcam link");
 
-    const path = TournamentCallService.pathFor(
-      lookup.tournamentId,
-      lookup.steamId,
-    );
-
-    // A phone that was backgrounded or lost signal can reconnect before
-    // mediamtx has noticed the old publisher is gone. Evict that stale
-    // publisher of the SAME person first, otherwise the new WHIP would be
-    // refused (or the person would appear twice).
-    if ((await this.media.getPathStatus(path)).ready) {
-      await this.media.kickPath(path);
-    }
-
     // Hard cap at publish time too: someone may have sat on the device
     // picker long enough for their join-time reservation to lapse.
     await this.claimSlot(lookup.tournamentId, lookup.steamId);
 
+    const path = TournamentCallService.pathFor(
+      lookup.tournamentId,
+      lookup.steamId,
+    );
     const answer = await this.media.proxySdp(`/${path}/whip`, sdp);
     void this.broadcastPresence(
       lookup.tournamentId,
@@ -314,12 +302,9 @@ export class TournamentCallService {
 
   public async getStatusForToken(
     token: string,
-  ): Promise<{ ready: boolean; steamId?: string; reason?: "expired" }> {
+  ): Promise<{ ready: boolean; steamId?: string }> {
     const lookup = await this.validateToken(token);
-    // "expired": the link is no longer valid (removed from the room by an
-    // organizer/admin, access lost, or the chat window closed). Reconnecting
-    // with this link can never work, unlike a plain dropped connection.
-    if (!lookup) return { ready: false, reason: "expired" };
+    if (!lookup) return { ready: false };
     const status = await this.media.getPathStatus(
       TournamentCallService.pathFor(lookup.tournamentId, lookup.steamId),
     );
@@ -365,7 +350,7 @@ export class TournamentCallService {
 
   // Live publishers per mediamtx. Anyone who no longer has access (left
   // the tournament, organizer removed, chat window closed) is dropped
-  // from the room here, so they cannot keep holding one of the 4 slots.
+  // from the room here, so they cannot keep holding one of the 5 slots.
   public async getParticipants(
     tournamentId: string,
   ): Promise<TournamentCallParticipant[]> {
@@ -398,7 +383,7 @@ export class TournamentCallService {
     return {
       participants: await this.getParticipants(tournamentId),
       canKick: await this.canKick(tournamentId, user),
-      max: TOURNAMENT_CALL_MAX_PARTICIPANTS,
+      max: MAX_PARTICIPANTS,
     };
   }
 
