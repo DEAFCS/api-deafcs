@@ -153,6 +153,7 @@ describe("ChatService temporary video drafts", () => {
       exec: jest.fn().mockResolvedValue([]),
     };
     redis = {
+      eval: jest.fn().mockResolvedValue(1),
       get: jest.fn(async (key: string) => values.get(key) ?? null),
       set: jest.fn(async (key: string, value: string, ...args: any[]) => {
         if (args.includes("NX") && values.has(key)) return null;
@@ -362,6 +363,51 @@ describe("ChatService temporary video drafts", () => {
     await expect(
       service.getVideoMediaForViewer(mediaId, owner),
     ).resolves.toBeUndefined();
+  });
+
+  it("keeps a rate-limited video draft ready and sends it once after retry", async () => {
+    const session = await service.createVideoDraftSession(
+      ChatLobbyType.Global,
+      "global",
+      owner,
+    );
+    const webm = Buffer.concat([
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+      Buffer.alloc(256),
+    ]);
+    await service.uploadPhoneVideoDraft(
+      session!.token,
+      webm,
+      "video/webm",
+      10_000,
+    );
+    jest.spyOn(service as any, "getCurrentUser").mockResolvedValue(owner);
+    jest
+      .spyOn(service, "getWebsiteChatMuteStatus")
+      .mockResolvedValue({ active: false, expiresAt: null, permanent: false });
+    jest.spyOn(service, "to").mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, "notifyLobbyMembers")
+      .mockResolvedValue(undefined);
+
+    redis.eval.mockResolvedValueOnce(6);
+    await expect(
+      service.sendOwnedVideoDraft(session!.id, owner),
+    ).resolves.toEqual({ accepted: false, rateLimited: true });
+    expect(hashes.get("chat_global_global")).toBeUndefined();
+    expect(service.to).not.toHaveBeenCalled();
+    await expect(
+      service.getOwnedVideoDraft(session!.id, owner),
+    ).resolves.toMatchObject({ state: "ready" });
+
+    await expect(service.sendPhoneVideoDraft(session!.token)).resolves.toEqual({
+      accepted: true,
+    });
+    await expect(
+      service.sendOwnedVideoDraft(session!.id, owner),
+    ).resolves.toEqual({ accepted: true });
+    expect(hashes.get("chat_global_global")?.size).toBe(1);
+    expect(service.to).toHaveBeenCalledTimes(1);
   });
 
   it("sends once through the server-bound phone session and makes retries idempotent", async () => {

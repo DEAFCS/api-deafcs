@@ -161,6 +161,31 @@ export class ChatService {
 
   private expiresIn = 60 * 60 * 24;
 
+  // Upstream d2d7f616: shared across rooms and API instances.
+  public static readonly MESSAGE_RATE_LIMIT = 5;
+  private static readonly MESSAGE_RATE_WINDOW_MS = 3_000;
+  private static readonly RATE_SCRIPT = `
+    local count = redis.call('INCR', KEYS[1])
+    if count == 1 then
+      redis.call('PEXPIRE', KEYS[1], ARGV[1])
+    end
+    return count
+  `;
+
+  private async withinRate(
+    key: string,
+    limit: number,
+    windowMs: number,
+  ): Promise<boolean> {
+    const count = await this.redis.eval(
+      ChatService.RATE_SCRIPT,
+      1,
+      key,
+      windowMs,
+    );
+    return Number(count) <= limit;
+  }
+
   // Match and team chat get a much longer retention than the default
   // (see expiresIn) so an admin can still pull up the post-match chat
   // log (see joinMatchLobby's Finished-match admin bypass below) days
@@ -996,6 +1021,7 @@ export class ChatService {
   ): Promise<{
     accepted: boolean;
     tooLong?: boolean;
+    rateLimited?: boolean;
     muteStatus?: WebsiteChatMuteStatus;
     restrictionStatus?: WebsiteRestrictionStatus;
   }> {
@@ -1029,6 +1055,20 @@ export class ChatService {
 
     if (!_message.trim() && !attachment && !gifUrl && !videoDraftId) {
       return { accepted: false };
+    }
+
+    // Apply before any permission queries, persistence, notifications or RCON.
+    // Game-relayed chat keeps its existing path. Website retries count as sends,
+    // just as upstream does, and a rejected video draft remains retryable.
+    if (
+      source === "website" &&
+      !(await this.withinRate(
+        `chat:message-rate:${player.steam_id}`,
+        ChatService.MESSAGE_RATE_LIMIT,
+        ChatService.MESSAGE_RATE_WINDOW_MS,
+      ))
+    ) {
+      return { accepted: false, rateLimited: true };
     }
 
     let videoDraftSession: any;

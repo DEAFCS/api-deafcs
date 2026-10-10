@@ -23,7 +23,9 @@ describe("ChatService tournament access", () => {
       hset: jest.fn().mockResolvedValue(1),
       hdel: jest.fn().mockResolvedValue(1),
       expire: jest.fn().mockResolvedValue(1),
-      eval: jest.fn().mockResolvedValue([1, 1]),
+      eval: jest.fn(async (_script: string, _keys: number, key: string) =>
+        key.startsWith("chat:message-rate:") ? 1 : [1, 1],
+      ),
       get: jest.fn().mockResolvedValue(null),
       sendCommand: jest.fn().mockResolvedValue(1),
       publish: jest.fn().mockResolvedValue(1),
@@ -237,6 +239,9 @@ describe("ChatService tournament access", () => {
         player,
         "from CS2",
         true,
+        undefined,
+        undefined,
+        "game",
       ),
     ).resolves.toEqual({ accepted: true });
 

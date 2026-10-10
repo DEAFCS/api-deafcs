@@ -104,6 +104,17 @@ export class ChatGateway {
     );
 
     if (!result.accepted) {
+      if (result.rateLimited) {
+        client.send(
+          JSON.stringify({
+            event: "chat:send:error",
+            data: {
+              message:
+                "You are sending messages too quickly. Please wait a few seconds.",
+            },
+          }),
+        );
+      }
       if (result.tooLong) {
         this.sendTooLongError(client);
       }

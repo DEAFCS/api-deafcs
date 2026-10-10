@@ -6,6 +6,8 @@ import {
   ForbiddenException,
   Get,
   Headers,
+  HttpException,
+  HttpStatus,
   NotFoundException,
   Param,
   Post,
@@ -108,6 +110,12 @@ export class ChatVideoController {
   public async sendPhone(@Headers("authorization") authorization?: string) {
     const token = this.phoneToken(authorization);
     const result = await this.chat.sendPhoneVideoDraft(token);
+    if (result.rateLimited) {
+      throw new HttpException(
+        "You are sending messages too quickly. Please wait a few seconds.",
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
     if (!result.accepted)
       throw new ForbiddenException(
         "Video could not be sent. Check that you still have permission to chat.",
@@ -168,6 +176,12 @@ export class ChatVideoController {
     if (!user?.steam_id)
       throw new ForbiddenException("authentication required");
     const result = await this.chat.sendOwnedVideoDraft(id, user);
+    if (result.rateLimited) {
+      throw new HttpException(
+        "You are sending messages too quickly. Please wait a few seconds.",
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
     if (!result.accepted)
       throw new ForbiddenException(
         "Video could not be sent. Check that you still have permission to chat.",
