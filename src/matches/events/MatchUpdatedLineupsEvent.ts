@@ -54,21 +54,7 @@ export default class MatchUpdatedLineupsEvent extends MatchEventProcessor<{
                 name: player.name,
                 steam_id: player.steam_id,
               },
-              on_conflict: {
-                constraint: "players_steam_id_key",
-                update_columns: ["name"],
-                // See PlayerConnected.ts -- only refill `name` for a
-                // player who hasn't registered/had a name change
-                // approved yet, so this doesn't clobber a deliberately
-                // chosen display name back to the Discord-roster name on
-                // every lineup update.
-                where: {
-                  _or: [
-                    { name_registered: { _is_null: true } },
-                    { name_registered: { _eq: false } },
-                  ],
-                },
-              },
+              on_conflict: this.playerNameConflict(),
             },
             __typename: true,
           },
