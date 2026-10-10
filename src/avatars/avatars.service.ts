@@ -205,9 +205,9 @@ export class AvatarsService {
     buffer: Buffer,
     mimetype: string,
   ): Promise<string> {
-    if (!isRoleAbove(user.role, "tournament_organizer")) {
+    if (steamId !== user.steam_id && user.role !== "administrator") {
       throw new ForbiddenException(
-        "You do not have permission to manage roster images",
+        "You cannot change this player's roster image",
       );
     }
 
@@ -240,9 +240,9 @@ export class AvatarsService {
   }
 
   async removePlayerRosterImage(steamId: string, user: User): Promise<void> {
-    if (!isRoleAbove(user.role, "tournament_organizer")) {
+    if (steamId !== user.steam_id && user.role !== "administrator") {
       throw new ForbiddenException(
-        "You do not have permission to manage roster images",
+        "You cannot change this player's roster image",
       );
     }
 
