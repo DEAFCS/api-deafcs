@@ -32,9 +32,13 @@ BEGIN
        AND NOT tgisinternal;
 
     -- Computed-field function that takes the row type; it blocks DROP TABLE.
-    SELECT pg_get_functiondef('public.player_sanction_is_active(public.player_sanctions)'::regprocedure)
-      INTO active_function_definition;
-    DROP FUNCTION public.player_sanction_is_active(public.player_sanctions);
+    -- hasura/functions/ is applied after the migrations, so on a fresh database
+    -- it does not exist yet and there is nothing to preserve.
+    IF to_regprocedure('public.player_sanction_is_active(public.player_sanctions)') IS NOT NULL THEN
+        SELECT pg_get_functiondef('public.player_sanction_is_active(public.player_sanctions)'::regprocedure)
+          INTO active_function_definition;
+        DROP FUNCTION public.player_sanction_is_active(public.player_sanctions);
+    END IF;
 
     CREATE TABLE public.player_sanctions_plain (
         LIKE public.player_sanctions INCLUDING DEFAULTS
@@ -78,7 +82,9 @@ BEGIN
     CREATE INDEX player_sanctions_created_at_idx
         ON public.player_sanctions (created_at DESC);
 
-    EXECUTE active_function_definition;
+    IF active_function_definition IS NOT NULL THEN
+        EXECUTE active_function_definition;
+    END IF;
 
     FOREACH trigger_definition IN ARRAY trigger_definitions LOOP
         EXECUTE trigger_definition;
