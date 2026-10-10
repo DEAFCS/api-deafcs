@@ -1297,6 +1297,7 @@ export class MatchAssistantService {
                             value: `-disable_workshop_command_filtering -maxplayers ${match.max_players_per_lineup * 2 + 3} ${map.workshop_map_id ? `+map de_inferno` : `+map ${map.name}`} +sv_password ${match.password}${vacInsecureFlag}`,
                           },
                           { name: "SERVER_ID", value: server.id },
+                          { name: "MATCH_ID", value: matchId },
                           {
                             name: "SERVER_API_PASSWORD",
                             value: server.api_password,
