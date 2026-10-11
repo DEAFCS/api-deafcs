@@ -163,6 +163,46 @@ export class ChatGateway {
     );
   }
 
+  // Upstream action names and correlated results; old lobby:chat:* routes
+  // remain intact for existing clients. Boolean DEAFCS service refusals use
+  // not_allowed rather than guessing a more specific cause.
+  @SubscribeMessage("lobby:edit")
+  async editMessageRequest(@MessageBody() data: { id: string; type: ChatLobbyType; messageId: string; message: string; requestId?: string }, @ConnectedSocket() client: FiveStackWebSocketClient) {
+    if (!this.validAction(client, data) || typeof data.message !== "string") return;
+    if (isChatMessageTooLong(data.message.trim())) return this.sendActionResult(client, "edit", data, false, "too_long");
+    const edited = data.type === ChatLobbyType.Announcement
+      ? data.id === "announcement" && await this.chat.editAnnouncement(client, data.messageId, data.message)
+      : await this.chat.editChatMessage(client, data.type, data.id, data.messageId, data.message);
+    this.sendActionResult(client, "edit", data, edited);
+  }
+
+  @SubscribeMessage("lobby:delete")
+  async deleteMessageRequest(@MessageBody() data: { id: string; type: ChatLobbyType; messageId: string; requestId?: string }, @ConnectedSocket() client: FiveStackWebSocketClient) {
+    if (!this.validAction(client, data)) return;
+    const deleted = await this.chat.deleteMessage(client, data.type, data.id, data.messageId);
+    this.sendActionResult(client, "delete", data, deleted);
+  }
+
+  @SubscribeMessage("lobby:react")
+  async reactionRequest(@MessageBody() data: { id: string; type: ChatLobbyType; messageId: string; reaction: string; requestId?: string }, @ConnectedSocket() client: FiveStackWebSocketClient) {
+    if (!this.validAction(client, data) || typeof data.reaction !== "string") return;
+    const toggled = await this.chat.toggleChatMessageReaction(client, data.type, data.id, data.messageId, data.reaction);
+    this.sendActionResult(client, "react", data, toggled);
+  }
+
+  private validAction(client: FiveStackWebSocketClient, data: { id: string; type: ChatLobbyType; messageId: string }) {
+    return !!client.user && !!data && Object.values(ChatLobbyType).includes(data.type) && typeof data.id === "string" && typeof data.messageId === "string";
+  }
+
+  private sendActionResult(client: FiveStackWebSocketClient, action: "edit" | "delete" | "react", data: { requestId?: string; messageId: string }, accepted: boolean, code = "not_allowed") {
+    const requestId = typeof data.requestId === "string" ? data.requestId : undefined;
+    if (accepted && !requestId) return;
+    client.send(JSON.stringify({
+      event: accepted ? "chat:ack" : "chat:error",
+      data: accepted ? { requestId, messageId: data.messageId, action } : { requestId, action, code, ...(code === "too_long" ? { max: 2000 } : {}) },
+    }));
+  }
+
   // Author-only, time-limited editing -- ChatService re-checks ownership,
   // age, room access, restriction and mute itself rather than trusting
   // this handler, same as every other permission check in chat living in

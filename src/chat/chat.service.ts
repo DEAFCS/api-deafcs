@@ -48,13 +48,8 @@ type WebsiteChatMuteStatus = {
 // notification-click routing both rely on that equality.
 export const ANNOUNCEMENTS_LOBBY_ID = "announcement";
 
-export const CHAT_REACTION_IDS = [
-  "thumbsup",
-  "heart",
-  "fire",
-  "party",
-  "laugh",
-] as const;
+import { CHAT_REACTION_IDS } from "./types/ChatReactionIds";
+export { CHAT_REACTION_IDS } from "./types/ChatReactionIds";
 
 export type ChatReactionId = (typeof CHAT_REACTION_IDS)[number];
 
@@ -2475,6 +2470,7 @@ export class ChatService {
     id: string;
     message: string;
     created_at: string;
+    updated_at?: string;
     author_steam_id: string;
     author_name: string | null;
     author_role: e_player_roles_enum;
@@ -2485,6 +2481,7 @@ export class ChatService {
       id: row.id,
       message: row.message,
       timestamp: new Date(row.created_at).toISOString(),
+      ...(row.updated_at && new Date(row.updated_at).getTime() > new Date(row.created_at).getTime() ? { edited_at: new Date(row.updated_at).toISOString() } : {}),
       from: {
         role: row.author_role,
         name: row.author_name,
@@ -2501,6 +2498,7 @@ export class ChatService {
         id: string;
         message: string;
         created_at: string;
+        updated_at?: string;
         author_steam_id: string;
         author_name: string | null;
         author_role: e_player_roles_enum;
@@ -2508,7 +2506,7 @@ export class ChatService {
         author_profile_url: string | null;
       }>
     >(
-      `SELECT a.id, a.message, a.created_at,
+      `SELECT a.id, a.message, a.created_at, a.updated_at,
               p.steam_id::text AS author_steam_id,
               p.name AS author_name,
               p.role AS author_role,
@@ -2594,14 +2592,14 @@ export class ChatService {
     )
       return false;
 
-    const rows = await this.postgres.query<Array<{ id: string }>>(
+    const rows = await this.postgres.query<Array<{ id: string; updated_at: string }>>(
       `UPDATE public.announcements
           SET message = $2, updated_at = now()
         WHERE id = $1::uuid
           AND deleted_at IS NULL
           AND author_steam_id = $3::bigint
           AND created_at >= $4::timestamptz
-        RETURNING id`,
+        RETURNING id, updated_at`,
       [id, message, actor.steam_id, this.selfServiceCutoff().toISOString()],
     );
 
@@ -2612,6 +2610,7 @@ export class ChatService {
     void this.to(ChatLobbyType.Announcement, ANNOUNCEMENTS_LOBBY_ID, "edited", {
       id,
       message,
+      edited_at: new Date(rows[0].updated_at).toISOString(),
     });
     return true;
   }
@@ -2674,7 +2673,7 @@ export class ChatService {
     if ((await this.getDeletedMessageIds(type, roomId)).has(messageId))
       return false;
 
-    const updated = { ...stored, message };
+    const updated = { ...stored, message, edited_at: new Date().toISOString() };
     const result = (await this.redis.eval(
       CHAT_MESSAGE_EDIT_LUA,
       2,
@@ -2687,7 +2686,7 @@ export class ChatService {
     if (Number(result?.[0]) !== 1) return false;
 
     const authorSteamId = String(stored.from.steam_id);
-    const payload = { id: messageId, message };
+    const payload = { id: messageId, message, edited_at: updated.edited_at };
     if (type === ChatLobbyType.Direct) {
       void this.to(type, roomId, "edited", payload);
     } else {
@@ -2706,7 +2705,7 @@ export class ChatService {
             updated,
             new Set([authorSteamId]),
           );
-          return { id: messageId, message: redacted.message };
+          return { id: messageId, message: redacted.message, edited_at: updated.edited_at };
         },
       );
     }

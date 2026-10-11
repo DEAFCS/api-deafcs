@@ -1,6 +1,6 @@
 import { PATH_METADATA } from "@nestjs/common/constants";
 import { BadRequestException, NotFoundException } from "@nestjs/common";
-import { ChatService } from "./chat.service";
+import { ChatService, CHAT_REACTION_IDS } from "./chat.service";
 import { ChatVideoController } from "./chat-video.controller";
 import { ChatLobbyType } from "./enums/ChatLobbyTypes";
 import { User } from "../auth/types/User";
@@ -536,7 +536,7 @@ describe("ChatService temporary video drafts", () => {
       session!.id,
     ]);
     expect(pipeline.expire.mock.calls).toEqual(
-      ["thumbsup", "heart", "fire", "party", "laugh"].map((reaction) => [
+      CHAT_REACTION_IDS.map((reaction) => [
         `chat:reaction:${session!.id}:${reaction}`,
         matchChatTtlSeconds,
       ]),

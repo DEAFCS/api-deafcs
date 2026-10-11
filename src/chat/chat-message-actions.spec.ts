@@ -231,7 +231,7 @@ describe("ChatService timed self edit/delete", () => {
           );
           if (!row) return [];
           row.message = message;
-          return [{ id }];
+          return [{ id, updated_at: new Date().toISOString() }];
         }
         if (
           sql.includes("UPDATE public.announcements") &&
@@ -354,7 +354,8 @@ describe("ChatService timed self edit/delete", () => {
 
       await expect(edit(author, "  fixed typo  ")).resolves.toBe(true);
 
-      expect(stored()).toEqual({ ...original, message: "fixed typo" });
+      expect(stored()).toEqual({ ...original, message: "fixed typo", edited_at: expect.any(String) });
+      expect(Number.isNaN(Date.parse(stored().edited_at))).toBe(false);
       const [script, keyCount, messageKey, deletedKey, field, expected] =
         redis.eval.mock.calls[0];
       expect(keyCount).toBe(2);
@@ -367,7 +368,7 @@ describe("ChatService timed self edit/delete", () => {
         ChatLobbyType.Global,
         "global",
         "edited",
-        { id: messageId, message: "fixed typo" },
+        { id: messageId, message: "fixed typo", edited_at: expect.any(String) },
         expect.any(Function),
       );
       expectNoMessageSideEffects();
@@ -702,7 +703,7 @@ describe("ChatService timed self edit/delete", () => {
         ChatLobbyType.Direct,
         room,
         "edited",
-        { id: messageId, message: "x" },
+        { id: messageId, message: "x", edited_at: expect.any(String) },
       );
     });
 
@@ -716,6 +717,7 @@ describe("ChatService timed self edit/delete", () => {
       await expect(redact(other.steam_id)).resolves.toEqual({
         id: messageId,
         message: "Message from blocked player",
+        edited_at: expect.any(String),
       });
       await expect(redact(author.steam_id)).resolves.toBeUndefined();
       blocks.hasBlocked.mockResolvedValueOnce(false);
@@ -774,7 +776,7 @@ describe("ChatService timed self edit/delete", () => {
         ChatLobbyType.Announcement,
         "announcement",
         "edited",
-        { id: announcementId, message: "updated" },
+        { id: announcementId, message: "updated", edited_at: expect.any(String) },
       );
       expectNoMessageSideEffects();
     });
