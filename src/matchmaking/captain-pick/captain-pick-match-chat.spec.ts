@@ -136,7 +136,9 @@ describe("ChatService Match chat during Captain Pick", () => {
       hdel: jest.fn().mockResolvedValue(1),
       del: jest.fn().mockResolvedValue(1),
       expire: jest.fn().mockResolvedValue(1),
-      eval: jest.fn().mockResolvedValue([1, 1]),
+      eval: jest.fn(async (script: string) =>
+        script.includes("INCR") ? 1 : [1, 1],
+      ),
       publish: jest.fn().mockResolvedValue(1),
       sendCommand: jest.fn().mockResolvedValue(1),
     });
