@@ -18,6 +18,7 @@ import {
 } from "generated/schema";
 import { isRoleAbove } from "src/utilities/isRoleAbove";
 import { NotificationsService } from "../notifications/notifications.service";
+import { PushNotificationsService } from "../notifications/push/push-notifications.service";
 import { BlocksService } from "src/blocks/blocks.service";
 import { v4 as uuidv4 } from "uuid";
 import { createHash, randomBytes } from "crypto";
@@ -205,6 +206,7 @@ export class ChatService {
     private readonly s3: S3Service = null as any,
     @InjectQueue(ChatVideoQueues.DraftExpiry)
     private readonly chatVideoCleanupQueue: Queue = null as any,
+    private readonly pushNotifications: PushNotificationsService = null as any,
   ) {
     this.redis = this.redisManager.getConnection();
   }
@@ -1401,7 +1403,14 @@ export class ChatService {
     // people with an open socket to this exact channel -- i.e. already
     // seeing the message live, so they're excluded rather than targeted).
     // A failure here must never break message delivery, hence the catch.
-    void this.notifyLobbyMembers(type, id, player, _message, mentions).catch((error) =>
+    void this.notifyLobbyMembers(
+      type,
+      id,
+      player,
+      ChatService.previewText(_message, message),
+      mentions,
+      String(message.id),
+    ).catch((error) =>
       this.logger.warn(
         `[chat] push notify failed for ${type}:${id}: ${(error as Error)?.message}`,
       ),
@@ -3015,28 +3024,82 @@ export class ChatService {
       }));
   }
 
-  // Push for the tagged players only. Goes through ChatMessage like any
-  // other chat push (never reaches the bell or the Discord webhook), under
-  // the player's existing chat push preference.
+  // Push for the tagged players only, as ChatMessage under the player's
+  // existing chat push preference. Pushed directly (no notifications row),
+  // like every chat push except a direct message's -- see notifyLobbyMembers.
   private async notifyMentioned(
     type: ChatLobbyType,
     id: string,
     sender: User,
     message: string,
     steamIds: string[],
+    messageId?: string,
   ): Promise<void> {
-    if (!steamIds.length) return;
-
-    await this.notifications.notifyPlayers(
-      "ChatMessage" as unknown as e_notification_types_enum,
-      {
-        title: `${this.notificationTitle(type, sender.name)} mentioned you`,
-        message: message.length > 200 ? `${message.slice(0, 200)}…` : message,
-        role: "user" as e_player_roles_enum,
-        entity_id: `${type}:${id}`,
-        steamIds,
-      },
+    await this.pushChat(
+      "ChatMessage",
+      type,
+      id,
+      sender,
+      message,
+      messageId,
+      steamIds,
+      `${this.notificationTitle(type, sender.name)} mentioned you`,
     );
+  }
+
+  // A chat message, pushed straight from the conversation: no
+  // notifications row behind it (5Stack e70aaadd, "keep chat messages out
+  // of the notifications bell"). Those rows were never shown in the bell
+  // (NotificationStore filters every chat type out); they existed only so
+  // the Hasura event trigger would fire the push, at one insert, one
+  // webhook call and one subscription lookup per recipient.
+  private async pushChat(
+    notificationType: string,
+    type: ChatLobbyType,
+    id: string,
+    sender: User,
+    message: string,
+    messageId: string | undefined,
+    steamIds: string[],
+    title = this.notificationTitle(type, sender.name),
+  ): Promise<void> {
+    // Only absent when a unit test builds ChatService by hand.
+    if (!steamIds.length || !this.pushNotifications) return;
+
+    await this.pushNotifications.sendChatMessage(steamIds, {
+      messageId: messageId ?? "",
+      type: notificationType,
+      title,
+      message: ChatService.notificationPreview(message),
+      entityId: `${type}:${id}`,
+      senderSteamId: String(sender.steam_id),
+    });
+  }
+
+  // What a push says for a message: its text, or what it carries when there
+  // is none, so a video, file or GIF on its own is not a blank notification.
+  // 5Stack's previewText, with DEAFCS's sign-language video messages added.
+  public static previewText(
+    text: string,
+    message: { media?: unknown; attachment?: unknown; gifUrl?: unknown },
+  ): string {
+    if (text?.trim()) {
+      return text;
+    }
+
+    if ((message.media as { type?: string } | undefined)?.type === "video") {
+      return "Video message";
+    }
+
+    if (message.gifUrl) {
+      return "GIF";
+    }
+
+    return message.attachment ? "Attachment" : "";
+  }
+
+  private static notificationPreview(message: string) {
+    return message.length > 200 ? `${message.slice(0, 200)}…` : message;
   }
 
   private async notifyLobbyMembers(
@@ -3045,27 +3108,17 @@ export class ChatService {
     sender: User,
     message: string,
     mentions: Array<{ steam_id: string; name: string }> = [],
+    messageId?: string,
   ): Promise<void> {
     const mentionedIds = mentions.map((mention) => String(mention.steam_id));
     // Global has no fixed roster (every verified_user+ player is a
-    // "member") -- targeting each of them individually via notifyPlayers
-    // wouldn't scale and would defeat the point of push preferences being
-    // opt-in for this specific channel. Use the same role-broadcast path
-    // tournament-created notifications use instead: one row, resolved to
-    // recipients at send time by handleNotificationInsert.
+    // "member"), so its audience is the role, resolved once by
+    // pingRoleBroadcastFallback below and reused for the push. Push
+    // preferences keep it opt-in (global_chat). Mentioned players get their
+    // own "mentioned you" push instead of this one, never both, and a player
+    // who blocked the sender is skipped, the same as the live room redacts
+    // the line for them.
     if (type === ChatLobbyType.Global) {
-      await this.notifications.sendSilent(
-        "GlobalChatMessage" as unknown as e_notification_types_enum,
-        {
-          title: this.notificationTitle(type, sender.name),
-          message:
-            message.length > 200 ? `${message.slice(0, 200)}â€¦` : message,
-          role: "verified_user" as e_player_roles_enum,
-          entity_id: `${type}:${id}`,
-          excludeSteamId: sender.steam_id,
-        },
-      );
-
       // Same "chicken-and-egg" fix as Announcement below: the live to()
       // broadcast only reaches sockets with an active listener registered
       // for this lobby, which (unlike joining, which happens automatically
@@ -3075,7 +3128,7 @@ export class ChatService {
       // Chat's unread badge silently never appeared for anyone who hadn't
       // opened chat yet this session (reported: no red badge until you
       // manually open chat once).
-      await this.pingRoleBroadcastFallback(
+      const audience = await this.pingRoleBroadcastFallback(
         type,
         id,
         sender,
@@ -3083,7 +3136,26 @@ export class ChatService {
         "verified_user",
         mentionedIds,
       );
-      await this.notifyMentioned(type, id, sender, message, mentionedIds);
+      await this.pushChat(
+        "GlobalChatMessage",
+        type,
+        id,
+        sender,
+        message,
+        messageId,
+        await this.withoutBlockers(
+          audience.filter((steamId) => !mentionedIds.includes(steamId)),
+          sender,
+        ),
+      );
+      await this.notifyMentioned(
+        type,
+        id,
+        sender,
+        message,
+        mentionedIds,
+        messageId,
+      );
       return;
     }
 
@@ -3093,18 +3165,6 @@ export class ChatService {
     // rather than a fixed roster. "user" is the lowest role in
     // roleOrder (see isRoleAbove), so this reaches literally everyone.
     if (type === ChatLobbyType.Announcement) {
-      await this.notifications.sendSilent(
-        "AnnouncementChatMessage" as unknown as e_notification_types_enum,
-        {
-          title: this.notificationTitle(type, sender.name),
-          message:
-            message.length > 200 ? `${message.slice(0, 200)}â€¦` : message,
-          role: "user" as e_player_roles_enum,
-          entity_id: `${type}:${id}`,
-          excludeSteamId: sender.steam_id,
-        },
-      );
-
       // Same "chicken-and-egg" fix as the generic path below: the live
       // to() broadcast above only reaches sockets that have a listener
       // registered for this lobby, which (unlike joining, which happens
@@ -3114,7 +3174,25 @@ export class ChatService {
       // this, the unread badge silently never appeared for anyone who
       // hadn't opened chat yet. No fixed roster to pull "everyone" from
       // here, so this pings literally every registered player.
-      await this.pingRoleBroadcastFallback(type, id, sender, message, "user");
+      const audience = await this.pingRoleBroadcastFallback(
+        type,
+        id,
+        sender,
+        message,
+        "user",
+      );
+      // Not filtered by blocks: an announcement is never redacted for a
+      // player who blocked its author (see sendMessageToChat), so the push
+      // follows the room.
+      await this.pushChat(
+        "AnnouncementChatMessage",
+        type,
+        id,
+        sender,
+        message,
+        messageId,
+        audience,
+      );
       return;
     }
 
@@ -3127,21 +3205,9 @@ export class ChatService {
     // anyone. This is why OrganizerChatMessage push never fired at all
     // previously, not just why it lacked its own toggle.
     if (type === ChatLobbyType.Organizer) {
-      await this.notifications.sendSilent(
-        "OrganizerChatMessage" as unknown as e_notification_types_enum,
-        {
-          title: this.notificationTitle(type, sender.name),
-          message:
-            message.length > 200 ? `${message.slice(0, 200)}â€¦` : message,
-          role: "match_organizer" as e_player_roles_enum,
-          entity_id: `${type}:${id}`,
-          excludeSteamId: sender.steam_id,
-        },
-      );
-
       // Same chicken-and-egg fix as Global/Announcement above -- see
       // those comments for the full explanation.
-      await this.pingRoleBroadcastFallback(
+      const audience = await this.pingRoleBroadcastFallback(
         type,
         id,
         sender,
@@ -3149,7 +3215,26 @@ export class ChatService {
         "match_organizer",
         mentionedIds,
       );
-      await this.notifyMentioned(type, id, sender, message, mentionedIds);
+      await this.pushChat(
+        "OrganizerChatMessage",
+        type,
+        id,
+        sender,
+        message,
+        messageId,
+        await this.withoutBlockers(
+          audience.filter((steamId) => !mentionedIds.includes(steamId)),
+          sender,
+        ),
+      );
+      await this.notifyMentioned(
+        type,
+        id,
+        sender,
+        message,
+        mentionedIds,
+        messageId,
+      );
       return;
     }
 
@@ -3205,21 +3290,45 @@ export class ChatService {
       (steamId) => !mentionedIds.includes(steamId),
     );
 
-    if (regularTargets.length) {
-      await this.notifications.notifyPlayers(
-        "ChatMessage" as unknown as e_notification_types_enum,
-        {
-          title: this.notificationTitle(type, sender.name),
-          message:
-            message.length > 200 ? `${message.slice(0, 200)}â€¦` : message,
-          role: "user" as e_player_roles_enum,
-          entity_id: `${type}:${id}`,
-          steamIds: regularTargets,
-        },
+    // A direct message still writes its ChatMessage row, and its push still
+    // comes from that row's event trigger. Unlike every other chat row, the
+    // web reads it back (useIncomingDirectMessages): it is what opens a
+    // first-ever conversation and restores a DM's unread badge for someone
+    // who was offline when it arrived, until DMs get 5Stack's
+    // direct_conversations and chat_read_state.
+    if (type === ChatLobbyType.Direct) {
+      if (regularTargets.length) {
+        await this.notifications.notifyPlayers(
+          "ChatMessage" as unknown as e_notification_types_enum,
+          {
+            title: this.notificationTitle(type, sender.name),
+            message: ChatService.notificationPreview(message),
+            role: "user" as e_player_roles_enum,
+            entity_id: `${type}:${id}`,
+            steamIds: regularTargets,
+          },
+        );
+      }
+    } else {
+      await this.pushChat(
+        "ChatMessage",
+        type,
+        id,
+        sender,
+        message,
+        messageId,
+        regularTargets,
       );
     }
 
-    await this.notifyMentioned(type, id, sender, message, mentionedTargets);
+    await this.notifyMentioned(
+      type,
+      id,
+      sender,
+      message,
+      mentionedTargets,
+      messageId,
+    );
 
     // Reported bug: a brand-new incoming DM (or any first message in a
     // chat the recipient has never opened a tab for) produced no unread
@@ -3247,13 +3356,26 @@ export class ChatService {
             senderSteamId: sender.steam_id,
             senderName: sender.name,
             senderAvatarUrl: sender.avatar_url,
-            message:
-              message.length > 200 ? `${message.slice(0, 200)}â€¦` : message,
+            message: ChatService.notificationPreview(message),
             mentions: mentionedIds,
           },
         }),
       );
     }
+  }
+
+  // Of `steamIds`, the players who have not blocked `sender` -- the ones a
+  // shared room still shows the line to unredacted (see sendMessageToChat).
+  private async withoutBlockers(
+    steamIds: string[],
+    sender: User,
+  ): Promise<string[]> {
+    if (!steamIds.length) return [];
+    const blocking = await this.blocks.getViewersBlocking(
+      steamIds,
+      String(sender.steam_id),
+    );
+    return steamIds.filter((steamId) => !blocking.has(steamId));
   }
 
   // Shared by every role-broadcast chat type (Global, Announcement,
@@ -3264,7 +3386,8 @@ export class ChatService {
   // the full "chicken-and-egg" explanation. This pings every player at or
   // above `minRole` on the same steamId-addressed channel the fixed-roster
   // path below uses, so the frontend can update the tab/unread badge even
-  // when it was never joined.
+  // when it was never joined. Returns the players it pinged -- the room's
+  // audience, which is also who its push goes to.
   private async pingRoleBroadcastFallback(
     type: ChatLobbyType,
     id: string,
@@ -3272,8 +3395,9 @@ export class ChatService {
     message: string,
     minRole: e_player_roles_enum,
     mentionedIds: string[] = [],
-  ): Promise<void> {
+  ): Promise<string[]> {
     const senderId = String(sender.steam_id);
+    const audience: string[] = [];
     const { players: rolePlayers } = await this.hasuraService.query({
       players: { steam_id: true, role: true },
     });
@@ -3281,6 +3405,7 @@ export class ChatService {
       const steamId = String(player.steam_id);
       if (steamId === senderId) continue;
       if (!isRoleAbove(player.role, minRole)) continue;
+      audience.push(steamId);
       await this.redis.publish(
         "send-message-to-steam-id",
         JSON.stringify({
@@ -3292,13 +3417,13 @@ export class ChatService {
             senderSteamId: sender.steam_id,
             senderName: sender.name,
             senderAvatarUrl: sender.avatar_url,
-            message:
-              message.length > 200 ? `${message.slice(0, 200)}â€¦` : message,
+            message: ChatService.notificationPreview(message),
             mentions: mentionedIds,
           },
         }),
       );
     }
+    return audience;
   }
 
   // Resolves the fixed member roster for a lobby (distinct from

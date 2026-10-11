@@ -102,3 +102,19 @@ const TYPE_TO_CATEGORY: Record<string, string> = Object.fromEntries(
 export function categoryForType(type: string): string | null {
   return TYPE_TO_CATEGORY[type] ?? null;
 }
+
+// Same shape and name as 5Stack's pushCategoryForType
+// (src/notifications/preferences/notification-categories.ts), so direct
+// pushes (PushNotificationsService.sendChatMessage) are written against the
+// upstream contract. The keys and defaults are DEAFCS's existing categories,
+// which is what lets push_notification_preferences rows carry over unchanged
+// when they move to upstream's notification_preferences (channel 'push').
+export type PreferenceKey = {
+  key: string;
+  defaultEnabled: boolean;
+};
+
+export function pushCategoryForType(type: string): PreferenceKey | null {
+  const key = categoryForType(type);
+  return key ? { key, defaultEnabled: isCategoryEnabledByDefault(key) } : null;
+}

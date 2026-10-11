@@ -7,6 +7,7 @@ import {
   NOTIFICATION_CATEGORY_KEYS,
   categoryForType,
   isCategoryEnabledByDefault,
+  pushCategoryForType,
 } from "./notification-categories";
 
 export type PushSubscriptionPayload = {
@@ -20,6 +21,22 @@ type SubscriptionRow = {
   endpoint: string;
   p256dh: string;
   auth: string;
+};
+
+// A chat message on its way to a phone, as 5Stack's ChatPush
+// (src/notifications/push/push-notifications.service.ts). Chat writes no
+// notifications row, so this is everything the push needs to know about it.
+// Upstream's bundling fields (threadKey, threadLabel, icon,
+// blockExemptRoles) are left out until DEAFCS has the read cursors and
+// quiet hours they serve; callers already pass recipients with blocks
+// applied, the way upstream's ChatService does.
+export type ChatPush = {
+  messageId: string;
+  type: string;
+  title: string;
+  message: string;
+  entityId: string;
+  senderSteamId: string;
 };
 
 // The only integration point for outbound Web Push: every existing
@@ -267,6 +284,49 @@ export class PushNotificationsService {
     await Promise.all(
       filtered.map((row) => this.sendToSubscription(row, payload)),
     );
+  }
+
+  // A chat message, pushed straight from the conversation: there is no
+  // notifications row behind it, so the preference check the event trigger
+  // path (handleNotificationInsert) makes per row is made here, in one query
+  // for every recipient. Ported from 5Stack's sendChatMessage; the
+  // preference join reads DEAFCS's push_notification_preferences, and the
+  // payload keeps the shape sw-push.js and the click routing already read.
+  public async sendChatMessage(
+    steamIds: string[],
+    push: ChatPush,
+  ): Promise<void> {
+    const recipients = [...new Set(steamIds.map(String))].filter(
+      (steamId) => steamId !== String(push.senderSteamId),
+    );
+
+    if (!this.vapidConfigured || recipients.length === 0) {
+      return;
+    }
+
+    const category = pushCategoryForType(push.type);
+
+    const rows = await this.postgres.query<SubscriptionRow[]>(
+      `SELECT ps.id, ps.steam_id::text AS steam_id, ps.endpoint, ps.p256dh, ps.auth
+         FROM public.push_subscriptions ps
+    LEFT JOIN public.push_notification_preferences np
+           ON np.steam_id = ps.steam_id
+          AND np.category = $2
+        WHERE ps.steam_id = ANY($1::bigint[])
+          AND COALESCE(np.enabled, $3::boolean) = true`,
+      [recipients, category?.key ?? "", category?.defaultEnabled ?? true],
+    );
+
+    if (!rows.length) return;
+
+    const payload = JSON.stringify({
+      title: push.title,
+      body: PushNotificationsService.stripHtml(push.message),
+      type: push.type,
+      entity_id: push.entityId,
+    });
+
+    await Promise.all(rows.map((row) => this.sendToSubscription(row, payload)));
   }
 
   private static stripHtml(html: string): string {
