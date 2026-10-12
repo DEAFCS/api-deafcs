@@ -14,7 +14,7 @@ export class FileManagerService {
     private readonly hasura: HasuraService,
   ) {}
 
-  private async verifyAdminPermissions(userId: string): Promise<void> {
+  async verifyAdminPermissions(userId: string): Promise<void> {
     if (!userId) {
       throw new ForbiddenException("User not authenticated");
     }

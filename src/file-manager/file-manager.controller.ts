@@ -7,10 +7,30 @@ import {
   UseInterceptors,
   ParseFilePipe,
   MaxFileSizeValidator,
+  Req,
+  UseGuards,
+  Injectable,
+  CanActivate,
+  ExecutionContext,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
 import { FileManagerService } from "./file-manager.service";
 import { HasuraAction } from "../hasura/hasura.controller";
+
+import { Request } from "express";
+
+@Injectable()
+export class FileUploadAdminGuard implements CanActivate {
+  constructor(private readonly fileManagerService: FileManagerService) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const request = context.switchToHttp().getRequest<Request>();
+    await this.fileManagerService.verifyAdminPermissions(
+      request.user?.steam_id,
+    );
+    return true;
+  }
+}
 
 @Controller("file-manager")
 export class FileManagerController {
@@ -128,6 +148,7 @@ export class FileManagerController {
   }
 
   @Post("upload/:nodeId/:serverId")
+  @UseGuards(FileUploadAdminGuard)
   @UseInterceptors(FileInterceptor("file"))
   async uploadFileToServer(
     @Param("nodeId") nodeId: string,
@@ -141,10 +162,10 @@ export class FileManagerController {
     )
     file: Express.Multer.File,
     @Body("filePath") filePath: string,
-    @Body("userId") userId: string,
+    @Req() request: Request,
   ) {
     return await this.fileManagerService.uploadFile(
-      userId,
+      request.user.steam_id,
       nodeId,
       serverId,
       filePath,
@@ -153,6 +174,7 @@ export class FileManagerController {
   }
 
   @Post("upload/:nodeId")
+  @UseGuards(FileUploadAdminGuard)
   @UseInterceptors(FileInterceptor("file"))
   async uploadFileToCustomPlugins(
     @Param("nodeId") nodeId: string,
@@ -165,10 +187,10 @@ export class FileManagerController {
     )
     file: Express.Multer.File,
     @Body("filePath") filePath: string,
-    @Body("userId") userId: string,
+    @Req() request: Request,
   ) {
     return await this.fileManagerService.uploadFile(
-      userId,
+      request.user.steam_id,
       nodeId,
       undefined,
       filePath,

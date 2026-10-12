@@ -1,4 +1,11 @@
-import { Controller, Get, Logger, Req, Res } from "@nestjs/common";
+import {
+  Controller,
+  ForbiddenException,
+  Get,
+  Logger,
+  Req,
+  Res,
+} from "@nestjs/common";
 import { HasuraAction, HasuraEvent } from "../hasura/hasura.controller";
 import { GameServerNodeService } from "./game-server-node.service";
 import { TailscaleService } from "../tailscale/tailscale.service";
@@ -29,6 +36,8 @@ import { game_server_nodes_set_input } from "generated/schema";
 import { NotificationsService } from "../notifications/notifications.service";
 import { DISCORD_COLORS } from "../notifications/utilities/constants";
 import { GameStreamerService } from "../matches/game-streamer/game-streamer.service";
+import { User } from "../auth/types/User";
+import { timingSafeStringEqual } from "../utilities/timingSafeStringEqual";
 
 @Controller("game-server-node")
 export class GameServerNodeController {
@@ -455,6 +464,16 @@ export class GameServerNodeController {
 
   @Get("/script/:gameServerNodeId")
   public async script(@Req() request: Request, @Res() response: Response) {
+    response.setHeader("Cache-Control", "no-store");
+    // The administrator-issued bearer token authorizes curl on the new node,
+    // which does not have a browser session. Signed-in callers must be admins.
+    if (request.user) {
+      await this.verifyInstallerAdmin(request.user);
+    }
+    const token = request.query.token;
+    if (typeof token !== "string" || token.length === 0) {
+      throw new ForbiddenException("Invalid installer authorization");
+    }
     const gameServerNodeId = String(request.params.gameServerNodeId).replace(
       ".sh",
       "",
@@ -481,8 +500,14 @@ export class GameServerNodeController {
       },
     });
 
-    if (!game_server_nodes_by_pk || game_server_nodes_by_pk.token === null) {
-      throw new Error("Game server not found");
+    const storedToken = game_server_nodes_by_pk?.token;
+    if (
+      typeof storedToken !== "string" ||
+      storedToken.length === 0 ||
+      Buffer.byteLength(token) !== Buffer.byteLength(storedToken) ||
+      !timingSafeStringEqual(token, storedToken)
+    ) {
+      throw new ForbiddenException("Invalid installer authorization");
     }
 
     const freshDiskGb =
@@ -774,8 +799,24 @@ UNIT
     return await this.gameServerNodeService.getAllPodStats();
   }
 
+  private async verifyInstallerAdmin(user?: User): Promise<void> {
+    if (!user?.steam_id) {
+      throw new ForbiddenException("Administrator access required");
+    }
+    const { players_by_pk } = await this.hasura.query({
+      players_by_pk: {
+        __args: { steam_id: user.steam_id },
+        role: true,
+      },
+    });
+    if (players_by_pk?.role !== "administrator") {
+      throw new ForbiddenException("Administrator access required");
+    }
+  }
+
   @HasuraAction()
-  public async setupGameServer() {
+  public async setupGameServer(data: { user?: User } = {}) {
+    await this.verifyInstallerAdmin(data.user);
     const gameServer = await this.gameServerNodeService.create(
       await this.tailscale.getAuthKey(),
     );
