@@ -265,10 +265,6 @@ export class DedicatedServersService {
                       },
                       { name: "SERVER_PORT", value: server.port.toString() },
                       { name: "TV_PORT", value: server.tv_port.toString() },
-                      // See match-assistant.service.ts's identical BIND_IP for why:
-                      // a node behind a reverse-proxy DDoS service needs replies to
-                      // carry the protected IP, not whatever -ip 0.0.0.0 resolves to.
-                      { name: "BIND_IP", value: server.host },
                       {
                         name: "RCON_PASSWORD",
                         value: await this.encryption.decrypt(

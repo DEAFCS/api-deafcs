@@ -882,19 +882,6 @@ export class MatchAssistantService {
                             value: server.port.toString(),
                           },
                           { name: "TV_PORT", value: server.tv_port.toString() },
-                          // CS2's own reply traffic normally exits via whatever
-                          // interface the OS picks for -ip 0.0.0.0, which is the
-                          // box's real address. A node sitting behind a reverse
-                          // proxy (e.g. KernelHost's Advanced DDoS Protection)
-                          // needs replies to carry the protected IP as their
-                          // source, or they go out the backend's real IP instead
-                          // -- asymmetric from what the client connected to, so
-                          // clients validate Steam auth and then silently time
-                          // out. server.host is already the right address for
-                          // either case (a plain node's own public_ip, or a
-                          // proxied node's protected IP), so bind to it instead
-                          // of always using 0.0.0.0.
-                          { name: "BIND_IP", value: server.host },
                           {
                             name: "RCON_PASSWORD",
                             value: await this.encryption.decrypt(
