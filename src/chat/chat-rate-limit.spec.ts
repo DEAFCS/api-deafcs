@@ -201,7 +201,7 @@ describe("website message rate (upstream d2d7f616)", () => {
         true,
         "tab-1",
         {
-          url: "chat-attachments/" + player.steam_id + "/image.png",
+          url: "chat-attachments/" + player.steam_id + "/0123456789abcdef.png",
           contentType: "image/png",
         },
       ),

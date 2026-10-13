@@ -26,6 +26,7 @@ import { InjectQueue } from "@nestjs/bullmq";
 import { Queue } from "bullmq";
 import {
   ChatVideoQueues,
+  ExpireChatAttachmentJobName,
   ExpireSentChatVideoMediaJobName,
 } from "./enums/ChatVideoQueues";
 import { S3Service } from "../s3/s3.service";
@@ -189,6 +190,15 @@ export class ChatService {
   // everyone else. Every other lobby type keeps the default.
   private static readonly MATCH_CHAT_TTL_SECONDS = 60 * 60 * 24 * 7;
 
+  // Approved retention (Anders): Organizer Chat keeps its messages for 90
+  // days and Team Chat for 30. Both are fixed: they ignore the global
+  // chat_message_ttl setting, and every other room keeps its own rule. Only
+  // messages sent after this took effect get the longer life; anything already
+  // stored keeps the expiry it was written with (an edit never extends it,
+  // see CHAT_EDIT_LUA), and an expired message cannot be recovered.
+  public static readonly ORGANIZER_CHAT_TTL_SECONDS = 60 * 60 * 24 * 90;
+  public static readonly TEAM_CHAT_TTL_SECONDS = 60 * 60 * 24 * 30;
+
   constructor(
     private readonly logger: Logger,
     private readonly rcon: RconService,
@@ -215,9 +225,37 @@ export class ChatService {
     if (type === ChatLobbyType.CaptainPickTeam) {
       return CAPTAIN_PICK_TEAM_CHAT_TTL_SECONDS;
     }
+    if (type === ChatLobbyType.Organizer) {
+      return ChatService.ORGANIZER_CHAT_TTL_SECONDS;
+    }
+    if (type === ChatLobbyType.Team) {
+      return ChatService.TEAM_CHAT_TTL_SECONDS;
+    }
     return type === ChatLobbyType.Match || type === ChatLobbyType.MatchTeam
       ? ChatService.MATCH_CHAT_TTL_SECONDS
       : this.expiresIn;
+  }
+
+  // Rooms whose messages outlive the default day: their uploaded files must be
+  // removed from storage when the messages expire, because nothing else ever
+  // deletes an attachment's file.
+  private static readonly LONG_RETENTION_TYPES: ReadonlySet<ChatLobbyType> =
+    new Set([ChatLobbyType.Organizer, ChatLobbyType.Team]);
+
+  // An attachment is the file this player just uploaded through
+  // POST /chat/attachment: chat-attachments/<their steam id>/<16 hex>.<ext>.
+  // Anything else would let a client point a message at (and later have the
+  // expiry job delete) some other object in storage.
+  private isOwnUploadedAttachment(
+    attachment: { url: string },
+    steamId: string | number,
+  ): boolean {
+    return (
+      /^\d+$/.test(String(steamId)) &&
+      new RegExp(
+        String.raw`^chat-attachments/${String(steamId)}/[0-9a-f]{16}\.[a-z0-9]{2,5}$`,
+      ).test(String(attachment?.url ?? ""))
+    );
   }
 
   public async joinMatchLobby(
@@ -1106,6 +1144,14 @@ export class ChatService {
       return { accepted: false };
     }
 
+    if (
+      attachment &&
+      source === "website" &&
+      !this.isOwnUploadedAttachment(attachment, player.steam_id)
+    ) {
+      return { accepted: false };
+    }
+
     // Apply before any permission queries, persistence, notifications or RCON.
     // Game-relayed chat keeps its existing path. Website retries count as sends,
     // just as upstream does, and a rejected video draft remains retryable.
@@ -1317,6 +1363,21 @@ export class ChatService {
       // expires alongside it (the underlying S3 object is left in place,
       // same as every other short-lived chat message today).
       const attachmentId = randomBytes(8).toString("hex");
+      // An uploaded file belongs to exactly one message. Claiming it here, once,
+      // is what lets the expiry job delete a file knowing no other message
+      // (in any room, at any time) still points at it; a second message trying
+      // to reuse the same upload is refused.
+      if (
+        !(await this.redis.set(
+          this.chatAttachmentClaimKey(attachment.url),
+          attachmentId,
+          "EX",
+          ChatService.ATTACHMENT_CLAIM_TTL_SECONDS,
+          "NX",
+        ))
+      ) {
+        return { accepted: false };
+      }
       await this.redis.set(
         this.chatAttachmentKey(attachmentId),
         JSON.stringify({
@@ -1332,6 +1393,13 @@ export class ChatService {
         id: attachmentId,
         contentType: attachment.contentType,
       };
+      if (ChatService.LONG_RETENTION_TYPES.has(type)) {
+        await this.scheduleChatAttachmentCleanup(
+          attachmentId,
+          attachment.url,
+          messageTtlSeconds,
+        );
+      }
     }
 
     if (gifUrl) {
@@ -2235,6 +2303,58 @@ export class ChatService {
     );
   }
 
+  // Removes the stored file of an attachment sent in a long-retention room once
+  // its message has expired (the same queue and delay rule as sent videos: the
+  // message TTL plus an hour, so the file never goes before the message does).
+  private async scheduleChatAttachmentCleanup(
+    attachmentId: string,
+    objectKey: string,
+    messageTtlSeconds: number,
+  ) {
+    if (!this.chatVideoCleanupQueue) return;
+    await this.chatVideoCleanupQueue.add(
+      ExpireChatAttachmentJobName,
+      { attachmentId, objectKey },
+      {
+        jobId: `chat-attachment-expiry-${attachmentId}`,
+        delay: messageTtlSeconds * 1000 + 60 * 60 * 1000 + 1000,
+        attempts: 5,
+        backoff: { type: "exponential", delay: 30_000 },
+        removeOnComplete: true,
+        removeOnFail: { age: 7 * 24 * 60 * 60 },
+      },
+    );
+  }
+
+  public async cleanupExpiredChatAttachment(
+    attachmentId: string,
+    objectKey: string,
+  ) {
+    if (
+      !/^[0-9a-f]{16}$/.test(attachmentId) ||
+      !/^chat-attachments\/\d+\/[0-9a-f]{16}\.[a-z0-9]{2,5}$/.test(objectKey)
+    ) {
+      throw new Error("invalid chat attachment cleanup target");
+    }
+    // Only the message that claimed this upload may have it deleted. A job
+    // whose claim is missing or belongs to another message leaves the file
+    // alone (a leaked file is recoverable, a wrongly deleted one is not).
+    if (
+      (await this.redis.get(this.chatAttachmentClaimKey(objectKey))) !==
+      attachmentId
+    ) {
+      this.logger.warn(
+        `[chat] skipped cleanup of attachment ${attachmentId}: upload not claimed by it`,
+      );
+      return;
+    }
+    const removed = await this.s3.remove(objectKey);
+    if (!removed && (await this.s3.has(objectKey))) {
+      throw new Error(`unable to remove expired chat attachment ${attachmentId}`);
+    }
+    await this.redis.del(this.chatAttachmentKey(attachmentId));
+  }
+
   private async markVideoDraftSent(
     id: string,
     session: any,
@@ -2492,6 +2612,14 @@ export class ChatService {
 
   private chatAttachmentKey(id: string) {
     return `chat_attachment:${id}`;
+  }
+
+  // Outlives the longest retention (90 days) plus the cleanup delay, so a claim
+  // can never lapse while its file or its expiry job still exists.
+  private static readonly ATTACHMENT_CLAIM_TTL_SECONDS = 60 * 60 * 24 * 120;
+
+  private chatAttachmentClaimKey(objectKey: string) {
+    return `chat_attachment_claim:${createHash("sha256").update(objectKey).digest("hex")}`;
   }
 
   // Resolves a chat attachment's real S3 key for streaming back to a
