@@ -380,7 +380,14 @@ export class ChatService {
         break;
       }
       case ChatLobbyType.Organizer:
-        if (!isRoleAbove(user.role, "match_organizer")) {
+        if (!isRoleAbove(user.role, ChatService.ORGANIZER_CHAT_MIN_ROLE)) {
+          return;
+        }
+
+        break;
+      case ChatLobbyType.Team:
+        // Private, persistent chat of one team: its current roster only.
+        if (!(await this.canAccessTeamChat(id, user.steam_id))) {
           return;
         }
 
@@ -811,8 +818,17 @@ export class ChatService {
         });
         return draft_games.length > 0;
       }
-      case ChatLobbyType.Organizer:
-        return isRoleAbove(user.role, "match_organizer");
+      case ChatLobbyType.Organizer: {
+        // The role is read fresh: this also guards reactions, attachments and
+        // video for a socket or session opened before a role was removed.
+        const current = await this.getCurrentUser(String(user.steam_id));
+        return (
+          !!current &&
+          isRoleAbove(current.role, ChatService.ORGANIZER_CHAT_MIN_ROLE)
+        );
+      }
+      case ChatLobbyType.Team:
+        return this.canAccessTeamChat(id, user.steam_id);
       case ChatLobbyType.Global:
         return isRoleAbove(user.role, "verified_user");
       case ChatLobbyType.Direct: {
@@ -854,7 +870,6 @@ export class ChatService {
       }
       case ChatLobbyType.Announcement:
         return id === ANNOUNCEMENTS_LOBBY_ID;
-      case ChatLobbyType.Team:
       default:
         return false;
     }
@@ -935,6 +950,43 @@ export class ChatService {
         String(draftPlayer.steam_id) === String(steamId) &&
         (draftPlayer.status === "Accepted" || draftPlayer.lineup != null),
     );
+  }
+
+  // Organizer Chat is open to moderators and everyone above them in the role
+  // order (match_organizer, tournament_organizer, administrator). Streamers,
+  // verified users and ordinary users stay out.
+  public static readonly ORGANIZER_CHAT_MIN_ROLE: e_player_roles_enum =
+    "moderator";
+
+  // Team Chat: one private room per team, id = the team's uuid. The only
+  // authority is the team's current roster (team_roster covers admins, the
+  // captain, starters, substitutes, benched players and coaches; pending and
+  // rejected invites live in team_invites and a removed member's row is gone),
+  // plus the owner of record. Checked on every join, send, reaction, edit,
+  // attachment and live delivery, so removing someone from the team ends their
+  // access at once.
+  public async canAccessTeamChat(
+    id: string,
+    steamId: string | number,
+  ): Promise<boolean> {
+    if (!this.isUuid(String(id)) || !/^\d+$/.test(String(steamId))) {
+      return false;
+    }
+
+    const rows = await this.postgres.query<Array<{ allowed: boolean }>>(
+      `SELECT (
+         EXISTS (
+           SELECT 1 FROM team_roster
+            WHERE team_id = $1::uuid AND player_steam_id = $2::bigint
+         ) OR EXISTS (
+           SELECT 1 FROM teams
+            WHERE id = $1::uuid AND owner_steam_id = $2::bigint
+         )
+       ) AS allowed`,
+      [id, String(steamId)],
+    );
+
+    return rows?.[0]?.allowed === true;
   }
 
   // Also the access gate for the tournament webcam room (TournamentCallService).
@@ -1136,6 +1188,18 @@ export class ChatService {
       if (
         type === ChatLobbyType.Tournament &&
         !(await this.canAccessTournamentChat(id, player.steam_id))
+      ) {
+        await this.removeUserData(type, id, player.steam_id);
+        await this.redis.del(this.sessionsKey(type, id, player.steam_id));
+        return { accepted: false };
+      }
+
+      // Team and Organizer access can be taken away while a socket is still
+      // joined (removed from the roster, role removed), so it is re-read from
+      // the database on every send, not only when joining.
+      if (
+        (type === ChatLobbyType.Team || type === ChatLobbyType.Organizer) &&
+        !(await this.hasLobbyPermission(type, id, player))
       ) {
         await this.removeUserData(type, id, player.steam_id);
         await this.redis.del(this.sessionsKey(type, id, player.steam_id));
@@ -2920,6 +2984,7 @@ export class ChatService {
       [ChatLobbyType.MatchMaking]: "LOBBY",
       [ChatLobbyType.Draft]: "DRAFT",
       [ChatLobbyType.Tournament]: "TOURNAMENT",
+      [ChatLobbyType.Team]: "TEAM",
       [ChatLobbyType.Match]: "MATCH",
       [ChatLobbyType.MatchTeam]: "TEAM",
       [ChatLobbyType.CaptainPickTeam]: "TEAM",
@@ -2997,7 +3062,7 @@ export class ChatService {
       );
     } else if (type === ChatLobbyType.Organizer) {
       eligible = eligible.filter((player) =>
-        isRoleAbove(player.role, "match_organizer"),
+        isRoleAbove(player.role, ChatService.ORGANIZER_CHAT_MIN_ROLE),
       );
     } else {
       const members = new Set(await this.getLobbyMemberSteamIds(type, id));
@@ -3197,7 +3262,7 @@ export class ChatService {
 
     // Organizer chat has the same "no fixed roster, role-gated instead"
     // shape as Global (see joinMatchLobby's Organizer case, gated on
-    // isRoleAbove(user.role, "match_organizer")) -- getLobbyMemberSteamIds
+    // isRoleAbove(user.role, ORGANIZER_CHAT_MIN_ROLE)) -- getLobbyMemberSteamIds
     // below has no case for it and always returns [], so without this
     // early branch notifyLobbyMembers would silently bail at the
     // `!members.length` check right after and never actually notify
@@ -3211,7 +3276,7 @@ export class ChatService {
         id,
         sender,
         message,
-        "match_organizer",
+        ChatService.ORGANIZER_CHAT_MIN_ROLE,
         mentionedIds,
       );
       await this.pushChat(
@@ -3559,6 +3624,17 @@ export class ChatService {
         }
         return [...ids];
       }
+      case ChatLobbyType.Team: {
+        if (!this.isUuid(String(id))) return [];
+
+        const rows = await this.postgres.query<Array<{ steam_id: string }>>(
+          `SELECT player_steam_id::text AS steam_id FROM team_roster WHERE team_id = $1::uuid
+           UNION
+           SELECT owner_steam_id::text FROM teams WHERE id = $1::uuid`,
+          [id],
+        );
+        return (rows ?? []).map((row) => String(row.steam_id));
+      }
       case ChatLobbyType.Draft: {
         const { draft_games_by_pk } = await this.hasuraService.query({
           draft_games_by_pk: {
@@ -3584,9 +3660,8 @@ export class ChatService {
       }
       default:
         // Organizer chat has dynamic, role-based membership rather than a
-        // fixed roster, and Team isn't a reachable channel at all today
-        // (joinMatchLobby's switch has no case for it) -- both
-        // intentionally get no push recipients here.
+        // fixed roster, so it intentionally gets no push recipients here
+        // (notifyLobbyMembers resolves its audience by role instead).
         return [];
     }
   }
@@ -3627,10 +3702,40 @@ export class ChatService {
     const users = await this.getAllUsersInLobby(type, id);
     const eventName = `lobby:${type}:${id}:${event}`;
 
+    // Organizer Chat has no roster: who may still receive it is whoever holds
+    // a moderator-or-above role right now, read once for the whole room.
+    let organizerAllowed: Set<string> | undefined;
+    if (type === ChatLobbyType.Organizer && users.length) {
+      const { players } = await this.hasuraService.query({
+        players: {
+          __args: {
+            where: {
+              steam_id: { _in: users.map(({ steamId }) => String(steamId)) },
+            },
+          },
+          steam_id: true,
+          role: true,
+        },
+      });
+      organizerAllowed = new Set(
+        (players ?? [])
+          .filter((player) =>
+            isRoleAbove(player.role, ChatService.ORGANIZER_CHAT_MIN_ROLE),
+          )
+          .map((player) => String(player.steam_id)),
+      );
+    }
+
     for (const { steamId } of users) {
+      // Access is checked per recipient on every delivery, so a member who was
+      // removed (or lost the role) stops receiving at once and their lobby
+      // presence is dropped.
       if (
-        type === ChatLobbyType.Tournament &&
-        !(await this.canAccessTournamentChat(id, String(steamId)))
+        (type === ChatLobbyType.Tournament &&
+          !(await this.canAccessTournamentChat(id, String(steamId)))) ||
+        (type === ChatLobbyType.Team &&
+          !(await this.canAccessTeamChat(id, String(steamId)))) ||
+        (organizerAllowed && !organizerAllowed.has(String(steamId)))
       ) {
         await this.removeUserData(type, id, steamId);
         await this.redis.del(this.sessionsKey(type, id, steamId));

@@ -17,7 +17,7 @@ export const NOTIFICATION_CATEGORIES: Record<string, string[]> = {
   global_chat: ["GlobalChatMessage"],
   // Was bundled under `chat` (shared with matchmaking/draft/tournament
   // chat) with no way to mute/enable it independently -- split out on
-  // request. Role-gated (match_organizer+), not a fixed roster, so it's
+  // request. Role-gated (moderator+), not a fixed roster, so it's
   // also its own early-return branch in ChatService.notifyLobbyMembers.
   organizer_chat: ["OrganizerChatMessage"],
   // Sidebar Announcements channel (admin-only posting) -- defaults to
