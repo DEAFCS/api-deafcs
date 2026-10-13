@@ -1,3 +1,4 @@
+import { mockDirectRequestPolicy } from "../../test/utils/direct-request-fixture";
 import { ChatService } from "./chat.service";
 import { ChatGateway } from "./chat.gateway";
 import { ChatVideoController } from "./chat-video.controller";
@@ -35,6 +36,7 @@ describe("website message rate (upstream d2d7f616)", () => {
         },
       ),
       get: jest.fn().mockResolvedValue(null),
+      publish: jest.fn().mockResolvedValue(1),
       hset: jest.fn().mockResolvedValue(1),
       set: jest.fn().mockResolvedValue("OK"),
       sendCommand: jest.fn().mockResolvedValue(1),
@@ -53,6 +55,7 @@ describe("website message rate (upstream d2d7f616)", () => {
       {} as any,
       {} as any,
     );
+    mockDirectRequestPolicy(service);
     jest.spyOn(service, "to").mockResolvedValue(undefined);
     jest
       .spyOn(service as any, "notifyLobbyMembers")

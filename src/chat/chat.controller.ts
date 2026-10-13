@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  UseGuards,
   Controller,
   ForbiddenException,
   Get,
@@ -10,6 +11,11 @@ import {
   Req,
   Res,
 } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { Throttle } from "@nestjs/throttler";
+import { ThrottlerBehindProxyGuard } from "../auth/strategies/ThrottlerBehindProxyGuard";
+import { AppConfig } from "../configs/types/AppConfig";
+import { SteamGuard } from "../auth/strategies/SteamGuard";
 import { Request, Response } from "express";
 import crypto from "crypto";
 import { HasuraEvent } from "src/hasura/hasura.controller";
@@ -40,7 +46,52 @@ export class ChatController {
     private readonly chatService: ChatService,
     private readonly s3: S3Service,
     private readonly giphy: GiphyService,
+    private readonly config?: ConfigService,
   ) {}
+
+  @Get("direct/conversations")
+  @UseGuards(SteamGuard, ThrottlerBehindProxyGuard)
+  @Throttle({ default: { limit: 60, ttl: 60000 } })
+  async directConversations(@Req() request: Request) {
+    return {
+      conversations: await this.chatService.directRequests.conversations(
+        request.user as User,
+      ),
+    };
+  }
+  @Post("direct/conversations/:roomId/decline")
+  @UseGuards(SteamGuard, ThrottlerBehindProxyGuard)
+  @Throttle({ default: { limit: 60, ttl: 60000 } })
+  async declineDirect(
+    @Req() request: Request,
+    @Param("roomId") roomId: string,
+  ) {
+    this.assertDirectMutationOrigin(request);
+    await this.chatService.directRequests.decline(roomId, request.user as User);
+    return { success: true };
+  }
+  @Post("direct/conversations/:roomId/read")
+  @UseGuards(SteamGuard, ThrottlerBehindProxyGuard)
+  @Throttle({ default: { limit: 60, ttl: 60000 } })
+  async readDirect(@Req() request: Request, @Param("roomId") roomId: string) {
+    this.assertDirectMutationOrigin(request);
+    await this.chatService.directRequests.markRead(
+      roomId,
+      request.user as User,
+    );
+    return { success: true };
+  }
+
+  private assertDirectMutationOrigin(request: Request) {
+    const origin = request.headers?.origin;
+    const app = this.config?.get<AppConfig>("app");
+    if (
+      request.headers?.["sec-fetch-site"] === "cross-site" ||
+      (origin && origin !== app?.webDomain && origin !== app?.apiDomain)
+    ) {
+      throw new ForbiddenException("request origin not allowed");
+    }
+  }
 
   @HasuraEvent()
   public async chat_lobbies_removed(data: HasuraEventData<lobbies_set_input>) {

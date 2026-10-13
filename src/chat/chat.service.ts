@@ -1,4 +1,8 @@
 import { ConflictException, Injectable, Logger } from "@nestjs/common";
+import {
+  DirectRequestsService,
+  type DirectSendContext,
+} from "./direct-requests.service";
 import { User } from "../auth/types/User";
 import Redis from "ioredis";
 import { RedisManagerService } from "../redis/redis-manager/redis-manager.service";
@@ -199,6 +203,8 @@ export class ChatService {
   public static readonly ORGANIZER_CHAT_TTL_SECONDS = 60 * 60 * 24 * 90;
   public static readonly TEAM_CHAT_TTL_SECONDS = 60 * 60 * 24 * 30;
 
+  public readonly directRequests: DirectRequestsService;
+
   constructor(
     private readonly logger: Logger,
     private readonly rcon: RconService,
@@ -214,6 +220,9 @@ export class ChatService {
     private readonly pushNotifications: PushNotificationsService = null as any,
   ) {
     this.redis = this.redisManager.getConnection();
+    this.directRequests = new DirectRequestsService(this.postgres, (error) =>
+      this.logger.warn("[chat] direct send side effect failed", error),
+    );
   }
 
   public async updateChatMessageTTL(expiresIn: number) {
@@ -443,56 +452,7 @@ export class ChatService {
         // in sendMessageToChat, to administrator only.
         break;
       case ChatLobbyType.Direct: {
-        const parties = id.split(":");
-        if (parties.length !== 2 || !parties.includes(String(user.steam_id))) {
-          return;
-        }
-
-        // Everyone -- including admins -- can only DM an accepted friend.
-        // Opening a DM used to only check that the requester was one of
-        // the two parties in the id, which anyone can derive from any
-        // two steam ids (it's just a sorted pair), so this was the only
-        // thing actually stopping unsolicited DMs to strangers.
-        {
-          const otherSteamId = parties.find((p) => p !== String(user.steam_id));
-          const { friends } = await this.hasuraService.query({
-            friends: {
-              __args: {
-                where: {
-                  status: { _eq: "Accepted" },
-                  _or: [
-                    {
-                      player_steam_id: { _eq: user.steam_id },
-                      other_player_steam_id: { _eq: otherSteamId },
-                    },
-                    {
-                      player_steam_id: { _eq: otherSteamId },
-                      other_player_steam_id: { _eq: user.steam_id },
-                    },
-                  ],
-                },
-                limit: 1,
-              },
-              player_steam_id: true,
-            },
-          });
-          if (friends.length === 0) {
-            return;
-          }
-
-          // Explicit, not just relying on blocking having already removed
-          // the friendship row above -- keeps this join path correct on
-          // its own even if the DM/friendship coupling ever changes, and
-          // covers reconnects/refreshes the same as a fresh open.
-          if (
-            await this.blocks.isBlockedEitherDirection(
-              user.steam_id,
-              otherSteamId,
-            )
-          ) {
-            return;
-          }
-        }
+        if (!(await this.directRequests.canView(id, user))) return;
         break;
       }
       default:
@@ -543,6 +503,8 @@ export class ChatService {
       messages = Object.entries(await this.redis.hgetall(`chat_${type}_${id}`))
         .map(([, value]) => JSON.parse(value))
         .filter((message) => !deletedIds.has(String(message.id)));
+
+      if(type === ChatLobbyType.Direct) messages = await this.directRequests.filterCommittedMessages(id,user,messages);
 
       // Per-viewer redaction: a shared room (Global, Team, Match, ...)
       // shows the same message list to everyone except who the *joining*
@@ -869,43 +831,8 @@ export class ChatService {
         return this.canAccessTeamChat(id, user.steam_id);
       case ChatLobbyType.Global:
         return isRoleAbove(user.role, "verified_user");
-      case ChatLobbyType.Direct: {
-        const parties = id.split(":");
-        if (parties.length !== 2 || !parties.includes(String(user.steam_id)))
-          return false;
-        const otherSteamId = parties.find(
-          (steamId) => steamId !== String(user.steam_id),
-        );
-        if (!otherSteamId) return false;
-        const { friends } = await this.hasuraService.query({
-          friends: {
-            __args: {
-              where: {
-                status: { _eq: "Accepted" },
-                _or: [
-                  {
-                    player_steam_id: { _eq: user.steam_id },
-                    other_player_steam_id: { _eq: otherSteamId },
-                  },
-                  {
-                    player_steam_id: { _eq: otherSteamId },
-                    other_player_steam_id: { _eq: user.steam_id },
-                  },
-                ],
-              },
-              limit: 1,
-            },
-            player_steam_id: true,
-          },
-        });
-        return (
-          friends.length > 0 &&
-          !(await this.blocks.isBlockedEitherDirection(
-            user.steam_id,
-            otherSteamId,
-          ))
-        );
-      }
+      case ChatLobbyType.Direct:
+        return this.directRequests.canView(id, user);
       case ChatLobbyType.Announcement:
         return id === ANNOUNCEMENTS_LOBBY_ID;
       default:
@@ -1105,12 +1032,14 @@ export class ChatService {
     // those who can actually read this room (and haven't blocked the
     // sender) survive resolveMentions.
     mentionSteamIds?: unknown,
+    directContext?: DirectSendContext,
   ): Promise<{
     accepted: boolean;
     tooLong?: boolean;
     rateLimited?: boolean;
     muteStatus?: WebsiteChatMuteStatus;
     restrictionStatus?: WebsiteRestrictionStatus;
+    errorCode?: string;
   }> {
     // Website text only -- game-relayed lines keep their existing path.
     if (source === "website" && isChatMessageTooLong(_message ?? "")) {
@@ -1157,6 +1086,7 @@ export class ChatService {
     // just as upstream does, and a rejected video draft remains retryable.
     if (
       source === "website" &&
+      !directContext &&
       !(await this.withinRate(
         `chat:message-rate:${player.steam_id}`,
         ChatService.MESSAGE_RATE_LIMIT,
@@ -1166,6 +1096,28 @@ export class ChatService {
       return { accepted: false, rateLimited: true };
     }
 
+    if (type === ChatLobbyType.Direct && !directContext) {
+      return this.directRequests.send(
+        id,
+        player,
+        (context) =>
+          this.sendMessageToChat(
+            type,
+            id,
+            player,
+            _message,
+            skipCheck,
+            clientId,
+            attachment,
+            source,
+            gifUrl,
+            videoDraftId,
+            mentionSteamIds,
+            context,
+          ),
+        videoDraftId,
+      );
+    }
     let videoDraftSession: any;
     if (videoDraftId) {
       if (
@@ -1212,9 +1164,13 @@ export class ChatService {
             String(existing.id),
           );
         }
+        if (directContext) await directContext.record(String(existing.id));
         return { accepted: true };
       }
-      if (videoDraftSession.state === "sent") return { accepted: true };
+      if (videoDraftSession.state === "sent") {
+        if (directContext) await directContext.record(videoDraftId);
+        return { accepted: true };
+      }
     }
 
     // verify they are in the lobby
@@ -1278,7 +1234,7 @@ export class ChatService {
       }
 
       // Closes the "already had the DM tab open" bypass: joinMatchLobby's
-      // friends-only check only runs at join time, and blocking removes
+      // request access check only runs at join time, and blocking removes
       // the friendship row (see ti_v_my_blocks), but a tab opened *before*
       // the block never re-joins. Re-checked here on every send instead.
       if (type === ChatLobbyType.Direct) {
@@ -1345,9 +1301,13 @@ export class ChatService {
         id,
         player,
         messageTtlSeconds,
+        directContext,
       );
       if (!consumed) return { accepted: false };
-      if (consumed.alreadySent) return { accepted: true };
+      if (consumed.alreadySent) {
+        if (directContext) await directContext.record(videoDraftId);
+        return { accepted: true };
+      }
       videoDraftSession = consumed.session;
       message.media = consumed.media;
       sentVideoMediaId = String(consumed.media.id);
@@ -1355,6 +1315,7 @@ export class ChatService {
       sentVideoTtlSeconds = Number(consumed.session.messageTtlSeconds);
     }
 
+    const stableMessageId = sentVideoMessageField ?? uuidv4();
     if (attachment) {
       // Only the random id is ever handed back to clients -- the real S3
       // key stays server-side, resolved (and access-checked against this
@@ -1378,6 +1339,16 @@ export class ChatService {
       ) {
         return { accepted: false };
       }
+      if (directContext)
+        directContext.rollback.push(async () => {
+          await this.redis.del(this.chatAttachmentKey(attachmentId));
+          if (
+            (await this.redis.get(
+              this.chatAttachmentClaimKey(attachment.url),
+            )) === attachmentId
+          )
+            await this.redis.del(this.chatAttachmentClaimKey(attachment.url));
+        });
       await this.redis.set(
         this.chatAttachmentKey(attachmentId),
         JSON.stringify({
@@ -1385,6 +1356,7 @@ export class ChatService {
           contentType: attachment.contentType,
           chatType: type,
           roomId: id,
+          ...(directContext ? {directMessageId:stableMessageId}: {}),
         }),
         "EX",
         messageTtlSeconds,
@@ -1417,6 +1389,7 @@ export class ChatService {
       message.mentions = mentions;
     }
 
+    if (directContext) await directContext.record(stableMessageId);
     if (type === ChatLobbyType.Announcement) {
       // Persisted in Postgres instead of the Redis 24h-TTL hash below --
       // see ANNOUNCEMENTS_LOBBY_ID. `id` is the row's own uuid, the
@@ -1430,14 +1403,15 @@ export class ChatService {
       message.id = rows[0].id;
     } else {
       const messageKey = `chat_${type}_${id}`;
-      const messageField = sentVideoMessageField ?? uuidv4();
+      const messageField = stableMessageId;
       message.id = messageField;
+      const storedMessage = directContext ? {...message,directLedger:true} : message;
       if (sentVideoMediaId) {
         try {
           const inserted = await this.redis.hsetnx(
             messageKey,
             messageField,
-            JSON.stringify(message),
+            JSON.stringify(storedMessage),
           );
           if (Number(inserted) !== 1) {
             const existing = await this.findSentVideoMessage(
@@ -1488,10 +1462,14 @@ export class ChatService {
           throw error;
         }
       } else {
+        if (directContext)
+          directContext.rollback.push(() =>
+            this.redis.hdel(messageKey, messageField),
+          );
         await this.redis.hset(
           messageKey,
           messageField,
-          JSON.stringify(message),
+          JSON.stringify(storedMessage),
         );
         await this.redis.sendCommand(
           new Redis.Command("HEXPIRE", [
@@ -1505,43 +1483,101 @@ export class ChatService {
       }
     }
 
-    if (type === ChatLobbyType.Direct || type === ChatLobbyType.Announcement) {
-      void this.to(type, id, "chat", message);
-    } else {
-      // Per-recipient redaction for live messages in shared rooms, mirroring
-      // the history-load redaction above -- a viewer who has blocked the
-      // sender gets a placeholder in real time too, not just on next join.
-      void this.to(type, id, "chat", message, async (recipientSteamId) => {
-        if (recipientSteamId === String(player.steam_id)) {
-          return undefined;
-        }
-        const recipientBlockedSender = await this.blocks.hasBlocked(
-          recipientSteamId,
-          player.steam_id,
+    const deliver = async () => {
+      if (directContext) {
+        const recipient = id
+          .split(":")
+          .find((party) => party !== String(player.steam_id));
+        // Reauthorize after COMMIT: a newly blocked peer must not receive even
+        // request metadata or a queued message body. to() also checks each viewer.
+        if (
+          !recipient ||
+          !(await this.directRequests.canView(id, player)) ||
+          !(await this.directRequests.canView(id, {
+            steam_id: recipient,
+          } as User))
+        )
+          return;
+        await this.redis.publish(
+          "send-message-to-steam-id",
+          JSON.stringify({
+            steamId: String(player.steam_id),
+            event: "direct:incoming",
+            data: {
+              roomId: id,
+              from: { steam_id: recipient },
+              request: false,
+              awaitingReply: directContext.request,
+            },
+          }),
         );
-        return recipientBlockedSender
-          ? this.redactIfBlocked(message, new Set([String(player.steam_id)]))
-          : undefined;
-      });
-    }
+        await this.redis.publish(
+          "send-message-to-steam-id",
+          JSON.stringify({
+            steamId: recipient,
+            event: "direct:incoming",
+            data: {
+              roomId: id,
+              from: {
+                steam_id: String(player.steam_id),
+                name: player.name,
+                avatar_url: player.avatar_url,
+              },
+              request: directContext.request,
+              awaitingReply: false,
+            },
+          }),
+        );
+        if (directContext.request) {
+          // An explicitly opened request preview may receive its authorized body.
+          // Pending requests still bypass ordinary unread notifications and push.
+          await this.to(type, id, "chat", message);
+          return;
+        }
+      }
+      if (
+        type === ChatLobbyType.Direct ||
+        type === ChatLobbyType.Announcement
+      ) {
+        await this.to(type, id, "chat", message);
+      } else {
+        // Per-recipient redaction for live messages in shared rooms, mirroring
+        // the history-load redaction above -- a viewer who has blocked the
+        // sender gets a placeholder in real time too, not just on next join.
+        void this.to(type, id, "chat", message, async (recipientSteamId) => {
+          if (recipientSteamId === String(player.steam_id)) {
+            return undefined;
+          }
+          const recipientBlockedSender = await this.blocks.hasBlocked(
+            recipientSteamId,
+            player.steam_id,
+          );
+          return recipientBlockedSender
+            ? this.redactIfBlocked(message, new Set([String(player.steam_id)]))
+            : undefined;
+        });
+      }
 
-    // Best-effort push for anyone who's a member of this lobby but isn't
-    // currently connected to it (getAllUsersInLobby only ever holds
-    // people with an open socket to this exact channel -- i.e. already
-    // seeing the message live, so they're excluded rather than targeted).
-    // A failure here must never break message delivery, hence the catch.
-    void this.notifyLobbyMembers(
-      type,
-      id,
-      player,
-      ChatService.previewText(_message, message),
-      mentions,
-      String(message.id),
-    ).catch((error) =>
-      this.logger.warn(
-        `[chat] push notify failed for ${type}:${id}: ${(error as Error)?.message}`,
-      ),
-    );
+      // Best-effort push for anyone who's a member of this lobby but isn't
+      // currently connected to it (getAllUsersInLobby only ever holds
+      // people with an open socket to this exact channel -- i.e. already
+      // seeing the message live, so they're excluded rather than targeted).
+      // A failure here must never break message delivery, hence the catch.
+      void this.notifyLobbyMembers(
+        type,
+        id,
+        player,
+        ChatService.previewText(_message, message),
+        mentions,
+        String(message.id),
+      ).catch((error) =>
+        this.logger.warn(
+          `[chat] push notify failed for ${type}:${id}: ${(error as Error)?.message}`,
+        ),
+      );
+    };
+    if (directContext) directContext.afterCommit.push(deliver);
+    else await deliver();
 
     return { accepted: true };
   }
@@ -1724,6 +1760,11 @@ export class ChatService {
       )
         return undefined;
     }
+    if (
+      type === ChatLobbyType.Direct &&
+      (await this.directRequests.refusal(id, user))
+    )
+      return undefined;
     const activeKey = `chat_video_active:${String(user.steam_id)}`;
     const sessionId = uuidv4();
     if (
@@ -2416,6 +2457,7 @@ export class ChatService {
     roomId: string,
     user: User,
     messageTtlSeconds = this.expiresIn,
+    directContext?: DirectSendContext,
   ) {
     const claimKey = `chat_video_claim:${id}`;
     const claimed = await this.redis.set(claimKey, "sending", "EX", 120, "NX");
@@ -2489,6 +2531,58 @@ export class ChatService {
     ) {
       await this.redis.del(claimKey);
       return undefined;
+    }
+    if (directContext) {
+      const originalDraft = await this.redis.get(this.videoDraftKey(id));
+      const originalMedia = rawMedia;
+      directContext.rollback.push(async () => {
+        try {
+          // Undo only this uncommitted send; retain the uploaded object and its
+          // original draft deadline so the owner may retry without reuploading.
+          await this.redis.hdel(`chat_${type}_${roomId}`, id);
+          if (!originalDraft) return;
+          const original = JSON.parse(originalDraft);
+          const remaining = Math.ceil(
+            (original.createdAt + this.videoDraftTtlSeconds * 1000 - Date.now()) /
+              1000,
+          );
+          if (remaining > 0) {
+            original.state = "ready";
+            delete original.messageId;
+            delete original.sendStartedAt;
+            delete original.messageTtlSeconds;
+            await this.redis.set(
+              this.videoDraftKey(id),
+              JSON.stringify(original),
+              "EX",
+              remaining,
+            );
+            if (originalMedia) {
+              await this.redis.set(
+                this.videoMediaKey(original.mediaId),
+                originalMedia,
+                "EX",
+                remaining,
+              );
+              await this.scheduleSentVideoMediaCleanup(
+                original.mediaId,
+                JSON.parse(originalMedia).objectKey,
+                remaining,
+                true,
+              );
+            }
+            await this.redis.set(
+              `chat_video_active:${original.ownerSteamId}`,
+              id,
+              "EX",
+              remaining,
+              "NX",
+            );
+          }
+        } finally {
+          await this.redis.del(`chat_video_claim:${id}`);
+        }
+      });
     }
     const publicMedia = {
       type: media.type,
@@ -2579,6 +2673,7 @@ export class ChatService {
           !deletedIds.has(String(candidate.id)),
       );
     if (!message) return undefined;
+    if(media.chatType === ChatLobbyType.Direct && message.directLedger === true && !(await this.directRequests.isCommittedMessage(media.roomId,user,String(message.id)))) return undefined;
     if (media.chatType === ChatLobbyType.Direct) {
       if (
         await this.blocks.isBlockedEitherDirection(
@@ -2638,6 +2733,7 @@ export class ChatService {
       contentType: string;
       chatType: ChatLobbyType;
       roomId: string;
+      directMessageId?: string;
     };
     try {
       record = JSON.parse(raw);
@@ -2648,6 +2744,7 @@ export class ChatService {
     if (!(await this.hasLobbyPermission(record.chatType, record.roomId, user)))
       return undefined;
 
+    if(record.chatType===ChatLobbyType.Direct && record.directMessageId && !(await this.directRequests.isCommittedMessage(record.roomId,user,record.directMessageId))) return undefined;
     return { objectKey: record.objectKey, contentType: record.contentType };
   }
 
@@ -3855,6 +3952,13 @@ export class ChatService {
     }
 
     for (const { steamId } of users) {
+      if (
+        type === ChatLobbyType.Direct &&
+        !(await this.directRequests.canView(id, {
+          steam_id: String(steamId),
+        } as User))
+      )
+        continue;
       // Access is checked per recipient on every delivery, so a member who was
       // removed (or lost the role) stops receiving at once and their lobby
       // presence is dropped.

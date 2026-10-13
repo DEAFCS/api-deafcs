@@ -483,6 +483,7 @@ select_permissions:
   - role: match_organizer
     permission:
       columns:
+        - allow_message_requests
         - avatar_url
         - country
         - custom_avatar_url
@@ -539,6 +540,7 @@ select_permissions:
   - role: user
     permission:
       columns:
+        - allow_message_requests
         - avatar_url
         - country
         - last_read_news_at
@@ -596,6 +598,7 @@ update_permissions:
   - role: administrator
     permission:
       columns:
+        - allow_message_requests
         - avatar_url
         - country
         - discord_id
@@ -612,6 +615,7 @@ update_permissions:
   - role: match_organizer
     permission:
       columns:
+        - allow_message_requests
         - country
       filter: {}
       check: null
@@ -619,6 +623,7 @@ update_permissions:
   - role: user
     permission:
       columns:
+        - allow_message_requests
         - country
         - language
         - last_read_news_at

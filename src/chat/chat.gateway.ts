@@ -104,6 +104,14 @@ export class ChatGateway {
     );
 
     if (!result.accepted) {
+      if (result.errorCode === "awaiting_reply") {
+        client.send(
+          JSON.stringify({
+            event: "chat:send:error",
+            data: { message: "Your message request is waiting for a reply." },
+          }),
+        );
+      }
       if (result.rateLimited) {
         client.send(
           JSON.stringify({

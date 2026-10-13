@@ -1,3 +1,4 @@
+import { mockDirectRequestPolicy } from "../../test/utils/direct-request-fixture";
 import { ChatService } from "./chat.service";
 import { ChatLobbyType } from "./enums/ChatLobbyTypes";
 import { User } from "../auth/types/User";
@@ -60,6 +61,7 @@ describe("ChatService block enforcement", () => {
         getStatus: jest.fn().mockResolvedValue({ active: false }),
       } as any,
     );
+    mockDirectRequestPolicy(service);
   });
 
   function directId() {
@@ -72,6 +74,7 @@ describe("ChatService block enforcement", () => {
         .mockResolvedValueOnce({ players_by_pk: playerA }) // refreshClientUser
         .mockResolvedValueOnce({ friends: [{ player_steam_id: playerA.steam_id }] }); // accepted-friend check
       blocks.isBlockedEitherDirection.mockResolvedValue(true);
+      jest.mocked(service.directRequests.canView).mockResolvedValueOnce(false);
 
       const client = {
         user: playerA,
@@ -87,10 +90,7 @@ describe("ChatService block enforcement", () => {
 
       // No lobby "list"/"messages" payload was ever sent -- join was refused.
       expect(client.send).not.toHaveBeenCalled();
-      expect(blocks.isBlockedEitherDirection).toHaveBeenCalledWith(
-        playerA.steam_id,
-        playerB.steam_id,
-      );
+      expect(service.directRequests.canView).toHaveBeenCalledWith(directId(), expect.objectContaining({steam_id: playerA.steam_id}));
     });
 
     it("rejects sending a DM once blocked, even with an already-open tab (skipCheck path unaffected, explicit check path used)", async () => {

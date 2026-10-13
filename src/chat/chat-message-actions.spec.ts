@@ -1,3 +1,4 @@
+import { mockDirectRequestPolicy } from "../../test/utils/direct-request-fixture";
 import {
   CHAT_MESSAGE_MAX_LENGTH,
   CHAT_MESSAGE_SELF_SERVICE_WINDOW_MS,
@@ -310,6 +311,7 @@ describe("ChatService timed self edit/delete", () => {
       { put: jest.fn(), remove: jest.fn().mockResolvedValue(undefined) } as any,
       { add: jest.fn() } as any,
     );
+    mockDirectRequestPolicy(service);
     jest.spyOn(service, "to").mockResolvedValue(undefined);
   });
 
@@ -680,12 +682,13 @@ describe("ChatService timed self edit/delete", () => {
       ).resolves.toBe(true);
     });
 
-    it("rechecks Direct friendship and blocking", async () => {
+    it("rechecks Direct request/conversation/block policy", async () => {
       const room = `${author.steam_id}:${other.steam_id}`;
       put(ChatLobbyType.Direct, room, storedMessage());
       join(author, ChatLobbyType.Direct, room);
 
       blocks.isBlockedEitherDirection.mockResolvedValueOnce(true);
+    jest.mocked(service.directRequests.canView).mockResolvedValueOnce(false);
       await expect(edit(author, "x", ChatLobbyType.Direct, room)).resolves.toBe(
         false,
       );

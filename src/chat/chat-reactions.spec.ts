@@ -1,3 +1,4 @@
+import { mockDirectRequestPolicy } from "../../test/utils/direct-request-fixture";
 import { CHAT_REACTION_IDS } from "./types/ChatReactionIds";
 import { ChatService } from "./chat.service";
 import { ChatLobbyType } from "./enums/ChatLobbyTypes";
@@ -76,6 +77,7 @@ describe("ChatService message reactions", () => {
       blocks as any,
       restrictions as any,
     );
+    mockDirectRequestPolicy(service);
     jest.spyOn(service, "to").mockResolvedValue(undefined);
   });
 
@@ -227,7 +229,7 @@ describe("ChatService message reactions", () => {
     expect(redis.eval).not.toHaveBeenCalled();
   });
 
-  it("rechecks accepted-friend and bidirectional-block access for direct messages", async () => {
+  it("rechecks the authoritative request/conversation/block policy for direct messages", async () => {
     hasura.query.mockResolvedValue({
       friends: [{ player_steam_id: player.steam_id }],
     });
@@ -247,6 +249,7 @@ describe("ChatService message reactions", () => {
     ).resolves.toBe(true);
 
     blocks.isBlockedEitherDirection.mockResolvedValueOnce(true);
+    jest.mocked(service.directRequests.canView).mockResolvedValueOnce(false);
     await expect(
       (service as any).hasCurrentChatRoomAccess(
         client(),
