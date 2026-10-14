@@ -14,6 +14,7 @@ import {
   getMatchmakingQueueCacheKey,
   getMatchmakingLobbyDetailsCacheKey,
   getMatchmakingPlayerClaimKey,
+  getMatchmakingConformationCacheKey,
 } from "./utilities/cacheKeys";
 import { JoinQueueError } from "./utilities/joinQueueError";
 import { ExpectedPlayers } from "src/discord-bot/enums/ExpectedPlayers";
@@ -313,6 +314,63 @@ export class MatchmakingLobbyService {
     await this.matchmaking.sendRegionStats();
 
     return true;
+  }
+
+  /**
+   * Whether the lobby is already searching or in a live ready check (5Stack's
+   * isLobbyQueued). A join for a queued lobby is refused, not turned into a
+   * switch: a second join (another tab, a double click) used to overwrite
+   * the details and leave the lobby listed under both modes.
+   *
+   * DEAFCS: "queued" is checked against the queues themselves, not just the
+   * details record, so a record left behind by an interrupted flow can never
+   * keep a lobby out of matchmaking.
+   */
+  public async isLobbyQueued(lobbyId: string): Promise<boolean> {
+    const [details, confirmationId] = await this.redis.hmget(
+      getMatchmakingLobbyDetailsCacheKey(lobbyId),
+      "details",
+      "confirmationId",
+    );
+
+    if (
+      confirmationId &&
+      (await this.redis.exists(
+        getMatchmakingConformationCacheKey(confirmationId),
+      ))
+    ) {
+      return true;
+    }
+
+    if (!details) {
+      return false;
+    }
+
+    // Claimed by a matchmaking pass that is forming its ready check: no
+    // longer in the queues, not yet confirmed.
+    if (await this.redis.exists(`matchmaking:lock:${lobbyId}`)) {
+      return true;
+    }
+
+    let lobby: MatchmakingLobby;
+    try {
+      lobby = JSON.parse(details);
+    } catch {
+      return false;
+    }
+
+    for (const region of lobby.regions ?? []) {
+      if (
+        (await this.redis.zscore(
+          getMatchmakingQueueCacheKey(lobby.type, region, lobby.variant),
+          lobbyId,
+        )) !== null
+      ) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   // TODO - extermly inefficient

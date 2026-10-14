@@ -158,6 +158,45 @@ describe("MatchmakeService Play count (region stats)", () => {
     (global.setTimeout as unknown as jest.SpyInstance).mockRestore();
   });
 
+  it("counts a lobby once, under the mode it is queued for, and heals its stale entry", async () => {
+    // Queued for Competitive, then (before this fix) a second join moved its
+    // details to Wingman and left the Competitive entry behind.
+    const moved = lobby("Wingman");
+    await redis.zadd(
+      getMatchmakingQueueCacheKey("Competitive", REGION),
+      0,
+      moved.lobbyId,
+    );
+    await redis.zadd(
+      getMatchmakingRankCacheKey("Competitive", REGION),
+      5000,
+      moved.lobbyId,
+    );
+    await queueLobbies([moved, lobby()]);
+
+    const message = [...redis.published]
+      .reverse()
+      .find(({ message }) => message.event === "matchmaking:region-stats")
+      ?.message;
+    expect(message.data[REGION].Wingman).toEqual([{ index: 0, size: 1 }]);
+    expect(message.data[REGION].Competitive).toHaveLength(1);
+    expect(playCount()).toBe(2);
+    expect(
+      redis.zsets
+        .get(getMatchmakingQueueCacheKey("Competitive", REGION))
+        ?.has(moved.lobbyId),
+    ).toBe(false);
+    expect(
+      redis.zsets
+        .get(getMatchmakingQueueCacheKey("Wingman", REGION))
+        ?.has(moved.lobbyId),
+    ).toBe(true);
+
+    // Nor does a Competitive pass pick it up.
+    await service.matchmake("Competitive", REGION);
+    expect(confirmationIds()).toHaveLength(0);
+  });
+
   it("drops to 0 once the only 10 searching players get a match", async () => {
     await queueLobbies(Array.from({ length: 10 }, () => lobby()));
     expect(playCount()).toBe(10);

@@ -192,6 +192,31 @@ export class FakeRedis {
       return 0;
     }
 
+    // Matchmaking DROP_STRAY_ENTRIES_SCRIPT: keep the entries the lobby's
+    // details (KEYS[1]) still justify, drop the rest.
+    if (script.includes("queuedIn")) {
+      const [lobbyId, type, variant, ...regions] = argv;
+      const raw = this.hashes.get(keys[0])?.get("details");
+      const lobby = raw ? JSON.parse(raw) : undefined;
+      const queuedIn = new Set<string>(
+        lobby && lobby.type === type && (lobby.variant ?? "Standard") === variant
+          ? lobby.regions
+          : [],
+      );
+      let dropped = 0;
+      regions.forEach((region, index) => {
+        if (queuedIn.has(region)) {
+          return;
+        }
+        for (const key of [keys[1 + index * 2], keys[2 + index * 2]]) {
+          if (this.zsets.get(key)?.delete(lobbyId)) {
+            dropped++;
+          }
+        }
+      });
+      return dropped;
+    }
+
     // Matchmaking CLAIM_LOBBY_SCRIPT.
     if (script.includes("'ZREM'")) {
       if (this.existsSync(keys[0])) {

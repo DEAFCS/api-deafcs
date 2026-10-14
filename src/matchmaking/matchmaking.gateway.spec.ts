@@ -22,6 +22,7 @@ describe("MatchmakingGateway Terms enforcement", () => {
     setLobbyDetails: jest.Mock;
     removeLobbyFromQueue: jest.Mock;
     removeLobbyDetails: jest.Mock;
+    isLobbyQueued: jest.Mock;
   };
   let matchmakeService: {
     addLobbyToQueue: jest.Mock;
@@ -70,6 +71,7 @@ describe("MatchmakingGateway Terms enforcement", () => {
       setLobbyDetails: jest.fn().mockResolvedValue(undefined),
       removeLobbyFromQueue: jest.fn().mockResolvedValue(true),
       removeLobbyDetails: jest.fn().mockResolvedValue(undefined),
+      isLobbyQueued: jest.fn().mockResolvedValue(false),
     };
     matchmakeService = {
       addLobbyToQueue: jest.fn().mockResolvedValue(undefined),
@@ -124,6 +126,123 @@ describe("MatchmakingGateway Terms enforcement", () => {
           message.steamId === steamId && message.event === "matchmaking:error",
       )
       .map((message: any) => message.data.message);
+
+  describe("matchmaking:join-queue one queue per lobby", () => {
+    const solo = {
+      id: "solo-lobby",
+      players: [{ steam_id: "3", captain: true }],
+    };
+
+    beforeEach(() => {
+      terms.hasAcceptedCurrentTerms.mockResolvedValue(true);
+      matchmakingLobbyService.getPlayerLobby.mockResolvedValue(solo);
+    });
+
+    const join = (data: Record<string, unknown>) =>
+      gateway.joinQueue({ regions: ["TestA"], ...data }, client("3"));
+
+    it("refuses a join while the lobby is already queued, without touching its queue", async () => {
+      matchmakingLobbyService.isLobbyQueued.mockResolvedValue(true);
+
+      await join({ type: "Wingman" });
+
+      expect(errorsSentTo("3")).toEqual(["Your lobby is already in the queue"]);
+      expect(matchmakingLobbyService.setLobbyDetails).not.toHaveBeenCalled();
+      expect(matchmakeService.addLobbyToQueue).not.toHaveBeenCalled();
+      expect(matchmakingLobbyService.removeLobbyFromQueue).not.toHaveBeenCalled();
+      expect(matchmakingLobbyService.removeLobbyDetails).not.toHaveBeenCalled();
+    });
+
+    it("checks the queue inside the lobby lock, after the lobby is verified", async () => {
+      const order: string[] = [];
+      cache.lock.mockImplementation(async (key: string, fn: () => unknown) => {
+        order.push(`lock ${key}`);
+        return fn();
+      });
+      matchmakingLobbyService.verifyLobby.mockImplementation(async () => {
+        order.push("verify");
+      });
+      matchmakingLobbyService.isLobbyQueued.mockImplementation(async () => {
+        order.push("queued?");
+        return false;
+      });
+      matchmakingLobbyService.setLobbyDetails.mockImplementation(async () => {
+        order.push("details");
+      });
+
+      await join({ type: "Duel" });
+
+      expect(order).toEqual([
+        "lock matchmaking:verify:solo-lobby",
+        "verify",
+        "queued?",
+        "details",
+      ]);
+    });
+
+    it("two joins at once (different modes): one queues, the other is refused", async () => {
+      // A real one-at-a-time lock, and a lobby that counts as queued once
+      // the first join has added it.
+      let held: Promise<unknown> = Promise.resolve();
+      cache.lock.mockImplementation((_key: string, fn: () => unknown) => {
+        const run = held.then(() => fn());
+        held = run.catch(() => undefined);
+        return run;
+      });
+      let queued = false;
+      matchmakingLobbyService.isLobbyQueued.mockImplementation(async () => queued);
+      matchmakeService.addLobbyToQueue.mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        queued = true;
+      });
+
+      await Promise.all([
+        join({ type: "Competitive" }),
+        join({ type: "Competitive", variant: "CaptainPick" }),
+      ]);
+
+      expect(matchmakeService.addLobbyToQueue).toHaveBeenCalledTimes(1);
+      expect(matchmakingLobbyService.setLobbyDetails).toHaveBeenCalledTimes(1);
+      expect(matchmakingLobbyService.setLobbyDetails).toHaveBeenCalledWith(
+        ["TestA"],
+        "Competitive",
+        solo,
+        "Standard",
+      );
+      expect(errorsSentTo("3")).toEqual(["Your lobby is already in the queue"]);
+    });
+
+    it("a join that cannot get the lobby lock does not undo the join holding it", async () => {
+      cache.lock.mockRejectedValue(
+        new Error("Failed to acquire lock for matchmaking:verify:solo-lobby"),
+      );
+
+      await join({ type: "Wingman" });
+
+      expect(errorsSentTo("3")).toEqual([
+        "Your lobby is still joining the queue, try again",
+      ]);
+      expect(matchmakingLobbyService.removeLobbyFromQueue).not.toHaveBeenCalled();
+      expect(matchmakingLobbyService.removeLobbyDetails).not.toHaveBeenCalled();
+    });
+
+    it("an unexpected failure inside the lock still cleans up as before", async () => {
+      matchmakeService.addLobbyToQueue.mockRejectedValue(new Error("redis down"));
+
+      await join({ type: "Wingman" });
+
+      expect(errorsSentTo("3")).toEqual(["Unknown Error"]);
+      expect(matchmakingLobbyService.removeLobbyFromQueue).toHaveBeenCalledWith(
+        solo.id,
+      );
+    });
+
+    it("joins again after a cancel", async () => {
+      matchmakingLobbyService.isLobbyQueued.mockResolvedValue(false);
+      await join({ type: "Duel" });
+      expect(matchmakeService.addLobbyToQueue).toHaveBeenCalledWith(solo.id);
+    });
+  });
 
   describe("matchmaking:join-queue queue variants", () => {
     const solo = {

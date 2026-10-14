@@ -16,6 +16,7 @@ import { MatchAssistantService } from "src/matches/match-assistant/match-assista
 import { PushNotificationsService } from "src/notifications/push/push-notifications.service";
 import {
   getMatchmakingQueueCacheKey,
+  getMatchmakingLobbyDetailsCacheKey,
   getMatchmakingConformationCacheKey,
   getMatchmakingRankCacheKey,
   getMatchmakingRegionLockKey,
@@ -124,8 +125,8 @@ export class MatchmakeService {
       const statsKey = getMatchmakingRegionStatsKey(type, variant);
       const lobbyIndexes = new Map<string, number>();
       // A lobby can appear in more than one region's zset (multi-region
-      // search), so its player count is only worth fetching once per queue.
-      const lobbySizes = new Map<string, number>();
+      // search), so its details are only worth fetching once per queue.
+      const lobbyDetails = new Map<string, MatchmakingLobby | undefined>();
 
       for (const region of regions.server_regions) {
         const lobbyIds = await this.redis.zrange(
@@ -137,37 +138,28 @@ export class MatchmakeService {
         const stats = (regionStats[region.value] ??= {});
         const entries = await Promise.all(
           lobbyIds.map(async (lobbyId) => {
-            let size = lobbySizes.get(lobbyId);
-            if (size === undefined) {
-              const lobby =
-                await this.matchmakingLobbyService.getLobbyDetails(lobbyId);
+            if (!lobbyDetails.has(lobbyId)) {
+              lobbyDetails.set(
+                lobbyId,
+                await this.matchmakingLobbyService.getLobbyDetails(lobbyId),
+              );
+            }
+            const lobby = lobbyDetails.get(lobbyId);
 
-              if (!lobby) {
-                // Orphaned queue entry: still zadd'd into this region/type's
-                // zset, but its details hash is gone -- getLobbyDetails can
-                // never resolve regions to clean it up via the normal
-                // removeLobbyFromQueue path (that needs the very details
-                // that are missing), so it would otherwise sit in the queue
-                // forever, inflating "N in queue" by a phantom player with
-                // no way to ever leave. Self-heal it here instead, since
-                // this loop already has the exact (type, region) pair that
-                // needs the zrem.
-                await this.redis.zrem(
-                  getMatchmakingQueueCacheKey(type, region.value, variant),
-                  lobbyId,
-                );
-                await this.redis.zrem(
-                  getMatchmakingRankCacheKey(type, region.value, variant),
-                  lobbyId,
-                );
-                lobbySizes.set(lobbyId, 0);
-                return null;
-              }
-
-              size = lobby.players.length;
-              lobbySizes.set(lobbyId, size);
+            if (
+              !MatchmakeService.isQueuedIn(lobby, type, variant, region.value)
+            ) {
+              // A stray entry: its details are gone (orphaned) or now put the
+              // lobby in another mode or region. It would otherwise inflate
+              // "N in queue" forever, so self-heal it here, atomically, so a
+              // lobby that has just joined this queue is never removed.
+              await this.dropStrayQueueEntries(lobbyId, type, variant, [
+                region.value,
+              ]);
+              return null;
             }
 
+            const size = lobby.players.length;
             if (size === 0) {
               return null;
             }
@@ -229,7 +221,7 @@ export class MatchmakeService {
       "WITHSCORES",
     );
 
-    let lobbies = await this.processLobbyData(lobbiesData);
+    let lobbies = await this.processLobbyData(lobbiesData, type, region);
 
     if (lobbies.length === 0) {
       await this.releaseMatchmakeRegionLock(region);
@@ -320,9 +312,26 @@ export class MatchmakeService {
       for (const lobbyId of lobbyIds) {
         const details =
           await this.matchmakingLobbyService.getLobbyDetails(lobbyId);
-        if (details) {
-          lobbies.push(details);
+        // An entry left over from before the lobby queued for something
+        // else (or left) is dropped on its own, without touching the queue
+        // the lobby is in now.
+        if (
+          !MatchmakeService.isQueuedIn(
+            details,
+            "Competitive",
+            "CaptainPick",
+            region,
+          )
+        ) {
+          await this.dropStrayQueueEntries(
+            lobbyId,
+            "Competitive",
+            "CaptainPick",
+            [region],
+          );
+          continue;
         }
+        lobbies.push(details);
       }
 
       if (lobbies.length === 0) {
@@ -439,6 +448,8 @@ export class MatchmakeService {
 
   private async processLobbyData(
     lobbiesData: string[],
+    type: e_match_types_enum,
+    region: string,
   ): Promise<MatchmakingLobby[]> {
     const lobbyDetails = [];
 
@@ -447,17 +458,20 @@ export class MatchmakeService {
         lobbiesData[i],
       );
 
-      if (!details) {
-        continue;
-      }
-
-      // Only Standard lobbies may ever reach the automatic balancing below.
-      // A Captain Pick (or unknown) lobby showing up here would otherwise be
-      // auto-balanced into a normal match instead of drafted.
-      if (resolveMatchmakingQueueVariant(details.variant) !== "Standard") {
-        this.logger.warn(
-          `Skipping lobby ${details.lobbyId} - ${details.variant} lobbies are not matched by the standard matchmaker`,
-        );
+      // Only a lobby whose details put it in this exact Standard queue may
+      // reach the automatic balancing below: never one queued for another
+      // mode, another region or Captain Pick (which would otherwise be
+      // auto-balanced into a normal match instead of drafted). A stale entry
+      // is removed atomically (5Stack 38cfe241).
+      if (!MatchmakeService.isQueuedIn(details, type, "Standard", region)) {
+        if (details && resolveMatchmakingQueueVariant(details.variant) !== "Standard") {
+          this.logger.warn(
+            `Skipping lobby ${details.lobbyId} - ${details.variant} lobbies are not matched by the standard matchmaker`,
+          );
+        }
+        await this.dropStrayQueueEntries(lobbiesData[i], type, "Standard", [
+          region,
+        ]);
         continue;
       }
 
@@ -786,6 +800,94 @@ export class MatchmakeService {
   ) {
     const lockKey = getMatchmakingRegionLockKey(region, variant);
     await this.redis.del(lockKey);
+  }
+
+  // Removes a lobby's entries from the given (type, variant, region) queues
+  // unless its details, read inside the script, still put it there. Ported
+  // from 5Stack (5stackgg/api 38cfe241, DROP_STRAY_ENTRIES_SCRIPT) with the
+  // DEAFCS queue variant added. Re-reading the details in Redis means a
+  // lobby that has just (re)joined that very queue is never removed.
+  // KEYS: [details, queue1, ranks1, queue2, ranks2, ...]
+  // ARGV: [lobbyId, type, variant, region1, region2, ...]
+  private static readonly DROP_STRAY_ENTRIES_SCRIPT = `
+    local queuedIn = {}
+    local details = redis.call('HGET', KEYS[1], 'details')
+    if details then
+      local lobby = cjson.decode(details)
+      local variant = lobby.variant
+      if variant == nil or variant == cjson.null then
+        variant = 'Standard'
+      end
+      if lobby.type == ARGV[2] and variant == ARGV[3] then
+        for _, region in ipairs(lobby.regions) do
+          queuedIn[region] = true
+        end
+      end
+    end
+    local dropped = 0
+    for i = 4, #ARGV do
+      if not queuedIn[ARGV[i]] then
+        local queue = 2 * (i - 3)
+        dropped = dropped + redis.call('ZREM', KEYS[queue], ARGV[1])
+        dropped = dropped + redis.call('ZREM', KEYS[queue + 1], ARGV[1])
+      end
+    end
+    return dropped
+  `;
+
+  // Whether a lobby's details put it in this exact queue. A queue entry can
+  // outlive what it was queued for (a second join for another mode, or a
+  // leave landing between reading the details and the zadd), and the sorted
+  // sets never expire, so a matchmaking pass must not trust the entry alone.
+  public static isQueuedIn(
+    lobby: MatchmakingLobby | undefined,
+    type: e_match_types_enum,
+    variant: MatchmakingQueueVariant,
+    region: string,
+  ): boolean {
+    return (
+      !!lobby &&
+      lobby.type === type &&
+      resolveMatchmakingQueueVariant(lobby.variant) === variant &&
+      Array.isArray(lobby.regions) &&
+      lobby.regions.includes(region)
+    );
+  }
+
+  // Atomically drops a stray entry (see isQueuedIn), keeping any entry the
+  // lobby's current details still justify.
+  private async dropStrayQueueEntries(
+    lobbyId: string,
+    type: e_match_types_enum,
+    variant: MatchmakingQueueVariant,
+    regions: string[],
+  ): Promise<boolean> {
+    const keys = [getMatchmakingLobbyDetailsCacheKey(lobbyId)];
+
+    for (const region of regions) {
+      keys.push(getMatchmakingQueueCacheKey(type, region, variant));
+      keys.push(getMatchmakingRankCacheKey(type, region, variant));
+    }
+
+    const dropped = Number(
+      await this.redis.eval(
+        MatchmakeService.DROP_STRAY_ENTRIES_SCRIPT,
+        keys.length,
+        ...keys,
+        lobbyId,
+        type,
+        variant,
+        ...regions,
+      ),
+    );
+
+    if (dropped > 0) {
+      this.logger.warn(
+        `[matchmaking] removed stray ${type} ${variant} queue entry for lobby ${lobbyId} in ${regions.join(", ")}`,
+      );
+    }
+
+    return dropped > 0;
   }
 
   private static readonly CLAIM_LOBBY_SCRIPT = `

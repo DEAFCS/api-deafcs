@@ -302,9 +302,22 @@ export class MatchmakingGateway {
         }
       }
 
+      let locked = false;
       try {
         await this.cache.lock(`matchmaking:verify:${lobby.id}`, async () => {
+          locked = true;
           await this.matchmakingLobbyService.verifyLobby(lobby, user, type);
+
+          // A lobby is in one queue at a time. A second join (another tab,
+          // a double click, two entry points) is refused rather than
+          // switching modes: it used to overwrite the details and leave the
+          // lobby listed under both. Checked inside the lobby lock, so two
+          // joins at once are serialized and only the first gets through
+          // (5Stack 38cfe241, "already_queued").
+          if (await this.matchmakingLobbyService.isLobbyQueued(lobby.id)) {
+            throw new JoinQueueError("Your lobby is already in the queue");
+          }
+
           await this.matchmakingLobbyService.setLobbyDetails(
             regions,
             type,
@@ -320,6 +333,13 @@ export class MatchmakingGateway {
       } catch (error) {
         if (error instanceof JoinQueueError) {
           throw error;
+        }
+        // Another join of this lobby still holds the lock: the queue state
+        // is that join's to change, so do not tear it down (5Stack).
+        if (!locked) {
+          throw new JoinQueueError(
+            "Your lobby is still joining the queue, try again",
+          );
         }
         this.logger.error(`unable to add lobby to queue`, error);
         await this.matchmakingLobbyService.removeLobbyFromQueue(lobby.id);

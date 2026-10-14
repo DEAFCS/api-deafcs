@@ -992,7 +992,68 @@ describe("MatchmakeService", () => {
 
         expect(splitSpy).not.toHaveBeenCalled();
         expect(confirmationSpy).not.toHaveBeenCalled();
-        expect(mockRedis.eval).not.toHaveBeenCalled();
+        // Nothing is claimed: the only Redis script is the stray-entry check,
+        // and only ever against the Standard keys.
+        for (const [script, , ...args] of mockRedis.eval.mock.calls) {
+          expect(script).toContain("queuedIn");
+          expect(args).toContain("Standard");
+          expect(args.join(" ")).not.toContain("captain-pick");
+        }
+      });
+
+      it("never matches a lobby under a mode it is no longer queued for", async () => {
+        // Ten Competitive entries, but lobby-1 has since queued for Wingman:
+        // its Competitive entry is stale and must not fill the tenth seat.
+        const lobbies = Array.from({ length: 10 }, (_, i) =>
+          soloLobby(i + 1, 1000),
+        );
+        lobbies[0] = { ...lobbies[0], type: "Wingman" };
+        mockMatchmakingLobbyService.getLobbyDetails.mockImplementation(
+          async (lobbyId: string) =>
+            lobbies.find((lobby) => lobby.lobbyId === lobbyId) ?? null,
+        );
+        mockRedis.zrange.mockResolvedValueOnce(
+          lobbies.flatMap((lobby) => [lobby.lobbyId, "1000"]),
+        );
+        const createSpy = jest.spyOn(service as any, "createMatches");
+
+        await service.matchmake("Competitive", region);
+
+        expect(createSpy).toHaveBeenCalled();
+        const offered = createSpy.mock.calls[0][2] as any[];
+        expect(offered).toHaveLength(9);
+        expect(offered.map((lobby) => lobby.lobbyId)).not.toContain("lobby-1");
+        const strayDrops = mockRedis.eval.mock.calls.filter(([script]) =>
+          String(script).includes("queuedIn"),
+        );
+        expect(strayDrops).toHaveLength(1);
+        expect(strayDrops[0].slice(2)).toEqual([
+          "matchmaking:v20:details:lobby-1",
+          "matchmaking:v20:us-east:Competitive",
+          "matchmaking:v20:us-east:Competitive:ranks",
+          "lobby-1",
+          "Competitive",
+          "Standard",
+          region,
+        ]);
+      });
+
+      it("drops a stale Captain Pick entry without kicking the lobby out of its new queue", async () => {
+        const moved = soloLobby(1, 1000); // now queued for Standard 5v5
+        mockMatchmakingLobbyService.getLobbyDetails.mockResolvedValue(moved);
+        mockRedis.zrange.mockResolvedValue(["lobby-1"]);
+        const removeSpy = jest.spyOn(service as any, "removeLobbyWithError");
+
+        await service.matchmakeQueue("Competitive", region, "CaptainPick");
+
+        expect(removeSpy).not.toHaveBeenCalled();
+        expect(mockMatchmakingLobbyService.removeLobbyFromQueue).not.toHaveBeenCalled();
+        const strayDrops = mockRedis.eval.mock.calls.filter(([script]) =>
+          String(script).includes("queuedIn"),
+        );
+        expect(strayDrops.map((call) => call.slice(-3))).toEqual([
+          ["Competitive", "CaptainPick", region],
+        ]);
       });
 
       it("does not let a held Captain Pick lock block a standard pass", async () => {
@@ -1050,10 +1111,20 @@ describe("MatchmakeService", () => {
           "cp-3": 1,
           "wing-1": 2,
         };
+        const modes: Record<string, { type: string; variant?: string }> = {
+          "std-party": { type: "Competitive" },
+          "std-solo": { type: "Competitive" },
+          "cp-1": { type: "Competitive", variant: "CaptainPick" },
+          "cp-2": { type: "Competitive", variant: "CaptainPick" },
+          "cp-3": { type: "Competitive", variant: "CaptainPick" },
+          "wing-1": { type: "Wingman" },
+        };
         mockMatchmakingLobbyService.getLobbyDetails.mockImplementation(
           async (lobbyId: string) =>
             ({
               lobbyId,
+              ...modes[lobbyId],
+              regions: [region],
               players: Array.from({ length: sizes[lobbyId] }, () => ({})),
             }) as any,
         );
@@ -1100,9 +1171,21 @@ describe("MatchmakeService", () => {
 
         await service.sendRegionStats();
 
-        expect(mockRedis.zrem.mock.calls).toEqual([
-          ["matchmaking:v20:us-east:Competitive:captain-pick", "gone"],
-          ["matchmaking:v20:us-east:Competitive:captain-pick:ranks", "gone"],
+        // Removed atomically by the stray-entry script, from the Captain
+        // Pick keys only.
+        expect(mockRedis.zrem).not.toHaveBeenCalled();
+        expect(mockRedis.eval.mock.calls).toHaveLength(1);
+        const [script, count, ...args] = mockRedis.eval.mock.calls[0];
+        expect(script).toContain("queuedIn");
+        expect(count).toBe(3);
+        expect(args).toEqual([
+          "matchmaking:v20:details:gone",
+          "matchmaking:v20:us-east:Competitive:captain-pick",
+          "matchmaking:v20:us-east:Competitive:captain-pick:ranks",
+          "gone",
+          "Competitive",
+          "CaptainPick",
+          region,
         ]);
       });
     });
