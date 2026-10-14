@@ -150,14 +150,26 @@ END;
 $$;
 
 -- Preserve valid legacy accepted DMs without moving/extending Redis content.
-INSERT INTO public.direct_conversations(room_id,steam_id,last_message_at,accepted_at)
- SELECT substring(n.entity_id from 8), p.steam_id, max(n.created_at), max(n.created_at)
- FROM public.notifications n JOIN public.players p ON p.steam_id::text IN
- (split_part(substring(n.entity_id from 8),':',1),split_part(substring(n.entity_id from 8),':',2))
+-- Aggregate valid rooms first, then look up their two bigint participants.
+-- Materializing this small set keeps casts behind validation and avoids the
+-- old players x chat-notifications nested loop. No notification is modified.
+WITH legacy_rooms AS MATERIALIZED (
+ SELECT substring(n.entity_id from 8) AS room_id,
+        split_part(substring(n.entity_id from 8),':',1)::bigint AS first_steam_id,
+        split_part(substring(n.entity_id from 8),':',2)::bigint AS second_steam_id,
+        max(n.created_at) AS last_message_at
+ FROM public.notifications n
  WHERE n.type::text='ChatMessage'
  AND CASE WHEN n.entity_id ~ '^direct:[1-9][0-9]{0,18}:[1-9][0-9]{0,18}$' THEN
    split_part(substring(n.entity_id from 8),':',1)::numeric < split_part(substring(n.entity_id from 8),':',2)::numeric
    AND split_part(substring(n.entity_id from 8),':',2)::numeric <= 9223372036854775807
-   AND EXISTS(SELECT 1 FROM public.players peer WHERE peer.steam_id::text = CASE WHEN p.steam_id::text = split_part(substring(n.entity_id from 8),':',1) THEN split_part(substring(n.entity_id from 8),':',2) ELSE split_part(substring(n.entity_id from 8),':',1) END)
  ELSE false END
- GROUP BY n.entity_id,p.steam_id ON CONFLICT(room_id,steam_id) DO NOTHING;
+ GROUP BY n.entity_id
+)
+INSERT INTO public.direct_conversations(room_id,steam_id,last_message_at,accepted_at)
+ SELECT r.room_id, participant.steam_id, r.last_message_at, r.last_message_at
+ FROM legacy_rooms r
+ JOIN public.players first_player ON first_player.steam_id=r.first_steam_id
+ JOIN public.players second_player ON second_player.steam_id=r.second_steam_id
+ CROSS JOIN LATERAL (VALUES (first_player.steam_id),(second_player.steam_id)) AS participant(steam_id)
+ ON CONFLICT(room_id,steam_id) DO NOTHING;
