@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import { PostgresService } from "../src/postgres/postgres.service";
 import { Fixtures } from "./utils/fixtures";
 import { bootMigratedDb, SqlTestDb } from "./utils/sql-test-db";
@@ -423,6 +425,77 @@ describe("news comments schema", () => {
           [deleted]: null,
         });
       }
+    });
+  });
+
+  // Runs last: it drops the tables. Rolling back must remove everything the
+  // migration added (without touching news_articles), and a later forward
+  // deploy must bring the functions and triggers back, not just the tables.
+  describe("rollback", () => {
+    it("down.sql removes the feature cleanly and a re-deploy restores it", async () => {
+      const dir = "hasura/migrations/default/1890000001100_news_comments";
+      const before = await postgres.query<Array<{ count: number }>>(
+        "SELECT count(*)::int AS count FROM news_articles",
+      );
+      const objects = async () =>
+        (
+          await postgres.query<Array<Record<string, unknown>>>(
+            `SELECT to_regclass('public.news_comments')::text AS comments,
+                    to_regclass('public.news_comment_votes')::text AS votes,
+                    to_regprocedure('public.news_comments_open(uuid)')::text AS open_fn,
+                    (SELECT count(*)::int FROM pg_trigger WHERE tgname LIKE '%news_comment%') AS triggers,
+                    (SELECT count(*)::int FROM e_notification_types WHERE value = 'NewsCommentReply') AS type,
+                    (SELECT count(*)::int FROM migration_hashes.hashes
+                      WHERE replace(name, chr(92), '/') IN ('hasura/functions/news/news_comments', 'hasura/triggers/news_comments')) AS hashes`,
+          )
+        )[0];
+
+      expect(await objects()).toEqual({
+        comments: "news_comments",
+        votes: "news_comment_votes",
+        open_fn: "news_comments_open(uuid)",
+        triggers: 6,
+        type: 1,
+        hashes: 2,
+      });
+
+      // The loader keys digests by cwd-relative path: forward slashes in
+      // production (Linux), backslashes on a Windows test host. Store them
+      // the production way so down.sql is tested as it will run there.
+      await postgres.query(
+        "UPDATE migration_hashes.hashes SET name = replace(name, chr(92), '/') WHERE name LIKE '%news_comments'",
+      );
+      await postgres.query(
+        `BEGIN;${fs.readFileSync(path.resolve(dir, "down.sql"), "utf8")};COMMIT;`,
+      );
+      expect(await objects()).toEqual({
+        comments: null,
+        votes: null,
+        open_fn: null,
+        triggers: 0,
+        type: 0,
+        hashes: 0,
+      });
+      const after = await postgres.query<Array<{ count: number }>>(
+        "SELECT count(*)::int AS count FROM news_articles",
+      );
+      expect(after).toEqual(before);
+
+      // Forward again the way a deploy does: the migration, then the
+      // digest-checked functions and triggers.
+      await postgres.query(
+        `BEGIN;${fs.readFileSync(path.resolve(dir, "up.sql"), "utf8")};COMMIT;`,
+      );
+      await db.hasura.apply(path.resolve("hasura/functions/news"));
+      await db.hasura.apply(path.resolve("hasura/triggers/news_comments.sql"));
+      expect(await objects()).toEqual({
+        comments: "news_comments",
+        votes: "news_comment_votes",
+        open_fn: "news_comments_open(uuid)",
+        triggers: 6,
+        type: 1,
+        hashes: 2,
+      });
     });
   });
 });
