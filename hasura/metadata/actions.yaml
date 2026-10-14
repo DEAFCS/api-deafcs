@@ -916,6 +916,73 @@ actions:
       - role: verified_user
       - role: user
     comment: Delete a news post. Caller role is verified against public.post_news_role.
+  - name: postNewsComment
+    definition:
+      kind: synchronous
+      handler: '{{HASURA_GRAPHQL_ACTIONS_HOOK}}'
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+      - role: tournament_organizer
+      - role: match_organizer
+      - role: moderator
+      - role: streamer
+      - role: verified_user
+      - role: user
+    comment: DEAFCS News comments. Post a comment or a reply. Verified User and above, not banned/restricted/chat-muted, article open (first 7 days). Notifies the parent author of a reply.
+  - name: editNewsComment
+    definition:
+      kind: synchronous
+      handler: '{{HASURA_GRAPHQL_ACTIONS_HOOK}}'
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+      - role: tournament_organizer
+      - role: match_organizer
+      - role: moderator
+      - role: streamer
+      - role: verified_user
+      - role: user
+    comment: DEAFCS News comments. Edit your own comment within 10 minutes of posting.
+  - name: deleteNewsComment
+    definition:
+      kind: synchronous
+      handler: '{{HASURA_GRAPHQL_ACTIONS_HOOK}}'
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+      - role: tournament_organizer
+      - role: match_organizer
+      - role: moderator
+      - role: streamer
+      - role: verified_user
+      - role: user
+    comment: DEAFCS News comments. Delete your own comment (soft delete).
+  - name: toggleNewsCommentVote
+    definition:
+      kind: synchronous
+      handler: '{{HASURA_GRAPHQL_ACTIONS_HOOK}}'
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+      - role: tournament_organizer
+      - role: match_organizer
+      - role: moderator
+      - role: streamer
+      - role: verified_user
+      - role: user
+    comment: DEAFCS News comments. Add or take back your +1 (not on your own comment, article open).
+  - name: setNewsCommentHidden
+    definition:
+      kind: synchronous
+      handler: '{{HASURA_GRAPHQL_ACTIONS_HOOK}}'
+      forward_client_headers: true
+    permissions:
+      - role: administrator
+      - role: tournament_organizer
+      - role: match_organizer
+      - role: moderator
+    comment: DEAFCS News comments. Staff (moderator and above) hide or restore a comment.
   - name: newsPostsAdmin
     definition:
       kind: synchronous
@@ -1685,6 +1752,8 @@ custom_types:
     - name: StorageSummary
     - name: TableSizeInfo
     - name: NewsPost
+    - name: NewsCommentOutput
+    - name: NewsCommentVoteOutput
     - name: TournamentInviteCodeOutput
     - name: TournamentDraftOutput
   scalars: []

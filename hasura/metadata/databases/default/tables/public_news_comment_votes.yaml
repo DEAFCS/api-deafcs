@@ -1,0 +1,80 @@
+table:
+  name: news_comment_votes
+  schema: public
+# DEAFCS-only. A player can only see their own +1s (to light up the button);
+# counts come from news_comments.vote_count. Writes: toggleNewsCommentVote.
+object_relationships:
+  - name: comment
+    using:
+      foreign_key_constraint_on: comment_id
+select_permissions:
+  - role: administrator
+    permission:
+      columns:
+        - comment_id
+        - created_at
+        - steam_id
+      filter:
+        steam_id:
+          _eq: X-Hasura-User-Id
+    comment: ""
+  - role: match_organizer
+    permission:
+      columns:
+        - comment_id
+        - created_at
+        - steam_id
+      filter:
+        steam_id:
+          _eq: X-Hasura-User-Id
+    comment: ""
+  - role: moderator
+    permission:
+      columns:
+        - comment_id
+        - created_at
+        - steam_id
+      filter:
+        steam_id:
+          _eq: X-Hasura-User-Id
+    comment: ""
+  - role: streamer
+    permission:
+      columns:
+        - comment_id
+        - created_at
+        - steam_id
+      filter:
+        steam_id:
+          _eq: X-Hasura-User-Id
+    comment: ""
+  - role: tournament_organizer
+    permission:
+      columns:
+        - comment_id
+        - created_at
+        - steam_id
+      filter:
+        steam_id:
+          _eq: X-Hasura-User-Id
+    comment: ""
+  - role: user
+    permission:
+      columns:
+        - comment_id
+        - created_at
+        - steam_id
+      filter:
+        steam_id:
+          _eq: X-Hasura-User-Id
+    comment: ""
+  - role: verified_user
+    permission:
+      columns:
+        - comment_id
+        - created_at
+        - steam_id
+      filter:
+        steam_id:
+          _eq: X-Hasura-User-Id
+    comment: ""

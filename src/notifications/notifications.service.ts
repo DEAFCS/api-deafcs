@@ -47,6 +47,9 @@ export class NotificationsService {
     // privacy rationale as the chat types above -- never post it to the
     // Discord support webhook.
     "PlayerWarning",
+    // DEAFCS: a News comment reply is a player-to-player message, not
+    // something for the support channel.
+    "NewsCommentReply",
   ]);
 
   constructor(

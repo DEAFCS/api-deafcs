@@ -1,0 +1,214 @@
+table:
+  name: news_comments
+  schema: public
+# DEAFCS-only (5Stack has no News comments). Read-only for every role: all
+# writes go through the postNewsComment / editNewsComment / deleteNewsComment
+# / toggleNewsCommentVote / setNewsCommentHidden actions. Readers get the
+# text through the computed field `text` (blank when deleted or hidden);
+# staff also see the stored body and the hide reason.
+object_relationships:
+  - name: article
+    using:
+      foreign_key_constraint_on: article_id
+  - name: author
+    using:
+      foreign_key_constraint_on: author_steam_id
+  - name: parent
+    using:
+      foreign_key_constraint_on: parent_id
+array_relationships:
+  - name: replies
+    using:
+      foreign_key_constraint_on:
+        column: parent_id
+        table:
+          name: news_comments
+          schema: public
+  - name: votes
+    using:
+      foreign_key_constraint_on:
+        column: comment_id
+        table:
+          name: news_comment_votes
+          schema: public
+computed_fields:
+  - name: text
+    definition:
+      function:
+        name: news_comment_visible_body
+        schema: public
+      session_argument: hasura_session
+    comment: The comment text as this viewer may see it.
+select_permissions:
+  - role: administrator
+    permission:
+      columns:
+        - article_id
+        - author_steam_id
+        - body
+        - created_at
+        - deleted_at
+        - edited_at
+        - hidden_at
+        - hidden_by_steam_id
+        - hidden_reason
+        - id
+        - parent_id
+        - vote_count
+      computed_fields:
+        - text
+      filter:
+        article:
+          status:
+            _eq: published
+      allow_aggregations: true
+    comment: ""
+  - role: guest
+    permission:
+      columns:
+        - article_id
+        - author_steam_id
+        - created_at
+        - deleted_at
+        - edited_at
+        - hidden_at
+        - id
+        - parent_id
+        - vote_count
+      computed_fields:
+        - text
+      filter:
+        article:
+          status:
+            _eq: published
+      allow_aggregations: true
+    comment: ""
+  - role: match_organizer
+    permission:
+      columns:
+        - article_id
+        - author_steam_id
+        - body
+        - created_at
+        - deleted_at
+        - edited_at
+        - hidden_at
+        - hidden_by_steam_id
+        - hidden_reason
+        - id
+        - parent_id
+        - vote_count
+      computed_fields:
+        - text
+      filter:
+        article:
+          status:
+            _eq: published
+      allow_aggregations: true
+    comment: ""
+  - role: moderator
+    permission:
+      columns:
+        - article_id
+        - author_steam_id
+        - body
+        - created_at
+        - deleted_at
+        - edited_at
+        - hidden_at
+        - hidden_by_steam_id
+        - hidden_reason
+        - id
+        - parent_id
+        - vote_count
+      computed_fields:
+        - text
+      filter:
+        article:
+          status:
+            _eq: published
+      allow_aggregations: true
+    comment: ""
+  - role: streamer
+    permission:
+      columns:
+        - article_id
+        - author_steam_id
+        - created_at
+        - deleted_at
+        - edited_at
+        - hidden_at
+        - id
+        - parent_id
+        - vote_count
+      computed_fields:
+        - text
+      filter:
+        article:
+          status:
+            _eq: published
+      allow_aggregations: true
+    comment: ""
+  - role: tournament_organizer
+    permission:
+      columns:
+        - article_id
+        - author_steam_id
+        - body
+        - created_at
+        - deleted_at
+        - edited_at
+        - hidden_at
+        - hidden_by_steam_id
+        - hidden_reason
+        - id
+        - parent_id
+        - vote_count
+      computed_fields:
+        - text
+      filter:
+        article:
+          status:
+            _eq: published
+      allow_aggregations: true
+    comment: ""
+  - role: user
+    permission:
+      columns:
+        - article_id
+        - author_steam_id
+        - created_at
+        - deleted_at
+        - edited_at
+        - hidden_at
+        - id
+        - parent_id
+        - vote_count
+      computed_fields:
+        - text
+      filter:
+        article:
+          status:
+            _eq: published
+      allow_aggregations: true
+    comment: ""
+  - role: verified_user
+    permission:
+      columns:
+        - article_id
+        - author_steam_id
+        - created_at
+        - deleted_at
+        - edited_at
+        - hidden_at
+        - id
+        - parent_id
+        - vote_count
+      computed_fields:
+        - text
+      filter:
+        article:
+          status:
+            _eq: published
+      allow_aggregations: true
+    comment: ""

@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS public.news_comment_votes;
+DROP TABLE IF EXISTS public.news_comments;
+DROP FUNCTION IF EXISTS public.tbi_news_comments();
+DROP FUNCTION IF EXISTS public.tbu_news_comments();
+DROP FUNCTION IF EXISTS public.tbi_news_comment_votes();
+DROP FUNCTION IF EXISTS public.tbd_news_comment_votes();
+DROP FUNCTION IF EXISTS public.tai_news_comment_votes();
+DROP FUNCTION IF EXISTS public.tad_news_comment_votes();
+DROP FUNCTION IF EXISTS public.news_comments_open(uuid);
+DROP FUNCTION IF EXISTS public.news_comment_visible_body(public.news_comments, json);
+DELETE FROM public.notifications WHERE type = 'NewsCommentReply';
+DELETE FROM public.e_notification_types WHERE value = 'NewsCommentReply';

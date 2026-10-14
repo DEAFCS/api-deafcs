@@ -28,6 +28,8 @@ export type InAppNotificationTypeConfig = {
 // own dedicated control.
 export const IN_APP_TOGGLEABLE_TYPES: InAppNotificationTypeConfig[] = [
   { type: "MatchImported", defaultEnabled: false, adminOnly: false },
+  // DEAFCS: someone replied to your News comment.
+  { type: "NewsCommentReply", defaultEnabled: true, adminOnly: false },
   { type: "DedicatedServerRconStatus", defaultEnabled: true, adminOnly: true },
   { type: "DedicatedServerStatus", defaultEnabled: true, adminOnly: true },
   { type: "EloRecompute", defaultEnabled: true, adminOnly: true },
