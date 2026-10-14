@@ -606,6 +606,14 @@ export class ChatService {
       return false;
     if (!(await this.hasCurrentChatRoomAccess(client, type, roomId, user)))
       return false;
+    // Reacting is posting (upstream 5Stack holds reactions to canPostIn):
+    // a viewer who may only read a draft room, such as a spectator of an
+    // open room once drafting starts, cannot react in it either.
+    if (
+      type === ChatLobbyType.Draft &&
+      !(await this.canSendDraftMessage(roomId, user))
+    )
+      return false;
 
     let expectedStoredMessage: string | undefined;
     if (type === ChatLobbyType.Announcement) {

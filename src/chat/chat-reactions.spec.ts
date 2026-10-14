@@ -176,6 +176,50 @@ describe("ChatService message reactions", () => {
     expect(redis.eval).not.toHaveBeenCalled();
   });
 
+  // Upstream holds reactions to canPostIn: a draft room viewer who may only
+  // read (an open room spectator once drafting starts) cannot react.
+  it("holds draft room reactions to the draft send rule", async () => {
+    const roomId = "11111111-2222-4333-8444-555555555555";
+    jest
+      .spyOn(service as any, "hasCurrentChatRoomAccess")
+      .mockResolvedValue(true);
+    redis.hget.mockImplementation(async (key: string, field: string) =>
+      key === `chat_draft_${roomId}` && field === messageId
+        ? JSON.stringify(message)
+        : null,
+    );
+    const canSend = jest
+      .spyOn(service as any, "canSendDraftMessage")
+      .mockResolvedValue(false);
+
+    await expect(
+      service.toggleChatMessageReaction(
+        client(),
+        ChatLobbyType.Draft,
+        roomId,
+        messageId,
+        "heart",
+      ),
+    ).resolves.toBe(false);
+    expect(canSend).toHaveBeenCalledWith(
+      roomId,
+      expect.objectContaining({ steam_id: player.steam_id }),
+    );
+    expect(redis.eval).not.toHaveBeenCalled();
+
+    canSend.mockResolvedValue(true);
+    await expect(
+      service.toggleChatMessageReaction(
+        client(),
+        ChatLobbyType.Draft,
+        roomId,
+        messageId,
+        "heart",
+      ),
+    ).resolves.toBe(true);
+    expect(redis.eval).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects restricted, muted, deleted, and viewer-redacted messages", async () => {
     restrictions.getStatus.mockResolvedValueOnce({ active: true });
     await expect(
