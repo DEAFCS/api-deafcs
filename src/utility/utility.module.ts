@@ -1,35 +1,233 @@
-import { Module } from "@nestjs/common";
-import { BullModule } from "@nestjs/bullmq";
+import { forwardRef, Module } from "@nestjs/common";
+import { ConfigModule } from "@nestjs/config";
+import { BullModule, InjectQueue } from "@nestjs/bullmq";
 import { BullBoardModule } from "@bull-board/nestjs";
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
+import { Queue } from "bullmq";
+import { HasuraModule } from "../hasura/hasura.module";
 import { PostgresModule } from "../postgres/postgres.module";
+import { RedisModule } from "../redis/redis.module";
+import { CacheModule } from "../cache/cache.module";
+import { S3Module } from "../s3/s3.module";
+import { AuthModule } from "../auth/auth.module";
+import { MatchesModule } from "../matches/matches.module";
+import { DemosModule } from "../demos/demos.module";
+import { RconModule } from "../rcon/rcon.module";
+import { NotificationsModule } from "../notifications/notifications.module";
 import { loggerFactory } from "../utilities/LoggerFactory";
 import { getQueuesProcessors } from "../utilities/QueueProcessors";
+import { UtilityJobs } from "./enums/UtilityJobs";
 import { UtilityQueues } from "./enums/UtilityQueues";
+import { UtilityAnalysisController } from "./utility-analysis.controller";
+import { UtilityAnalysisService } from "./utility-analysis.service";
+import { UtilityArtifactsService } from "./utility-artifacts.service";
+import { UtilityDriftService } from "./utility-drift.service";
+import { UtilityDiscoveryController } from "./utility-discovery.controller";
+import { UtilityDiscoveryService } from "./utility-discovery.service";
+import { UtilityImportService } from "./utility-import.service";
+import { UtilitySeedService } from "./utility-seed.service";
+import { UtilityInsightsController } from "./utility-insights.controller";
+import { UtilityInsightsService } from "./utility-insights.service";
+import { UtilityRepairService } from "./utility-repair.service";
+import { UtilitySolverService } from "./utility-solver.service";
+import { UtilityLoadService } from "./utility-load.service";
+import { UtilityLineupsController } from "./utility-lineups.controller";
+import { UtilityLineupsService } from "./utility-lineups.service";
 import { UtilityCalloutsService } from "./utility-callouts.service";
+import { UtilityMetaService } from "./utility-meta.service";
+import { UtilityMiningController } from "./utility-mining.controller";
+import { UtilityMiningService } from "./utility-mining.service";
+import { UtilityPlaybooksController } from "./utility-playbooks.controller";
+import { UtilityPlaybooksService } from "./utility-playbooks.service";
+import { UtilityPluginKeyGuard } from "./utility-plugin-key.guard";
+import { UtilityPracticeController } from "./utility-practice.controller";
+import { UtilityPracticeModeService } from "./utility-practice-mode.service";
+import { UtilityPracticeService } from "./utility-practice.service";
+import { UtilityRendersController } from "./utility-renders.controller";
+import { UtilityRendersService } from "./utility-renders.service";
+import { UtilityRenderWorkerController } from "./utility-render-worker.controller";
+import { UtilityRenderWorkerService } from "./utility-render-worker.service";
+import { UtilityLaunchSeedService } from "./utility-launch-seed.service";
+import { UtilityController } from "./utility.controller";
+import { MineUtilityMeta } from "./jobs/MineUtilityMeta";
 import { SyncMapCallouts } from "./jobs/SyncMapCallouts";
+import { ReapIdleUtilityPracticeSessions } from "./jobs/ReapIdleUtilityPracticeSessions";
+import { RunUtilityDriftScan } from "./jobs/RunUtilityDriftScan";
+import {
+  BatchUtilityRenderJob,
+  BatchUtilityRenderJobEvents,
+} from "./jobs/BatchUtilityRenderJob";
+import { ReconcileQueuedUtilityRenders } from "./jobs/ReconcileQueuedUtilityRenders";
+import { RunUtilityDiscovery } from "./jobs/RunUtilityDiscovery";
+import { GameStreamerModule } from "../matches/game-streamer/game-streamer.module";
 
-// DEAFCS: upstream's UtilityModule is the whole nade lineups / practice /
-// renders feature. DEAFCS ports only the map callouts part of it (the replay
-// viewer's callouts overlay): UtilityCalloutsService and the SyncMapCallouts
-// job on the utility-meta queue, wired the way upstream wires them.
 @Module({
   imports: [
+    HasuraModule,
     PostgresModule,
+    RedisModule,
+    CacheModule,
+    S3Module,
+    ConfigModule,
+    AuthModule,
+    forwardRef(() => MatchesModule),
+    forwardRef(() => GameStreamerModule),
+    DemosModule,
+    NotificationsModule,
+    forwardRef(() => RconModule),
+    BullModule.registerQueue({
+      name: UtilityQueues.UtilityPractice,
+    }),
     BullModule.registerQueue({
       name: UtilityQueues.UtilityMeta,
+    }),
+    BullModule.registerQueue({
+      name: UtilityQueues.UtilityDrift,
+    }),
+    BullModule.registerQueue({
+      name: UtilityQueues.UtilityRenders,
+    }),
+    BullModule.registerQueue({
+      name: UtilityQueues.UtilityDiscovery,
+    }),
+    BullBoardModule.forFeature({
+      name: UtilityQueues.UtilityPractice,
+      adapter: BullMQAdapter,
     }),
     BullBoardModule.forFeature({
       name: UtilityQueues.UtilityMeta,
       adapter: BullMQAdapter,
     }),
+    BullBoardModule.forFeature({
+      name: UtilityQueues.UtilityDrift,
+      adapter: BullMQAdapter,
+    }),
+    BullBoardModule.forFeature({
+      name: UtilityQueues.UtilityRenders,
+      adapter: BullMQAdapter,
+    }),
+    BullBoardModule.forFeature({
+      name: UtilityQueues.UtilityDiscovery,
+      adapter: BullMQAdapter,
+    }),
   ],
   providers: [
+    UtilityAnalysisService,
+    UtilityArtifactsService,
     UtilityCalloutsService,
+    UtilityDiscoveryService,
+    UtilityDriftService,
+    UtilityImportService,
+    UtilityInsightsService,
+    UtilityRepairService,
+    UtilitySolverService,
+    UtilityLoadService,
+    UtilityLineupsService,
+    UtilityMetaService,
+    UtilityMiningService,
+    UtilityPlaybooksService,
+    UtilityPracticeModeService,
+    UtilityPracticeService,
+    UtilityRendersService,
+    UtilityRenderWorkerService,
+    UtilityLaunchSeedService,
+    BatchUtilityRenderJob,
+    BatchUtilityRenderJobEvents,
+    ReconcileQueuedUtilityRenders,
+    RunUtilityDiscovery,
+    UtilitySeedService,
+    UtilityPluginKeyGuard,
+    ReapIdleUtilityPracticeSessions,
+    MineUtilityMeta,
     SyncMapCallouts,
+    RunUtilityDriftScan,
     ...getQueuesProcessors("Utility"),
     loggerFactory(),
   ],
-  exports: [UtilityCalloutsService],
+  controllers: [
+    UtilityPracticeController,
+    UtilityLineupsController,
+    UtilityPlaybooksController,
+    UtilityMiningController,
+    UtilityAnalysisController,
+    UtilityInsightsController,
+    UtilityRendersController,
+    UtilityRenderWorkerController,
+    UtilityDiscoveryController,
+    UtilityController,
+  ],
+  exports: [
+    UtilityCalloutsService,
+    UtilityPracticeService,
+    UtilityRendersService,
+    UtilityLineupsService,
+    UtilityPlaybooksService,
+    UtilityMetaService,
+    UtilityMiningService,
+    UtilityAnalysisService,
+    UtilityDriftService,
+    UtilityImportService,
+    UtilityInsightsService,
+    UtilityRepairService,
+    UtilitySolverService,
+    UtilityLoadService,
+  ],
 })
-export class UtilityModule {}
+export class UtilityModule {
+  constructor(
+    @InjectQueue(UtilityQueues.UtilityPractice) utilityPracticeQueue: Queue,
+    @InjectQueue(UtilityQueues.UtilityMeta) utilityMetaQueue: Queue,
+    @InjectQueue(UtilityQueues.UtilityRenders) utilityRendersQueue: Queue,
+    utilityRendersService: UtilityRendersService,
+    utilityDiscoveryService: UtilityDiscoveryService,
+  ) {
+    if (process.env.RUN_MIGRATIONS) {
+      return;
+    }
+
+    void utilityPracticeQueue.add(
+      UtilityJobs.ReapIdleUtilityPracticeSessions,
+      {},
+      {
+        repeat: {
+          pattern: "* * * * *",
+        },
+      },
+    );
+
+    void utilityMetaQueue.add(
+      UtilityJobs.MineUtilityMeta,
+      {},
+      {
+        repeat: {
+          pattern: "17 * * * *",
+        },
+      },
+    );
+
+    // Callouts are synced when a node finishes updating to a new CS2 build
+    // (MapAssetsService.queueCalloutsSync). The daily schedule that used to be
+    // registered here stays in Redis until removed by its exact pattern.
+    void utilityMetaQueue
+      .removeRepeatable(UtilityJobs.SyncMapCallouts, {
+        pattern: "23 4 * * *",
+      })
+      .catch(() => {});
+
+    void utilityRendersQueue.add(
+      ReconcileQueuedUtilityRenders.name,
+      {},
+      {
+        repeat: {
+          pattern: "*/5 * * * *",
+        },
+      },
+    );
+
+    // Straight away as well as on the schedule: a restart between the row's
+    // INSERT and its dispatch is the case this exists for, and waiting five
+    // minutes to notice would leave the lineup unrenderable the whole time.
+    void utilityRendersService.reconcileQueued().catch(() => {});
+    void utilityDiscoveryService.reconcile().catch(() => {});
+  }
+}

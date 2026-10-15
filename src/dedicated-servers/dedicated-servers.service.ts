@@ -6,6 +6,7 @@ import { GameServersConfig } from "src/configs/types/GameServersConfig";
 import { EncryptionService } from "src/encryption/encryption.service";
 import { HasuraService } from "src/hasura/hasura.service";
 import { e_server_types_enum } from "../../generated";
+import { PRACTICE_PLUGIN_RUNTIME } from "../configs/types/GameServersConfig";
 import { RconService } from "src/rcon/rcon.service";
 import { RedisManagerService } from "src/redis/redis-manager/redis-manager.service";
 import { Redis } from "ioredis";
@@ -146,16 +147,22 @@ export class DedicatedServersService {
           ? `serverfiles-csgo-${sanitizedGameServerNodeId}`
           : `serverfiles-${sanitizedGameServerNodeId}`;
 
-      const pluginRuntime =
-        await this.pluginRuntimeService.resolvePluginRuntime(
-          server.game_server_node,
-        );
+      const isPractice = server.type === "Practice";
 
-      const pluginImage =
-        await this.pluginRuntimeService.resolveGameServerPluginImage(
-          server.game_server_node,
-          pluginRuntime,
-        );
+      const pluginRuntime = isPractice
+        ? PRACTICE_PLUGIN_RUNTIME
+        : await this.pluginRuntimeService.resolvePluginRuntime(
+            server.game_server_node,
+          );
+
+      const pluginImage = isPractice
+        ? await this.pluginRuntimeService.resolvePracticeServerImage(
+            server.game_server_node,
+          )
+        : await this.pluginRuntimeService.resolveGameServerPluginImage(
+            server.game_server_node,
+            pluginRuntime,
+          );
 
       // Seeded here so out-of-date checks know the framework even before the
       // plugin's first ping; the ping overwrites it with what actually loaded.
@@ -255,10 +262,9 @@ export class DedicatedServersService {
                         name: "SERVER_TYPE",
                         value: server.type,
                       },
-                      {
-                        name: "INSTALL_5STACK_PLUGIN",
-                        value: server.type === "Ranked" ? "true" : "false",
-                      },
+                      ...DedicatedServersService.pluginInstallEnvironment(
+                        server,
+                      ),
                       {
                         name: "GAME_NODE_SERVER",
                         value: "true",
@@ -440,12 +446,39 @@ export class DedicatedServersService {
     }
   }
 
+  // Exactly one 5stack plugin per server: the match plugin on Ranked, the
+  // utility plugin on Practice, and on a community server, which has no match
+  // plugin to carry sanctions, the player management plugin. It is CS2 only.
+  public static pluginInstallEnvironment(server: {
+    type: string;
+    game: string;
+  }): Array<{ name: string; value: string }> {
+    const community = server.type !== "Ranked" && server.type !== "Practice";
+
+    return [
+      {
+        name: "INSTALL_5STACK_PLUGIN",
+        value: server.type === "Ranked" ? "true" : "false",
+      },
+      {
+        name: "INSTALL_UTILITY_PRACTICE_PLUGIN",
+        value: server.type === "Practice" ? "true" : "false",
+      },
+      {
+        name: "INSTALL_PLAYER_MANAGEMENT_PLUGIN",
+        value: community && server.game !== "csgo" ? "true" : "false",
+      },
+    ];
+  }
+
   private getGameType(type: e_server_types_enum): number {
     switch (type) {
       case "Ranked":
       case "Casual":
       case "Competitive":
       case "Wingman":
+      // Upstream SERVER_TYPE_MODES: a Practice server boots Valve casual.
+      case "Practice":
         return 0;
       case "Deathmatch":
       case "ArmsRace":
@@ -472,6 +505,7 @@ export class DedicatedServersService {
         return 1;
       case "ArmsRace":
       case "Casual":
+      case "Practice":
         return 0;
       case "Wingman":
       case "Deathmatch":

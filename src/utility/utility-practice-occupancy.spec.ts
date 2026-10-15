@@ -1,0 +1,216 @@
+import { UtilityPracticeService } from "./utility-practice.service";
+
+// The practice plugin posts a full roster the tick after anybody connects or
+// disconnects. What the website is waiting on is not the roster but the flip --
+// so the push has to reach exactly the players whose presence changed, and
+// nobody else. A reconciling post that finds nothing changed must be silent, or
+// every idle server would wake every tab on it once a minute.
+describe("UtilityPracticeService.reportOccupancy", () => {
+  function makeService(
+    flipped: Array<{ steam_id: string }>,
+    status = "Starting",
+  ) {
+    const publish = jest.fn().mockResolvedValue(undefined);
+    const postgres = { query: jest.fn() };
+
+    // The UPDATE ... RETURNING is the first query this spec lets through --
+    // markReady is stubbed below, so its own write never lands here. The two
+    // session bookkeeping writes that follow only run when somebody is present.
+    postgres.query
+      .mockResolvedValueOnce(flipped)
+      .mockResolvedValue([] as Array<unknown>);
+
+    const load = {
+      whereAmI: jest.fn(async () => ({
+        on_server: true,
+        map_name: "de_mirage" as string | null,
+        session_id: "session-1" as string | null,
+        switching: false,
+      })),
+    };
+
+    const service = new UtilityPracticeService(
+      { log: jest.fn(), warn: jest.fn(), error: jest.fn() } as any,
+      postgres as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      load as any,
+      { ensureMode: jest.fn().mockResolvedValue(null) } as any,
+      { get: jest.fn() } as any,
+      { getConnection: () => ({ publish }) } as any,
+    ) as any;
+
+    jest.spyOn(service, "liveSessionForServer").mockResolvedValue({
+      session_id: "session-1",
+      match_id: "match-1",
+      map_name: "de_mirage",
+      password: "hunter2",
+      status,
+    });
+    jest.spyOn(service, "touch").mockResolvedValue(undefined);
+    // A tick is also the proof that the server came up, but that is the
+    // readiness path's business, not the push's.
+    const markReady = jest
+      .spyOn(service, "markReady")
+      .mockResolvedValue(undefined);
+
+    return { service, publish, postgres, load, markReady };
+  }
+
+  function pushed(publish: jest.Mock) {
+    return publish.mock.calls.map(([channel, body]) => ({
+      channel,
+      ...JSON.parse(body as string),
+    }));
+  }
+
+  it("pushes utility:where to only the players whose presence flipped", async () => {
+    const { service, publish } = makeService([{ steam_id: "76561100000000001" }]);
+
+    await service.reportOccupancy("server-1", [
+      "76561100000000001",
+      "76561100000000002",
+    ]);
+
+    const messages = pushed(publish);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].channel).toBe("send-message-to-steam-id");
+    expect(messages[0].steamId).toBe("76561100000000001");
+    expect(messages[0].event).toBe("utility:where");
+    expect(messages[0].data.on_server).toBe(true);
+  });
+
+  it("says nothing when a reconciling report finds no change", async () => {
+    const { service, publish } = makeService([]);
+
+    await service.reportOccupancy("server-1", ["76561100000000001"]);
+
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it("pushes for a player who left, not only for one who arrived", async () => {
+    const { service, publish, load } = makeService([
+      { steam_id: "76561100000000009" },
+    ]);
+
+    // Nobody is on the server any more, so the location lookup comes back empty
+    // and the player is told they are off it.
+    load.whereAmI.mockResolvedValue({
+      on_server: false,
+      map_name: null,
+      session_id: null,
+      switching: false,
+    });
+
+    await service.reportOccupancy("server-1", []);
+
+    const messages = pushed(publish);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].steamId).toBe("76561100000000009");
+    expect(messages[0].data.on_server).toBe(false);
+  });
+
+  it("ignores a steam id the plugin sent in a shape we did not ask for", async () => {
+    const { service, postgres } = makeService([]);
+
+    await service.reportOccupancy("server-1", [
+      "76561100000000001",
+      "not-a-steam-id",
+      "",
+    ]);
+
+    const [, params] = postgres.query.mock.calls[0];
+
+    expect(params[1]).toEqual(["76561100000000001"]);
+  });
+
+  it("marks a session ready on the tick that finds it still starting", async () => {
+    const { service, markReady } = makeService([], "Starting");
+
+    await service.reportOccupancy("server-1", ["76561100000000001"]);
+
+    expect(markReady).toHaveBeenCalledWith("match-1");
+  });
+
+  // The plugin ticks for the life of the session. A row that is already Ready
+  // has nothing left to move, and writing it again once a minute per server is
+  // a write nobody reads.
+  it("does not write readiness again once the session is ready", async () => {
+    const { service, markReady } = makeService([], "Ready");
+
+    await service.reportOccupancy("server-1", ["76561100000000001"]);
+
+    expect(markReady).not.toHaveBeenCalled();
+  });
+
+  // Only the server knows whether it listens on the relay, so what it says is
+  // the whole answer and nothing here second-guesses it.
+  const relayWrites = (postgres: { query: jest.Mock }) =>
+    postgres.query.mock.calls.filter(([sql]) => /SET steam_relay/.test(sql));
+
+  it("records the relay address of a server that says it is on the relay", async () => {
+    const { service, postgres } = makeService([]);
+
+    await service.reportOccupancy(
+      "server-1",
+      [],
+      "[A:1:3653557264:51859]",
+      true,
+    );
+
+    const [[sql, params]] = relayWrites(postgres);
+
+    expect(sql).toMatch(/SET steam_relay = \$2/);
+    expect(params).toEqual(["server-1", "[A:1:3653557264:51859]"]);
+  });
+
+  it("clears the relay address of a server that says it is not on the relay", async () => {
+    const { service, postgres } = makeService([]);
+
+    await service.reportOccupancy("server-1", [], null, false);
+
+    const [[sql, params]] = relayWrites(postgres);
+
+    expect(sql).toMatch(/SET steam_relay = NULL/);
+    expect(params).toEqual(["server-1"]);
+  });
+
+  // The only address left to hand out would be a host and port, and on the
+  // relay that reaches nobody.
+  it("does not call a server up that is on the relay with no address yet", async () => {
+    const { service, postgres, markReady } = makeService([]);
+
+    await service.reportOccupancy(
+      "server-1",
+      ["76561100000000001"],
+      null,
+      true,
+    );
+
+    expect(markReady).not.toHaveBeenCalled();
+    expect(postgres.query).not.toHaveBeenCalled();
+  });
+
+  it("keeps the relay address for a plugin that does not say either way", async () => {
+    const { service, postgres } = makeService([]);
+
+    await service.reportOccupancy("server-1", []);
+
+    expect(relayWrites(postgres)).toHaveLength(0);
+  });
+
+  it("does not fail the occupancy write when a push cannot be delivered", async () => {
+    const { service, publish } = makeService([{ steam_id: "76561100000000001" }]);
+
+    publish.mockRejectedValue(new Error("redis is down"));
+
+    await expect(
+      service.reportOccupancy("server-1", ["76561100000000001"]),
+    ).resolves.toBeUndefined();
+  });
+});

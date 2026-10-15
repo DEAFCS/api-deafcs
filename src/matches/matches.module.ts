@@ -80,6 +80,7 @@ import { CameraService } from "./camera/camera.service";
 import { LobbyCallController } from "./camera/lobby-call.controller";
 import { LobbyCallService } from "./camera/lobby-call.service";
 import { TournamentCallController } from "./camera/tournament-call.controller";
+import { UtilityModule } from "../utility/utility.module";
 import { TournamentCallService } from "./camera/tournament-call.service";
 
 @Module({
@@ -101,6 +102,7 @@ import { TournamentCallService } from "./camera/tournament-call.service";
     ClipsModule,
     forwardRef(() => SteamMatchHistoryModule),
     forwardRef(() => DiscordBotModule),
+    forwardRef(() => UtilityModule),
     DiscordTournamentVoiceModule,
     MatchMaking,
     LeaguesModule,
