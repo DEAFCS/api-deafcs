@@ -8,6 +8,7 @@ import { HasuraService } from "../hasura/hasura.service";
 import { PostgresService } from "../postgres/postgres.service";
 import { DemoMetadataService } from "../demos/demo-metadata.service";
 import { ParsedDemo, ParsedPlayer } from "../demos/demo-parser.service";
+import { persistPayload } from "../demos/persist-payload";
 import { S3Service } from "../s3/s3.service";
 import { FaceitService } from "../faceit/faceit.service";
 import { SteamPresenceService } from "../steam-presence/steam-presence.service";
@@ -58,6 +59,10 @@ export class MatchImportService {
     externalId?: string | null,
     sourceObjectKey?: string,
     externalTimestampSource?: ExternalTimestampSource | null,
+    // The id the match map is created with. The parse that produced `parsed`
+    // was asked for its playback blob under this id (see playbackRequest), and
+    // the blob carries it, so the row has to be created with it.
+    reservedMatchMapId?: string,
   ): Promise<{ matchId: string | null; skipped?: string }> {
     if (MatchImportService.isFaceitServer(parsed.server_name)) {
       source = "faceit";
@@ -195,7 +200,12 @@ export class MatchImportService {
     let matchMapId: string;
     let demoId: string;
     try {
-      matchMapId = await this.insertMatchMap(matchId, mapId, startedAt);
+      matchMapId = await this.insertMatchMap(
+        matchId,
+        mapId,
+        startedAt,
+        reservedMatchMapId,
+      );
 
       if (sourceObjectKey) {
         const demoName = sourceObjectKey.replace(/^.*\//, "");
@@ -208,9 +218,13 @@ export class MatchImportService {
       // persist_imported_demo writes rounds/kills/stats and the premier rank
       // history + players.premier_rank in one shot, so there is no separate
       // JS premier-rank write here.
+      const persistStartedAt = Date.now();
       await this.postgres.query(
         `SELECT public.persist_imported_demo($1::uuid, $2::jsonb)`,
-        [demoId, JSON.stringify(parsed)],
+        [demoId, persistPayload(parsed)],
+      );
+      this.logger.log(
+        `[persist] done FULL import match=${matchId} demo=${demoId} in ${Date.now() - persistStartedAt}ms`,
       );
     } catch (error) {
       // Roll back the half-written match; otherwise findExistingByFile treats
@@ -1022,6 +1036,7 @@ export class MatchImportService {
     matchId: string,
     mapId: string,
     createdAt: string | null,
+    id?: string,
   ): Promise<string> {
     const object: Record<string, unknown> = {
       match_id: matchId,
@@ -1029,6 +1044,9 @@ export class MatchImportService {
       order: 0,
       status: "Finished",
     };
+    if (id) {
+      object.id = id;
+    }
     if (createdAt) {
       object.created_at = createdAt;
     }

@@ -1,9 +1,11 @@
+import { randomUUID } from "crypto";
 import { Job } from "bullmq";
 import { Logger } from "@nestjs/common";
 import { WorkerHost } from "@nestjs/bullmq";
 import { UseQueue } from "src/utilities/QueueProcessors";
 import { PostgresService } from "../../postgres/postgres.service";
 import { DemoParserService } from "../../demos/demo-parser.service";
+import { playbackRequest } from "../../demos/demo-metadata.service";
 import { SteamMatchHistoryQueues } from "../enums/SteamMatchHistoryQueues";
 import { MatchImportService } from "../match-import.service";
 
@@ -19,7 +21,11 @@ export type ParseImportedDemoPayload = {
 };
 
 @UseQueue("SteamMatchHistory", SteamMatchHistoryQueues.ParseImportedDemo, {
-  concurrency: 1,
+  // Two at a time: a burst of finished matches otherwise waits in line behind
+  // one ~30s parse each. Jobs are keyed parse-<valve match id>, so one match is
+  // never imported twice at once, and the parser serializes downloads per Valve
+  // replay host by itself. A parse peaks around 370 MB in the parser.
+  concurrency: 2,
   limiter: { max: 4, duration: 60_000 },
 })
 export class ParseImportedDemo extends WorkerHost {
@@ -118,10 +124,18 @@ export class ParseImportedDemo extends WorkerHost {
     matchStartTime: string | null,
     matchTimestampSource: "steam_gc" | "demo_cdn_last_modified" | null,
   ): Promise<void> {
-    const parsed = await this.demoParser.parseFromUrl(demoUrl);
+    const startedAt = Date.now();
+    // Reserved before the parse so the parser can build the playback blob for
+    // the match map the import is about to create.
+    const matchMapId = randomUUID();
+    const parsed = await this.demoParser.parseFromUrl(
+      demoUrl,
+      playbackRequest(matchMapId),
+    );
     if (!parsed) {
       throw new Error("demo parse failed");
     }
+    const parsedAt = Date.now();
 
     const result = await this.matchImport.importExternalDemo(
       parsed,
@@ -132,6 +146,7 @@ export class ParseImportedDemo extends WorkerHost {
       valveMatchId,
       undefined,
       matchTimestampSource,
+      matchMapId,
     );
     if (!result.matchId) {
       throw new Error(result.skipped ?? "import failed");
@@ -142,8 +157,10 @@ export class ParseImportedDemo extends WorkerHost {
       [valveMatchId],
     );
 
+    const doneAt = Date.now();
     this.logger.log(
-      `parse-imported-demo done valve_match_id=${valveMatchId} match_id=${result.matchId}`,
+      `parse-imported-demo done valve_match_id=${valveMatchId} match_id=${result.matchId} ` +
+        `in ${((doneAt - startedAt) / 1000).toFixed(1)}s (parse ${((parsedAt - startedAt) / 1000).toFixed(1)}s, import ${((doneAt - parsedAt) / 1000).toFixed(1)}s)`,
     );
   }
 

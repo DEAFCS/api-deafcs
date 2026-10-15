@@ -1,12 +1,32 @@
+import { promisify } from "util";
 import zlib from "zlib";
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { HasuraService } from "../hasura/hasura.service";
 import { PostgresService } from "../postgres/postgres.service";
 import { S3Service } from "../s3/s3.service";
-import { DemoParserService, ParsedDemo } from "./demo-parser.service";
+import { CacheService } from "../cache/cache.service";
+import {
+  DemoParserService,
+  ParsedDemo,
+  ParsedPlayback,
+  PlaybackRequest,
+} from "./demo-parser.service";
+import { persistPayload } from "./persist-payload";
 
-export const DEMO_METADATA_VERSION = 8;
+// A playback blob is tens of MB of JSON. Compressing it on the event loop held
+// every other request and job for the second or more it took; these run on
+// libuv's thread pool.
+const gzip = promisify(zlib.gzip);
+const gunzip = promisify(zlib.gunzip);
+
+// The PLAYBACK BLOB's shape, not the parser's (ParsedDemo.schema_version).
+// v10 adds `ducked` to positions and carries the parser's own version through.
+// v11 adds `smoke_voxels` (each smoke as the game simulated it, parser schema
+// 3+), `flashes`, and weapon / hitgroup / armor damage on `damages`.
+// Every addition is additive, so a reader that tolerates unknown fields keeps
+// working; a reader that pins an exact `schema_version` rejects every new blob.
+export const DEMO_METADATA_VERSION = 11;
 
 export type DemoRow = {
   id: string;
@@ -22,9 +42,29 @@ export type DemoRow = {
   metadata_parsed_at: string | null;
 };
 
+// What lands in S3 and what readPlaybackBlob hands back. Derived from the
+// builder so the two directions cannot drift apart.
+export type PlaybackBlob = ReturnType<typeof buildPlaybackBlob>;
+
 @Injectable()
 export class DemoMetadataService {
   private readonly inFlight = new Map<string, Promise<DemoRow>>();
+  private readonly blobsInFlight = new Map<string, Promise<PlaybackBlob>>();
+
+  // A blob is multi-MB gzipped and several times that parsed, and gunzipSync
+  // holds the whole thing in memory twice while it runs. Two at a time is the
+  // difference between a slow read and an OOM on a pod that is also parsing.
+  private static readonly MAX_CONCURRENT_INFLATE = 2;
+  private static inflateInFlight = 0;
+  private static readonly inflateWaiting: Array<() => void> = [];
+
+  // Redis holds the parsed blob only long enough to cover a burst of reads
+  // against one replay -- three lineups saved off one demo must not inflate it
+  // three times -- not as a store.
+  private static readonly PLAYBACK_BLOB_TTL_SECONDS = 60;
+  // Past this the memo is worse than the work it saves: it would evict half of
+  // Redis to hold something read a handful of times a minute.
+  private static readonly PLAYBACK_BLOB_MAX_CACHE_BYTES = 48 * 1024 * 1024;
 
   constructor(
     private readonly logger: Logger,
@@ -33,6 +73,7 @@ export class DemoMetadataService {
     private readonly s3: S3Service,
     private readonly demoParser: DemoParserService,
     private readonly config: ConfigService,
+    private readonly cache: CacheService,
   ) {}
 
   public static isExternalDemoUrl(file: string | null | undefined): boolean {
@@ -231,33 +272,6 @@ export class DemoMetadataService {
     return ts ? new Date(ts * 1000).toISOString() : null;
   }
 
-  public async ensureParsed(matchMapId: string): Promise<DemoRow> {
-    const demo = await this.fetchDemoForMap(matchMapId);
-    if (!demo) {
-      throw new Error(`no uploaded demo for match_map ${matchMapId}`);
-    }
-
-    if (isDemoFresh(demo)) {
-      return demo;
-    }
-
-    const existing = this.inFlight.get(demo.id);
-    if (existing) {
-      return existing;
-    }
-
-    const parsing = this.parseAndPersist(demo)
-      .catch((error) => {
-        this.logger.warn(
-          `[demo-parser] parse failed for ${demo.id} — proceeding without round metadata: ${(error as Error)?.message}`,
-        );
-        return demo;
-      })
-      .finally(() => this.inFlight.delete(demo.id));
-    this.inFlight.set(demo.id, parsing);
-    return parsing;
-  }
-
   public async getDemoForMap(matchMapId: string): Promise<DemoRow | null> {
     return this.fetchDemoForMap(matchMapId);
   }
@@ -303,27 +317,32 @@ export class DemoMetadataService {
     return results;
   }
 
-  public async ensureParsedById(matchMapDemoId: string): Promise<void> {
+  // True only when this call is the one that parsed the demo. A demo that was
+  // already parsed, one another caller is parsing, and a failed parse are all
+  // false, so the caller can tell when the stats have just landed.
+  public async ensureParsedById(matchMapDemoId: string): Promise<boolean> {
     const demo = await this.fetchDemoById(matchMapDemoId);
     if (!demo) {
       this.logger.warn(
         `[demo-parser] ensureParsedById: no row for ${matchMapDemoId}`,
       );
-      return;
+      return false;
     }
 
     if (isDemoFresh(demo)) {
-      return;
+      return false;
     }
 
     const existing = this.inFlight.get(demo.id);
     if (existing) {
       await existing;
-      return;
+      return false;
     }
 
+    let parsed = true;
     const parsing = this.parseAndPersist(demo)
       .catch((error) => {
+        parsed = false;
         this.logger.warn(
           `[demo-parser] parse failed for ${demo.id}: ${(error as Error)?.message}`,
         );
@@ -332,6 +351,7 @@ export class DemoMetadataService {
       .finally(() => this.inFlight.delete(demo.id));
     this.inFlight.set(demo.id, parsing);
     await parsing;
+    return parsed;
   }
 
   public async reparseById(matchMapDemoId: string): Promise<DemoRow> {
@@ -446,9 +466,10 @@ export class DemoMetadataService {
     this.logger.log(
       `[demo-parser] parsing match_map_demo ${demo.id} (file=${demo.file})`,
     );
+    const playback = playbackRequest(demo.match_map_id);
     const parsed = DemoMetadataService.isExternalDemoUrl(demo.file)
-      ? await this.demoParser.parseFromUrl(demo.file)
-      : await this.demoParser.parseFromS3Key(demo.file, demo.id);
+      ? await this.demoParser.parseFromUrl(demo.file, playback)
+      : await this.demoParser.parseFromS3Key(demo.file, demo.id, playback);
     if (!parsed) {
       throw new Error(`demo parse returned null for ${demo.id}`);
     }
@@ -477,27 +498,6 @@ export class DemoMetadataService {
       metadata_parsed_at: new Date().toISOString(),
       playback_file: playbackFile,
     };
-  }
-
-  public async persistParsed(
-    matchMapDemoId: string,
-    parsed: ParsedDemo,
-  ): Promise<void> {
-    const demo = await this.fetchDemoById(matchMapDemoId);
-
-    await this.persistDemoStats(matchMapDemoId, demo?.match_id ?? null, parsed);
-
-    await this.persistRanks(parsed, demo?.match_id ?? null);
-
-    if (demo) {
-      await this.uploadPlaybackBlob(
-        demo.match_id,
-        demo.match_map_id,
-        demo.id,
-        parsed,
-        demo.playback_file,
-      );
-    }
   }
 
   // Live 5stack matches get kills/rounds/money from in-game events, so a reparse
@@ -533,7 +533,7 @@ export class DemoMetadataService {
     const startedAt = Date.now();
     await this.postgres.query(`SELECT ${fn}($1::uuid, $2::jsonb)`, [
       matchMapDemoId,
-      JSON.stringify(parsed),
+      persistPayload(parsed),
     ]);
     this.logger.log(
       `[persist] done ${
@@ -550,82 +550,6 @@ export class DemoMetadataService {
       [matchId],
     );
     return (rows?.[0]?.source ?? "5stack") !== "5stack";
-  }
-
-  // Persists Valve ranks: Wingman (6), Competitive (7), Premier (11). Premier
-  // is a global snapshot on the player row; Wingman/Competitive are per-map and
-  // live only in the history table, tagged with map_id.
-  public async persistRanks(
-    parsed: ParsedDemo,
-    matchId: string | null = null,
-  ): Promise<void> {
-    const RANK_TYPES = new Set([6, 7, 11]);
-    const entries = (parsed.players ?? []).filter(
-      (p) =>
-        RANK_TYPES.has(Number(p.rank_type)) && (p.rank ?? 0) > 0 && p.steam_id,
-    );
-    if (entries.length === 0) {
-      return;
-    }
-    const now = new Date().toISOString();
-    const steamIds = entries.map((e) => BigInt(e.steam_id).toString());
-    const ranks = entries.map((e) => {
-      const rank = Number(e.rank);
-      if (!Number.isInteger(rank)) {
-        throw new Error(`invalid rank for ${e.steam_id}: ${e.rank}`);
-      }
-      return rank;
-    });
-    const rankTypes = entries.map((e) => Number(e.rank_type));
-    const previousRanks = entries.map((e) => {
-      const pr = Number(e.previous_rank);
-      return Number.isInteger(pr) && pr > 0 ? pr : null;
-    });
-
-    // Global snapshot — Premier only (Competitive/Wingman are per map).
-    await this.postgres.query(
-      `UPDATE public.players AS p
-         SET premier_rank = v.rank,
-             premier_rank_updated_at = $1::timestamptz
-         FROM UNNEST($2::bigint[], $3::int[]) AS v(steam_id, rank)
-         WHERE p.steam_id = v.steam_id
-           AND (p.premier_rank_updated_at IS NULL OR p.premier_rank_updated_at <= $1::timestamptz)`,
-      [
-        now,
-        steamIds.filter((_, i) => rankTypes[i] === 11),
-        ranks.filter((_, i) => rankTypes[i] === 11),
-      ],
-    );
-    if (matchId) {
-      await this.postgres.query(
-        `INSERT INTO public.player_premier_rank_history
-           (steam_id, rank, rank_type, map_id, previous_rank, match_id, observed_at)
-           SELECT v.steam_id, v.rank, v.rank_type,
-             CASE WHEN v.rank_type = 11 THEN NULL ELSE mm.map_id END,
-             COALESCE(
-               v.previous_rank,
-               (SELECT h.rank FROM public.player_premier_rank_history h
-                 WHERE h.steam_id = v.steam_id AND h.rank_type = v.rank_type
-                   AND h.match_id <> $1::uuid AND h.observed_at < $2::timestamptz
-                   AND (v.rank_type = 11 OR h.map_id = mm.map_id)
-                 ORDER BY h.observed_at DESC LIMIT 1)
-             ),
-             $1::uuid, $2::timestamptz
-           FROM UNNEST($3::bigint[], $4::int[], $5::int[], $6::int[])
-             AS v(steam_id, rank, rank_type, previous_rank)
-           LEFT JOIN LATERAL (
-             SELECT map_id FROM public.match_maps WHERE match_id = $1::uuid LIMIT 1
-           ) mm ON true
-           WHERE EXISTS (SELECT 1 FROM public.players WHERE steam_id = v.steam_id)
-         ON CONFLICT (steam_id, match_id, rank_type) DO UPDATE
-           SET rank = EXCLUDED.rank,
-               map_id = EXCLUDED.map_id,
-               previous_rank = EXCLUDED.previous_rank,
-               observed_at = EXCLUDED.observed_at`,
-        [matchId, now, steamIds, ranks, rankTypes, previousRanks],
-      );
-    }
-    this.logger.log(`demo rank update wrote ${entries.length} players`);
   }
 
   public async deleteDemo(matchMapDemoId: string): Promise<void> {
@@ -683,6 +607,57 @@ export class DemoMetadataService {
     }
   }
 
+  // The parser builds the blob when asked (see playbackRequest), so a parse no
+  // longer crosses to the api as 50 MB of JSON only to be reshaped and
+  // compressed here. A parser that did not build one — an older image, or one
+  // that builds another blob version — returned the full parse instead, and the
+  // blob is built from that as it always was.
+  private static async playbackGzip(
+    matchMapId: string,
+    parsed: ParsedDemo,
+  ): Promise<{
+    gz: Buffer;
+    counts: Omit<ParsedPlayback, "schema_version" | "match_map_id" | "blob">;
+    source: string;
+  }> {
+    const prebuilt = parsed.playback;
+    if (prebuilt) {
+      // The parser only builds what it was asked for, and leaves the blob's
+      // fields out of the parse when it does, so a blob for another match map
+      // or version cannot be rebuilt from here — it is a bug upstream.
+      if (
+        prebuilt.schema_version !== DEMO_METADATA_VERSION ||
+        prebuilt.match_map_id !== matchMapId
+      ) {
+        throw new Error(
+          `parser built a v${prebuilt.schema_version} blob for match map ${prebuilt.match_map_id}; wanted v${DEMO_METADATA_VERSION} for ${matchMapId}`,
+        );
+      }
+      return {
+        gz: Buffer.from(prebuilt.blob, "base64"),
+        counts: prebuilt,
+        source: "built by parser, decode",
+      };
+    }
+
+    const blob = buildPlaybackBlob(matchMapId, parsed);
+    const gz = await gzip(Buffer.from(JSON.stringify(blob)));
+    return {
+      gz,
+      counts: {
+        positions: blob.positions.length,
+        shots_fired: blob.shots_fired.length,
+        grenade_events: blob.grenade_throws.length,
+        smoke_volumes: blob.smoke_volumes.length,
+        smoke_voxels: blob.smoke_voxels.length,
+        infernos: blob.infernos.length,
+        damages: blob.damages.length,
+        flashes: blob.flashes.length,
+      },
+      source: "build + gzip",
+    };
+  }
+
   public async uploadPlaybackBlob(
     matchId: string,
     matchMapId: string,
@@ -690,16 +665,31 @@ export class DemoMetadataService {
     parsed: ParsedDemo,
     prevPlaybackFile: string | null = null,
   ): Promise<string> {
-    const key = playbackBlobKey(matchId, matchMapId, Date.now());
-    const blob = buildPlaybackBlob(matchMapId, parsed);
-    const gz = zlib.gzipSync(Buffer.from(JSON.stringify(blob)));
+    const startedAt = Date.now();
+    const key = playbackBlobKey(matchId, matchMapId, startedAt);
+    const { gz, counts, source } = await DemoMetadataService.playbackGzip(
+      matchMapId,
+      parsed,
+    );
+    const builtAt = Date.now();
     await this.s3.put(key, gz);
+    const uploadedAt = Date.now();
     await this.postgres.query(
       `UPDATE public.match_map_demos
          SET playback_file = $1,
-             playback_size = $2::int
-       WHERE id = $3::uuid`,
-      [key, gz.byteLength, matchMapDemoId],
+             playback_size = $2::int,
+             playback_version = $3::int,
+             parser_version = $4::int
+       WHERE id = $5::uuid`,
+      [
+        key,
+        gz.byteLength,
+        DEMO_METADATA_VERSION,
+        // Null when the parser did not report one, which is itself the answer:
+        // it predates the schema being carried through at all.
+        parsed.schema_version ?? null,
+        matchMapDemoId,
+      ],
     );
     if (prevPlaybackFile && prevPlaybackFile !== key) {
       try {
@@ -713,12 +703,108 @@ export class DemoMetadataService {
     this.logger.log(
       `[playback-blob] uploaded ${key} ` +
         `(${gz.byteLength} bytes gzipped, ` +
-        `${blob.positions.length} positions, ` +
-        `${blob.shots_fired.length} shots, ` +
-        `${blob.grenade_throws.length} grenade events, ` +
-        `${blob.damages.length} damages)`,
+        `${counts.positions} positions, ` +
+        `${counts.shots_fired} shots, ` +
+        `${counts.grenade_events} grenade events, ` +
+        `${counts.smoke_volumes} smoke volumes, ` +
+        `${counts.smoke_voxels} smoke voxel grids, ` +
+        `${counts.infernos} infernos, ` +
+        `${counts.damages} damages, ` +
+        `${counts.flashes} flashes) ` +
+        `in ${Date.now() - startedAt}ms (${source} ${builtAt - startedAt}ms, ` +
+        `upload ${uploadedAt - builtAt}ms)`,
     );
     return key;
+  }
+
+  public static playbackBlobCacheKey(playbackFile: string): string {
+    return `playback-blob:${playbackFile}`;
+  }
+
+  // The other half of uploadPlaybackBlob: same key, same shape, read back.
+  // Anything that wants the events behind a replay -- mining a lineup, scoring
+  // a clip -- goes through here rather than reaching into S3, so the version
+  // and the compression live in one place.
+  public async readPlaybackBlob(playbackFile: string): Promise<PlaybackBlob> {
+    const cacheKey = DemoMetadataService.playbackBlobCacheKey(playbackFile);
+    const cached = await this.cache.getRaw(cacheKey);
+
+    if (cached) {
+      return JSON.parse(cached) as PlaybackBlob;
+    }
+
+    const existing = this.blobsInFlight.get(playbackFile);
+
+    if (existing) {
+      return await existing;
+    }
+
+    const loading = this.loadPlaybackBlob(playbackFile, cacheKey);
+    this.blobsInFlight.set(playbackFile, loading);
+
+    try {
+      return await loading;
+    } finally {
+      this.blobsInFlight.delete(playbackFile);
+    }
+  }
+
+  private async loadPlaybackBlob(
+    playbackFile: string,
+    cacheKey: string,
+  ): Promise<PlaybackBlob> {
+    const stream = await this.s3.get(playbackFile);
+    const chunks: Array<Buffer> = [];
+
+    for await (const chunk of stream) {
+      chunks.push(chunk as Buffer);
+    }
+
+    const gz = Buffer.concat(chunks);
+
+    // The slot is held across the parse and the cache write, not just the
+    // inflate: those are the other two full copies of the same document, and
+    // releasing early puts an unbounded number of them in flight at once --
+    // which is the spike the semaphore exists to stop. The string that was just
+    // inflated is what goes to redis, so the blob is never re-serialised.
+    await DemoMetadataService.acquireInflateSlot();
+
+    let blob: PlaybackBlob;
+    try {
+      const json = (await gunzip(gz)).toString("utf8");
+
+      blob = JSON.parse(json) as PlaybackBlob;
+
+      if (json.length <= DemoMetadataService.PLAYBACK_BLOB_MAX_CACHE_BYTES) {
+        await this.cache.putRaw(
+          cacheKey,
+          json,
+          DemoMetadataService.PLAYBACK_BLOB_TTL_SECONDS,
+        );
+      }
+    } finally {
+      DemoMetadataService.releaseInflateSlot();
+    }
+
+    return blob;
+  }
+
+  private static async acquireInflateSlot(): Promise<void> {
+    while (
+      DemoMetadataService.inflateInFlight >=
+      DemoMetadataService.MAX_CONCURRENT_INFLATE
+    ) {
+      await new Promise<void>((resolve) => {
+        DemoMetadataService.inflateWaiting.push(resolve);
+      });
+    }
+
+    DemoMetadataService.inflateInFlight++;
+  }
+
+  private static releaseInflateSlot(): void {
+    DemoMetadataService.inflateInFlight--;
+    DemoMetadataService.inflateWaiting.shift()?.();
   }
 }
 
@@ -733,6 +819,12 @@ function isDemoFresh(demo: DemoRow): boolean {
 
 export function demoKey(matchId: string, mapId: string, demo: string): string {
   return `demos/${matchId}/${mapId}/${demo}`;
+}
+
+// What to ask the parser for so it builds this match map's playback blob at
+// the version this api reads.
+export function playbackRequest(matchMapId: string): PlaybackRequest {
+  return { match_map_id: matchMapId, schema_version: DEMO_METADATA_VERSION };
 }
 
 export function playbackBlobKey(
@@ -761,6 +853,7 @@ function buildPlaybackBlob(matchMapId: string, parsed: ParsedDemo) {
     has_bomb: p.has_bomb ?? false,
     has_defuser: p.has_defuser ?? false,
     active_weapon: (p as { active_weapon?: string }).active_weapon ?? null,
+    ducked: p.ducked ?? false,
   }));
 
   const shots_fired = (parsed.shots_fired ?? []).map((s) => ({
@@ -780,6 +873,11 @@ function buildPlaybackBlob(matchMapId: string, parsed: ParsedDemo) {
     impact_x: s.impact_x ?? null,
     impact_y: s.impact_y ?? null,
     impact_z: s.impact_z ?? null,
+    // Where a missed round met world geometry, so the replay can stop the
+    // tracer at the wall instead of flying it a fixed distance through it.
+    miss_x: s.miss_x ?? null,
+    miss_y: s.miss_y ?? null,
+    miss_z: s.miss_z ?? null,
   }));
 
   const mapGrenade = (
@@ -807,13 +905,28 @@ function buildPlaybackBlob(matchMapId: string, parsed: ParsedDemo) {
     ),
   ];
 
+  // The parser omits zero values, so an absent hitgroup is 0 (generic) and an
+  // absent armor figure is no armor damage.
   const damages = (parsed.damages ?? []).map((d) => ({
     round: d.round ?? 0,
     time: String(d.tick),
     attacker_steam_id: d.attacker ?? null,
     attacked_steam_id: d.victim ?? null,
+    weapon: d.weapon ?? null,
+    hitgroup: d.hitgroup ?? 0,
     damage: d.damage,
+    damage_armor: d.damage_armor ?? 0,
     health: d.health ?? null,
+  }));
+
+  const flashes = (parsed.flashes ?? []).map((f) => ({
+    round: f.round ?? 0,
+    tick: f.tick,
+    attacker_steam_id: f.attacker ?? null,
+    attacked_steam_id: f.victim ?? null,
+    // Seconds of blindness.
+    duration: f.duration ?? 0,
+    team_flash: f.team_flash ?? false,
   }));
 
   const round_inventory = (parsed.round_inventory ?? []).map((r) => ({
@@ -834,6 +947,11 @@ function buildPlaybackBlob(matchMapId: string, parsed: ParsedDemo) {
 
   return {
     schema_version: DEMO_METADATA_VERSION,
+    // Which parser produced the events below. Positions are ~4Hz except for a
+    // full-rate burst around every grenade throw, and that burst only exists
+    // from parser schema 2 -- a consumer deriving a lineup's standing spot has
+    // to know whether it is looking at a 125ms-stale sample or a live one.
+    parser_schema_version: parsed.schema_version ?? null,
     match_map_id: matchMapId,
     tick_rate: parsed.tick_rate,
     total_ticks: parsed.total_ticks,
@@ -847,7 +965,11 @@ function buildPlaybackBlob(matchMapId: string, parsed: ParsedDemo) {
     shots_fired,
     grenade_throws,
     grenade_trajectories: parsed.grenade_trajectories ?? [],
+    smoke_volumes: parsed.smoke_volumes ?? [],
+    smoke_voxels: parsed.smoke_voxels ?? [],
+    infernos: parsed.infernos ?? [],
     damages,
+    flashes,
     round_inventory,
   };
 }
