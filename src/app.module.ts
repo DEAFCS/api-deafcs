@@ -36,6 +36,7 @@ import { ThrottlerModule } from "@nestjs/throttler";
 import { SignalServerModule } from "./signal-server/signal-server.module";
 import { InvitesModule } from "./invites/invites.module";
 import { DemosModule } from "./demos/demos.module";
+import { UtilityModule } from "./utility/utility.module";
 import { S3ScanModule } from "./s3-scan/s3-scan.module";
 import { SystemService } from "./system/system.service";
 import { ClientsModule } from "@nestjs/microservices";
@@ -144,6 +145,7 @@ import { WebsiteRestrictionGuard } from "./website-restrictions/website-restrict
     SignalServerModule,
     InvitesModule,
     DemosModule,
+    UtilityModule,
     S3ScanModule,
     DedicatedServersModule,
     SanctionsModule,

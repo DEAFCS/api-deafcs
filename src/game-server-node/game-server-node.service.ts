@@ -24,6 +24,7 @@ import { GameServerQueues } from "./enums/GameServerQueues";
 import { NotificationsService } from "src/notifications/notifications.service";
 import { PluginRuntimeService } from "src/plugin-runtime/plugin-runtime.service";
 import { PluginRuntime } from "src/configs/types/GameServersConfig";
+import { MapAssetsService } from "src/map-assets/map-assets.service";
 
 export type GamedataValidationRuntime = PluginRuntime;
 
@@ -75,6 +76,7 @@ export class GameServerNodeService {
     protected readonly pluginRuntimeService: PluginRuntimeService,
     @InjectQueue(GameServerQueues.ValidateGamedata)
     private readonly validateGamedataQueue: Queue,
+    private readonly mapAssets: MapAssetsService,
   ) {
     this.gameServerConfig = this.config.get<GameServersConfig>("gameServers");
     this.namespace = this.gameServerConfig.namespace;
@@ -348,6 +350,17 @@ export class GameServerNodeService {
       game_server_nodes_by_pk.build_id !== csBulid
     ) {
       await this.queueGamedataValidation(node, csBulid);
+
+      // DEAFCS: upstream also queues the map-assets build here
+      // (mapAssets.queueBuild), which only runs on the 5stack.gg install, so
+      // only the callouts sync is ported. It waits until 5Stack has published
+      // this build's map assets, then refreshes public.map_callouts.
+      await this.mapAssets.queueCalloutsSync(csBulid).catch((error) => {
+        this.logger.warn(
+          `[map-assets] unable to queue the callouts sync for build ${csBulid}`,
+          error,
+        );
+      });
     }
 
     if (transitionedFromOffline && game_server_nodes_by_pk.build_id) {

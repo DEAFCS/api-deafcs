@@ -16,4 +16,8 @@ export enum SystemSettingName {
   GameServerPluginRuntimeLocked = "game_server_plugin_runtime_locked",
   CreateAwardsRole = "public.create_awards_role",
   GrantAwardsRole = "public.grant_awards_role",
+  // Off until the map-assets worker is deployed: a build published before the
+  // CDN can serve it would point latest.json at files nothing can read. Gates
+  // the build a new CS2 version triggers, never the manual action.
+  MapAssetsAutoBuild = "map_assets_auto_build",
 }

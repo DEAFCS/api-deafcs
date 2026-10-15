@@ -34,7 +34,9 @@ type Modules =
   | "Scrims"
   | "AdminCalls"
   | "VerificationCalls"
-  | "SupportRequests";
+  | "SupportRequests"
+  | "Utility"
+  | "MapAssets";
 
 export type UseQueueOptions = {
   concurrency?: number;

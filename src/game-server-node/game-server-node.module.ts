@@ -1,3 +1,4 @@
+import { MapAssetsModule } from "src/map-assets/map-assets.module";
 import {
   MiddlewareConsumer,
   Module,
@@ -57,6 +58,7 @@ import { ValidateGamedata } from "./jobs/ValidateGamedata";
     K8sModule,
     GameStreamerModule,
     PluginRuntimeModule,
+    MapAssetsModule,
     BullModule.registerQueue(
       {
         name: GameServerQueues.GameUpdate,
