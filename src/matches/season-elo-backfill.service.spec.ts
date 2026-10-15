@@ -15,12 +15,13 @@ describe("SeasonEloBackfillService player reindex", () => {
     const cache = {
       acquireLock: jest
         .fn()
-        .mockResolvedValueOnce(true)
-        .mockResolvedValueOnce(false),
+        .mockResolvedValueOnce("lock-token")
+        .mockResolvedValueOnce(null),
       forget: jest.fn(),
       get: jest.fn().mockResolvedValue(false),
       put: jest.fn(),
       refreshLock: jest.fn(),
+      releaseLock: jest.fn(),
     };
     const notifications = { send: jest.fn() };
     const eloRecompute = { setSuppressEvents: jest.fn() };

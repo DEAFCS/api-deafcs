@@ -10,8 +10,9 @@ describe("PlayerEloRecomputeService follow-up run for an ELO void", () => {
       get: jest.fn(async (key: string) => store.get(key)),
       put: jest.fn(async (key: string, value: unknown) => void store.set(key, value)),
       forget: jest.fn(async (key: string) => void store.delete(key)),
-      acquireLock: jest.fn(async () => true),
+      acquireLock: jest.fn(async () => "lock-token"),
       refreshLock: jest.fn(async () => true),
+      releaseLock: jest.fn(async () => true),
     };
     let service: PlayerEloRecomputeService;
     const postgres = {

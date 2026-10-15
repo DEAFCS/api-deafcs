@@ -90,7 +90,11 @@ export class PlayerReindexService {
     // Hard single-execution guarantee: only the holder of this lock runs.
     // Any other queued/stacked job (from rapid clicks, elo completion, fixtures,
     // multiple pods) no-ops instead of running a duplicate.
-    if (!(await this.cache.acquireLock(LOCK_KEY, RUNNING_TTL_SECONDS))) {
+    const lockToken = await this.cache.acquireLock(
+      LOCK_KEY,
+      RUNNING_TTL_SECONDS,
+    );
+    if (!lockToken) {
       this.logger.warn("[player-reindex] already running, skipping duplicate");
       return;
     }
@@ -133,7 +137,7 @@ export class PlayerReindexService {
         }
         status.completed += 1;
         await this.saveStatus(status, RUNNING_TTL_SECONDS);
-        await this.cache.refreshLock(LOCK_KEY, RUNNING_TTL_SECONDS);
+        await this.cache.refreshLock(LOCK_KEY, lockToken, RUNNING_TTL_SECONDS);
       }
     } finally {
       status.running = false;
@@ -141,7 +145,7 @@ export class PlayerReindexService {
       status.finished_at = new Date().toISOString();
       await this.saveStatus(status, FINAL_TTL_SECONDS);
       await this.cache.forget(CANCEL_KEY);
-      await this.cache.forget(LOCK_KEY);
+      await this.cache.releaseLock(LOCK_KEY, lockToken);
       this.logger.log(
         `[player-reindex] finished: ${status.completed}/${status.total} processed, ${status.failed} failed${status.canceled ? " (canceled)" : ""}`,
       );
