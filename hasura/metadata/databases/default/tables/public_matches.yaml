@@ -590,26 +590,31 @@ select_permissions:
         - server_type
         - tv_connection_string
       filter:
-        _or:
-          - status:
-              _nin:
-                - PickingPlayers
-                - Canceled
-          # A matchmaking match whose players are still being picked (Captain
-          # Pick): public like any other active matchmaking match. Custom matches
-          # still being set up by their organizer, draft-game and tournament
-          # matches stay hidden while in PickingPlayers.
-          - _and:
+        _and:
+          - _or:
               - status:
-                  _eq: PickingPlayers
-              - organizer_steam_id:
-                  _is_null: true
-              - source:
-                  _eq: 5stack
-              - _not:
-                  tournament_brackets: {}
-              - _not:
-                  draft_games: {}
+                  _nin:
+                    - PickingPlayers
+                    - Canceled
+              # A matchmaking match whose players are still being picked (Captain
+              # Pick): public like any other active matchmaking match. Custom matches
+              # still being set up by their organizer, draft-game and tournament
+              # matches stay hidden while in PickingPlayers.
+              - _and:
+                  - status:
+                      _eq: PickingPlayers
+                  - organizer_steam_id:
+                      _is_null: true
+                  - source:
+                      _eq: 5stack
+                  - _not:
+                      tournament_brackets: {}
+                  - _not:
+                      draft_games: {}
+          # Practice sessions are matches under the hood (source practice); they
+          # never show in match lists (upstream 5Stack utility practice).
+          - source:
+              _neq: practice
       allow_aggregations: true
     comment: ""
   - role: user
@@ -669,32 +674,37 @@ select_permissions:
         - server_type
         - tv_connection_string
       filter:
-        _or:
-          - status:
-              _nin:
-                - PickingPlayers
-                - Canceled
-          - is_organizer:
-              _eq: true
-          - is_in_lineup:
-              _eq: true
-          - is_friend_in_match_lineup:
-              _eq: true
-          # A matchmaking match whose players are still being picked (Captain
-          # Pick): public like any other active matchmaking match. Custom matches
-          # still being set up by their organizer, draft-game and tournament
-          # matches stay hidden while in PickingPlayers.
-          - _and:
+        _and:
+          - _or:
               - status:
-                  _eq: PickingPlayers
-              - organizer_steam_id:
-                  _is_null: true
-              - source:
-                  _eq: 5stack
-              - _not:
-                  tournament_brackets: {}
-              - _not:
-                  draft_games: {}
+                  _nin:
+                    - PickingPlayers
+                    - Canceled
+              - is_organizer:
+                  _eq: true
+              - is_in_lineup:
+                  _eq: true
+              - is_friend_in_match_lineup:
+                  _eq: true
+              # A matchmaking match whose players are still being picked (Captain
+              # Pick): public like any other active matchmaking match. Custom matches
+              # still being set up by their organizer, draft-game and tournament
+              # matches stay hidden while in PickingPlayers.
+              - _and:
+                  - status:
+                      _eq: PickingPlayers
+                  - organizer_steam_id:
+                      _is_null: true
+                  - source:
+                      _eq: 5stack
+                  - _not:
+                      tournament_brackets: {}
+                  - _not:
+                      draft_games: {}
+          # Practice sessions are matches under the hood (source practice); they
+          # never show in match lists (upstream 5Stack utility practice).
+          - source:
+              _neq: practice
       allow_aggregations: true
     comment: ""
 update_permissions:

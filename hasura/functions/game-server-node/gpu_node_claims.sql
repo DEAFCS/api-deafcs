@@ -18,10 +18,38 @@ as $$
     from clip_render_jobs
    where status in ('queued', 'rendering', 'uploading')
      and game_server_node_id is not null
+  union
+  -- Bounded by the last word from the pod: a row orphaned with a node on it
+  -- (a pod that died without a terminal status) must not hold the GPU from
+  -- every live stream for good.
+  select game_server_node_id
+    from utility_lineup_renders
+   where status in ('queued', 'rendering', 'uploading')
+     and game_server_node_id is not null
+     and last_status_at > now() - interval '15 minutes'
+  union
+  -- A render pod keeps its GPU between lineups: while the server changes map,
+  -- and while it waits a moment for the next one, no row is carrying the node.
+  -- The pod lives as long as its practice session, so the session holds it,
+  -- from the moment a pod is started on it. Bounded like the rows above by
+  -- the pod's last word: one that has stopped asking what to film next must
+  -- not hold the GPU from every live stream for good.
+  select srv.game_server_node_id
+    from utility_practice_sessions ups
+    join matches m on m.id = ups.match_id
+    join servers srv on srv.id = m.server_id
+   where ups.is_render = true
+     and ups.status = 'Ready'
+     and ups.render_job_name is not null
+     and ups.render_seen_at > now() - interval '15 minutes'
+     and srv.game_server_node_id is not null
 $$;
 
 -- Render-only: nodes running a live match while
 -- `pause_renders_during_active_match` is on. Streams/demos ignore this.
+-- A nade preview's own practice session is carved out: it books a Live
+-- match on the GPU node BY DESIGN, and counting it here deadlocked the
+-- render it was booked for on any single-GPU install.
 create or replace function public.gpu_batch_blocked_node_ids()
   returns setof text
   language sql
@@ -32,6 +60,12 @@ as $$
     join servers s on s.id = m.server_id
    where m.status = 'Live'
      and s.game_server_node_id is not null
+     and not exists (
+       select 1
+         from utility_practice_sessions ups
+        where ups.match_id = m.id
+          and ups.is_render = true
+     )
      and (
        select value from settings
         where name = 'pause_renders_during_active_match'
@@ -85,4 +119,22 @@ as $$
    order by id
    for update skip locked
    limit 1
+$$;
+
+-- A render pod reaches its practice server over loopback, so the GPU it
+-- takes has to be on the server's own node; any other free GPU is useless.
+create or replace function public.claim_gpu_node_for_render(p_node_id text)
+  returns text
+  language sql
+as $$
+  select id
+    from game_server_nodes
+   where id = p_node_id
+     and gpu = true
+     and enabled = true
+     and gpu_rendering_enabled = true
+     and status in ('Online', 'NotAcceptingNewMatches')
+     and id not in (select * from gpu_busy_node_ids())
+     and id not in (select * from gpu_batch_blocked_node_ids())
+   for update skip locked
 $$;
