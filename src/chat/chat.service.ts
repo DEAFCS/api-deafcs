@@ -156,6 +156,15 @@ export function canStaffReadFinishedMatchChat(
   );
 }
 
+// Shared Match Chat only (never a team's private chat): staff (moderator and
+// above) may also read it while the match is running, not only afterwards
+// (Anders, 2026-10-15). Reading only: posting and reacting stay with the
+// match's own people (lineup, coaches, organizers, Captain Pick players), see
+// isMatchChatParticipant. Team Chat keeps canStaffReadFinishedMatchChat.
+export function canStaffReadMatchChat(role: e_player_roles_enum): boolean {
+  return isRoleAbove(role, "moderator");
+}
+
 @Injectable()
 export class ChatService {
   private redis: Redis;
@@ -303,7 +312,7 @@ export class ChatService {
           matches_by_pk.is_coach === false &&
           matches_by_pk.is_in_lineup === false &&
           matches_by_pk.is_organizer === false &&
-          !canStaffReadFinishedMatchChat(matches_by_pk.status, user.role) &&
+          !canStaffReadMatchChat(user.role) &&
           // Captain Pick: the draft's ten players, before they're seated.
           !(await isCaptainPickPlayerOfMatch(
             this.redis,
@@ -614,6 +623,12 @@ export class ChatService {
       !(await this.canSendDraftMessage(roomId, user))
     )
       return false;
+    // Same for a Match Chat a staff member may only read.
+    if (
+      type === ChatLobbyType.Match &&
+      !(await this.isMatchChatParticipant(roomId, user))
+    )
+      return false;
 
     let expectedStoredMessage: string | undefined;
     if (type === ChatLobbyType.Announcement) {
@@ -721,6 +736,42 @@ export class ChatService {
     return this.hasLobbyPermission(type, id, user);
   }
 
+  // Who may post (and react) in a shared Match Chat: the match's own people.
+  // Staff who can only read it (canStaffReadMatchChat) are not among them,
+  // and Match Chat is relayed into the game server, so this is re-checked
+  // on every send.
+  private async isMatchChatParticipant(
+    matchId: string,
+    user: User,
+  ): Promise<boolean> {
+    const { matches_by_pk } = await this.hasuraService.query(
+      {
+        matches_by_pk: {
+          __args: { id: matchId },
+          is_coach: true,
+          is_organizer: true,
+          is_in_lineup: true,
+          status: true,
+        },
+      },
+      user.steam_id,
+    );
+    if (!matches_by_pk) return false;
+    return (
+      Boolean(
+        matches_by_pk.is_coach ||
+        matches_by_pk.is_organizer ||
+        matches_by_pk.is_in_lineup,
+      ) ||
+      (await isCaptainPickPlayerOfMatch(
+        this.redis,
+        matchId,
+        matches_by_pk.status,
+        String(user.steam_id),
+      ))
+    );
+  }
+
   // The per-lobby-type authorization rules shared by hasCurrentChatRoomAccess
   // (a live socket, so it also checks session membership above) and
   // getChatAttachmentForViewer (a plain authenticated HTTP request, no
@@ -752,7 +803,7 @@ export class ChatService {
             matches_by_pk.is_organizer ||
             matches_by_pk.is_in_lineup,
           ) ||
-          canStaffReadFinishedMatchChat(matches_by_pk.status, user.role) ||
+          canStaffReadMatchChat(user.role) ||
           isCaptainPickPlayerOfMatch(
             this.redis,
             id,
@@ -1224,6 +1275,15 @@ export class ChatService {
       if (
         type === ChatLobbyType.Draft &&
         !(await this.canSendDraftMessage(id, player))
+      ) {
+        return { accepted: false };
+      }
+
+      // A Match Chat staff may only read: nothing they send reaches the
+      // room or the game server.
+      if (
+        type === ChatLobbyType.Match &&
+        !(await this.isMatchChatParticipant(id, player))
       ) {
         return { accepted: false };
       }
