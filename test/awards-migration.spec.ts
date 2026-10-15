@@ -42,7 +42,7 @@ describe("awards Phase A migration upgrade compatibility", () => {
 
         await postgres.query(
           `INSERT INTO public.e_player_roles (value, description)
-           VALUES ('user', 'User')
+           VALUES ('user', 'User'), ('verified_user', 'Verified User')
            ON CONFLICT (value) DO NOTHING`,
         );
         await postgres.query(
@@ -445,7 +445,7 @@ describe("awards Phase A exact hybrid-production repair", () => {
       to_regprocedure('public.calculate_tournament_trophies(uuid)')::text AS calculate_trophies,
       to_regprocedure('public.recalculate_tournament_awards(uuid)')::text AS recalculate_awards,
       to_regprocedure('public.recalculate_tournament_trophies(uuid)')::text AS recalculate_trophies,
-      to_regprocedure('public._leaderboard_trophies(integer,text,uuid)')::text AS leaderboard,
+      to_regprocedure('public._leaderboard_trophies(integer,text,uuid,text)')::text AS leaderboard,
       to_regclass('public.tournament_trophies')::text AS trophy_view,
       to_regclass('public.tournament_trophy_configs')::text AS config_view`);
     expect(Object.values(objects).every(Boolean)).toBe(true);
@@ -480,7 +480,7 @@ describe("awards Phase A exact hybrid-production repair", () => {
       pg_get_function_result('public.recalculate_tournament_awards(uuid)'::regprocedure) AS recalculate_awards,
       pg_get_function_result('public.calculate_tournament_trophies(uuid)'::regprocedure) AS calculate_trophies,
       pg_get_function_result('public.recalculate_tournament_trophies(uuid)'::regprocedure) AS recalculate_trophies,
-      pg_get_function_result('public._leaderboard_trophies(integer,text,uuid)'::regprocedure) AS leaderboard`);
+      pg_get_function_result('public._leaderboard_trophies(integer,text,uuid,text)'::regprocedure) AS leaderboard`);
     expect(returnTypes).toEqual({
       calculate_awards: "void",
       recalculate_awards: "SETOF award_occurrences",
