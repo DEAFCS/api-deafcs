@@ -74,6 +74,7 @@ describe("Captain Pick and lobby cleanup", () => {
       {} as any,
       { getSettings: async () => ({ enabled: true, pickSeconds: 30 }) } as any,
       new FakeQueue() as any,
+      { migrateLobbyMessages: async (): Promise<void> => undefined } as any,
     );
 
     matchmaking = {

@@ -7,6 +7,8 @@ import { InjectQueue } from "@nestjs/bullmq";
 import { HasuraService } from "src/hasura/hasura.service";
 import { RedisManagerService } from "src/redis/redis-manager/redis-manager.service";
 import { MatchAssistantService } from "src/matches/match-assistant/match-assistant.service";
+import { ChatService } from "src/chat/chat.service";
+import { ChatLobbyType } from "src/chat/enums/ChatLobbyTypes";
 import { MatchmakingQueues } from "../enums/MatchmakingQueues";
 import {
   getCaptainPickDraftCacheKey,
@@ -18,6 +20,7 @@ import {
 import { getMatchmakingMatchSetup } from "../utilities/matchmakingMatchSetup";
 import { CaptainPickSettingsService } from "./captain-pick-settings.service";
 import { startCaptainPickTimer } from "./captain-pick-settings";
+import { getCaptainPickTeamChatId } from "./captain-pick-team-chat";
 import {
   applyCaptainPick,
   CAPTAIN_PICK_PLAYER_COUNT,
@@ -123,6 +126,10 @@ export class CaptainPickFinalizeBusyError extends Error {
 // ending cleans it up earlier.
 export const CAPTAIN_PICK_STATE_TTL_SECONDS = 2 * 60 * 60;
 
+// About 20 minutes of retries (5s doubling), well inside the draft rooms'
+// two-hour lifetime.
+export const CAPTAIN_PICK_TEAM_CHAT_CARRY_OVER_ATTEMPTS = 8;
+
 // A click that left the browser just before the deadline still counts.
 export const CAPTAIN_PICK_MANUAL_GRACE_MS = 500;
 
@@ -174,6 +181,7 @@ export class CaptainPickService {
     private readonly matchAssistant: MatchAssistantService,
     private readonly settings: CaptainPickSettingsService,
     @InjectQueue(MatchmakingQueues.Matchmaking) private readonly queue: Queue,
+    private readonly chat: ChatService,
   ) {
     this.redis = this.redisManager.getConnection();
   }
@@ -549,7 +557,7 @@ export class CaptainPickService {
         );
       }
 
-      await this.recordMatchCreated(state);
+      await this.recordMatchCreated(state, inspection.match);
     });
   }
 
@@ -581,7 +589,7 @@ export class CaptainPickService {
       switch (inspection.kind) {
         case "complete":
           await this.ensureLineups(state, inspection.match);
-          await this.recordMatchCreated(state);
+          await this.recordMatchCreated(state, inspection.match);
           this.logger.warn(
             `[captain-pick] ${confirmationId} recovered existing match ${state.matchId} after failed attempts`,
           );
@@ -645,7 +653,10 @@ export class CaptainPickService {
     }
   }
 
-  private async recordMatchCreated(state: CaptainPickState) {
+  private async recordMatchCreated(
+    state: CaptainPickState,
+    match: InspectedMatch,
+  ) {
     const { confirmationId, matchId } = state;
 
     await this.redis.hset(
@@ -673,6 +684,68 @@ export class CaptainPickService {
     }
 
     await this.afterTransition(result);
+    await this.carryOverTeamChat(confirmationId, match);
+  }
+
+  /**
+   * The draft's private team rooms close at MatchCreated, where the match
+   * page switches to the match's own Team Chat. Each side's history moves
+   * into the lineup that side was seated in (side N is lineup N, see
+   * ensureLineups), so nothing said while picking is lost and no team ever
+   * sees the other's messages. Runs after the phase change, so every message
+   * the draft room accepted is carried. GIFs, uploads and videos come along,
+   * readable only by the lineup they were sent to.
+   *
+   * Chat never holds up the match: a failure is logged and handed to a
+   * retrying job instead of thrown. The draft rooms keep their messages until
+   * they move (the move only deletes them once copied), so a retry recovers
+   * the whole history, and one that finds them empty does nothing.
+   */
+  private async carryOverTeamChat(
+    confirmationId: string,
+    match: InspectedMatch,
+  ) {
+    try {
+      await this.moveTeamChats(confirmationId, match.id, match.lineupIds);
+    } catch (error) {
+      this.logger.warn(
+        `[captain-pick] ${confirmationId} could not carry team chat into match ${match.id}, retrying`,
+        error,
+      );
+      await this.queue
+        .add(
+          "CaptainPickTeamChatCarryOver",
+          { confirmationId, matchId: match.id, lineupIds: match.lineupIds },
+          {
+            jobId: `matchmaking.captain-pick-team-chat.${confirmationId}`,
+            attempts: CAPTAIN_PICK_TEAM_CHAT_CARRY_OVER_ATTEMPTS,
+            backoff: { type: "exponential", delay: 5000 },
+          },
+        )
+        .catch((queueError) =>
+          this.logger.error(
+            `[captain-pick] ${confirmationId} could not schedule the team chat retry`,
+            queueError,
+          ),
+        );
+    }
+  }
+
+  // Throws on failure so CaptainPickTeamChatCarryOver retries it.
+  public async moveTeamChats(
+    confirmationId: string,
+    matchId: string,
+    lineupIds: Record<CaptainPickLineup, string>,
+  ) {
+    for (const lineup of [1, 2] as const) {
+      await this.chat.migrateLobbyMessages(
+        ChatLobbyType.CaptainPickTeam,
+        getCaptainPickTeamChatId(confirmationId, lineup),
+        ChatLobbyType.MatchTeam,
+        `${matchId}:${lineupIds[lineup]}`,
+        { keepMedia: true },
+      );
+    }
   }
 
   private async withFinalizeLock(

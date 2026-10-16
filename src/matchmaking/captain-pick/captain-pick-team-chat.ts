@@ -15,6 +15,10 @@ import {
  * and nobody (unpicked, the other side, an outsider) can ever reach it by
  * changing what their client sends.
  *
+ * The room closes once the match is created: its history is carried into
+ * each side's own match Team Chat (CaptainPickService.carryOverTeamChat),
+ * which takes over from there.
+ *
  * Read straight from Redis rather than through CaptainPickService so the
  * chat module doesn't depend on the matchmaking module.
  */
@@ -140,6 +144,12 @@ export async function canAccessCaptainPickTeamChat(
   try {
     state = JSON.parse(raw);
   } catch {
+    return false;
+  }
+
+  // Closed once the match exists, so nothing lands here after its history
+  // was carried into the match's Team Chat.
+  if (state?.phase === "MatchCreated") {
     return false;
   }
 
