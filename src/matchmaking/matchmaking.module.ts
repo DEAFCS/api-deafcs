@@ -23,6 +23,7 @@ import { CaptainPickService } from "./captain-pick/captain-pick.service";
 import { CaptainPickTimeout } from "./jobs/CaptainPickTimeout";
 import { CaptainPickProgressController } from "./captain-pick/captain-pick-progress.controller";
 import { CaptainPickFinalize } from "./jobs/CaptainPickFinalize";
+import { CaptainPickTeamChatCarryOver } from "./jobs/CaptainPickTeamChatCarryOver";
 
 @Module({
   imports: [
@@ -57,6 +58,7 @@ import { CaptainPickFinalize } from "./jobs/CaptainPickFinalize";
     MarkPlayerOffline,
     CaptainPickTimeout,
     CaptainPickFinalize,
+    CaptainPickTeamChatCarryOver,
     ...getQueuesProcessors("Matchmaking"),
     loggerFactory(),
   ],

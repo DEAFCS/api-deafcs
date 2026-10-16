@@ -942,26 +942,42 @@ describe("CaptainPickService", () => {
           `${CONFIRMATION_ID}:1`,
           ChatLobbyType.MatchTeam,
           `${s.matchId}:${match.lineup_1_id}`,
+          { keepMedia: true },
         ],
         [
           ChatLobbyType.CaptainPickTeam,
           `${CONFIRMATION_ID}:2`,
           ChatLobbyType.MatchTeam,
           `${s.matchId}:${match.lineup_2_id}`,
+          { keepMedia: true },
         ],
       ]);
+      expect(queue.byName("CaptainPickTeamChatCarryOver")).toHaveLength(0);
       // Only after the draft rooms have closed.
       expect(phases).toEqual(["MatchCreated", "MatchCreated"]);
     });
 
-    it("still creates the match when the Team Chat can't be carried over", async () => {
+    it("still creates the match when the Team Chat can't be carried over, and retries the carry-over", async () => {
       jest.spyOn((service as any).logger, "warn").mockImplementation(() => {});
       chat.migrateLobbyMessages.mockRejectedValue(new Error("redis down"));
 
       await expect(service.finalize(CONFIRMATION_ID)).resolves.toBeUndefined();
+      const s = await state();
+      const match = matches.get(s.matchId!);
 
-      expect((await state()).phase).toBe("MatchCreated");
-      expect(chat.migrateLobbyMessages).toHaveBeenCalledTimes(2);
+      expect(s.phase).toBe("MatchCreated");
+      const retries = queue.byName("CaptainPickTeamChatCarryOver");
+      expect(retries).toHaveLength(1);
+      expect(retries[0].data).toEqual({
+        confirmationId: CONFIRMATION_ID,
+        matchId: s.matchId,
+        lineupIds: { 1: match.lineup_1_id, 2: match.lineup_2_id },
+      });
+      expect(retries[0].opts).toMatchObject({
+        jobId: `matchmaking.captain-pick-team-chat.${CONFIRMATION_ID}`,
+        attempts: 8,
+        backoff: { type: "exponential", delay: 5000 },
+      });
     });
 
     it("creates only one match when finalized repeatedly", async () => {
@@ -1531,6 +1547,7 @@ describe("CaptainPickService", () => {
           `${CONFIRMATION_ID}:1`,
           ChatLobbyType.MatchTeam,
           `${s.matchId}:${onlyMatch().lineup_1_id}`,
+          { keepMedia: true },
         );
         expect(s.phase).toBe("MatchCreated");
         expect(onlyMatch().status).toBe("Veto");

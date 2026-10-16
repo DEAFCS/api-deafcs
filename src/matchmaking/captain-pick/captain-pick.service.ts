@@ -126,6 +126,10 @@ export class CaptainPickFinalizeBusyError extends Error {
 // ending cleans it up earlier.
 export const CAPTAIN_PICK_STATE_TTL_SECONDS = 2 * 60 * 60;
 
+// About 20 minutes of retries (5s doubling), well inside the draft rooms'
+// two-hour lifetime.
+export const CAPTAIN_PICK_TEAM_CHAT_CARRY_OVER_ATTEMPTS = 8;
+
 // A click that left the browser just before the deadline still counts.
 export const CAPTAIN_PICK_MANUAL_GRACE_MS = 500;
 
@@ -689,27 +693,58 @@ export class CaptainPickService {
    * into the lineup that side was seated in (side N is lineup N, see
    * ensureLineups), so nothing said while picking is lost and no team ever
    * sees the other's messages. Runs after the phase change, so every message
-   * the draft room accepted is carried. A retry finds the draft rooms empty.
-   * Chat never holds up the match: a failure is logged, not thrown.
+   * the draft room accepted is carried. GIFs, uploads and videos come along,
+   * readable only by the lineup they were sent to.
+   *
+   * Chat never holds up the match: a failure is logged and handed to a
+   * retrying job instead of thrown. The draft rooms keep their messages until
+   * they move (the move only deletes them once copied), so a retry recovers
+   * the whole history, and one that finds them empty does nothing.
    */
   private async carryOverTeamChat(
     confirmationId: string,
     match: InspectedMatch,
   ) {
+    try {
+      await this.moveTeamChats(confirmationId, match.id, match.lineupIds);
+    } catch (error) {
+      this.logger.warn(
+        `[captain-pick] ${confirmationId} could not carry team chat into match ${match.id}, retrying`,
+        error,
+      );
+      await this.queue
+        .add(
+          "CaptainPickTeamChatCarryOver",
+          { confirmationId, matchId: match.id, lineupIds: match.lineupIds },
+          {
+            jobId: `matchmaking.captain-pick-team-chat.${confirmationId}`,
+            attempts: CAPTAIN_PICK_TEAM_CHAT_CARRY_OVER_ATTEMPTS,
+            backoff: { type: "exponential", delay: 5000 },
+          },
+        )
+        .catch((queueError) =>
+          this.logger.error(
+            `[captain-pick] ${confirmationId} could not schedule the team chat retry`,
+            queueError,
+          ),
+        );
+    }
+  }
+
+  // Throws on failure so CaptainPickTeamChatCarryOver retries it.
+  public async moveTeamChats(
+    confirmationId: string,
+    matchId: string,
+    lineupIds: Record<CaptainPickLineup, string>,
+  ) {
     for (const lineup of [1, 2] as const) {
-      try {
-        await this.chat.migrateLobbyMessages(
-          ChatLobbyType.CaptainPickTeam,
-          getCaptainPickTeamChatId(confirmationId, lineup),
-          ChatLobbyType.MatchTeam,
-          `${match.id}:${match.lineupIds[lineup]}`,
-        );
-      } catch (error) {
-        this.logger.warn(
-          `[captain-pick] ${confirmationId} could not carry team ${lineup} chat into match ${match.id}`,
-          error,
-        );
-      }
+      await this.chat.migrateLobbyMessages(
+        ChatLobbyType.CaptainPickTeam,
+        getCaptainPickTeamChatId(confirmationId, lineup),
+        ChatLobbyType.MatchTeam,
+        `${matchId}:${lineupIds[lineup]}`,
+        { keepMedia: true },
+      );
     }
   }
 

@@ -7,6 +7,11 @@ import { getCaptainPickDraftCacheKey } from "../utilities/cacheKeys";
 import { CaptainPickService } from "./captain-pick.service";
 import { canAccessCaptainPickTeamChat } from "./captain-pick-team-chat";
 import { MatchMaking } from "../matchmaking.module";
+import { CaptainPickTeamChatCarryOver } from "../jobs/CaptainPickTeamChatCarryOver";
+import {
+  ExpireChatAttachmentJobName,
+  ExpireSentChatVideoMediaJobName,
+} from "../../chat/enums/ChatVideoQueues";
 
 // deafcs-web#124: Team Chat written while players were being picked must
 // still be there once the match exists. The draft's private team rooms close
@@ -35,12 +40,14 @@ const player = (steamId: string): User =>
 
 function memoryRedis() {
   const hashes = new Map<string, Map<string, string>>();
+  const strings = new Map<string, string>();
   const hash = (key: string) => {
     if (!hashes.has(key)) hashes.set(key, new Map());
     return hashes.get(key)!;
   };
   const redis: Record<string, any> = {
     hashes,
+    strings,
     hget: jest.fn(async (key: string, field: string) => {
       const value = hashes.get(key)?.get(field);
       if (value !== undefined) return value;
@@ -58,7 +65,10 @@ function memoryRedis() {
       hashes.get(key)?.delete(field) ? 1 : 0,
     ),
     del: jest.fn(async (...keys: string[]) => {
-      keys.forEach((key) => hashes.delete(key));
+      keys.forEach((key) => {
+        hashes.delete(key);
+        strings.delete(key);
+      });
       return keys.length;
     }),
     keys: jest.fn(async (): Promise<string[]> => []),
@@ -66,8 +76,11 @@ function memoryRedis() {
     eval: jest.fn(async (script: string) =>
       script.includes("INCR") ? 1 : [1, 1],
     ),
-    get: jest.fn(async (): Promise<string | null> => null),
-    set: jest.fn(async () => "OK"),
+    get: jest.fn(async (key: string) => strings.get(key) ?? null),
+    set: jest.fn(async (key: string, value: string) => {
+      strings.set(key, value);
+      return "OK";
+    }),
     publish: jest.fn(async () => 1),
     sendCommand: jest.fn(async () => 1),
     pipeline: () => ({
@@ -83,6 +96,9 @@ describe("Captain Pick Team Chat carries into the match", () => {
   let hasura: { query: jest.Mock };
   let chat: ChatService;
   let captainPick: CaptainPickService;
+  let s3: { remove: jest.Mock; has: jest.Mock };
+  let cleanup: { add: jest.Mock; getJob: jest.Mock };
+  let matchmakingQueue: { add: jest.Mock };
 
   beforeEach(() => {
     redis = memoryRedis();
@@ -91,6 +107,12 @@ describe("Captain Pick Team Chat carries into the match", () => {
       new Map([["state", draftState("CreatingMatch")]]),
     );
     hasura = { query: jest.fn() };
+    s3 = { remove: jest.fn(async () => true), has: jest.fn(async () => false) };
+    cleanup = {
+      add: jest.fn(async () => ({})),
+      getJob: jest.fn(async (): Promise<null> => null),
+    };
+    matchmakingQueue = { add: jest.fn(async () => ({})) };
     chat = new ChatService(
       { warn: jest.fn(), error: jest.fn(), log: jest.fn() } as any,
       {} as any,
@@ -105,6 +127,8 @@ describe("Captain Pick Team Chat carries into the match", () => {
         getViewersBlocking: jest.fn().mockResolvedValue(new Set()),
       } as any,
       { getStatus: jest.fn().mockResolvedValue({ active: false }) } as any,
+      s3 as any,
+      cleanup as any,
     );
     jest.spyOn(chat, "to").mockResolvedValue(undefined);
     jest.spyOn(chat as any, "notifyLobbyMembers").mockResolvedValue(undefined);
@@ -115,7 +139,7 @@ describe("Captain Pick Team Chat carries into the match", () => {
       { getConnection: () => redis } as any,
       {} as any,
       {} as any,
-      {} as any,
+      matchmakingQueue as any,
       chat,
     );
   });
@@ -229,6 +253,155 @@ describe("Captain Pick Team Chat carries into the match", () => {
     expect(stored(ChatLobbyType.MatchTeam, matchTeamA)).toEqual([
       "pick Tricked",
     ]);
+  });
+
+  // Hasura's lineup row for a viewer of either match Team Chat.
+  const asLineup = (onLineup: boolean, lineupId: string) =>
+    hasura.query.mockResolvedValueOnce({
+      match_lineups_by_pk: {
+        id: lineupId,
+        match_id: MATCH_ID,
+        coach_steam_id: null,
+        is_on_lineup: onLineup,
+        match: { status: "Live" },
+      },
+    });
+
+  it("keeps GIFs, uploads and videos, and only that team can open the files", async () => {
+    const attachmentId = "0123456789abcdef";
+    const objectKey = `chat-attachments/5/${attachmentId}.png`;
+    const draftRoom = `chat_${ChatLobbyType.CaptainPickTeam}_${teamA}`;
+    redis.hashes.set(
+      draftRoom,
+      new Map([
+        [
+          "m1",
+          JSON.stringify({
+            id: "m1",
+            message: "",
+            gifUrl: "https://media.giphy.com/media/x/giphy.gif",
+            timestamp: "2026-10-16T10:00:00.000Z",
+            from: { steam_id: "2" },
+          }),
+        ],
+        [
+          "m2",
+          JSON.stringify({
+            id: "m2",
+            message: "",
+            attachment: { id: attachmentId, contentType: "image/png" },
+            timestamp: "2026-10-16T10:00:01.000Z",
+            from: { steam_id: "5" },
+          }),
+        ],
+        [
+          "m3",
+          JSON.stringify({
+            id: "m3",
+            message: "",
+            media: { type: "video", id: "v1" },
+            timestamp: "2026-10-16T10:00:02.000Z",
+            from: { steam_id: "5" },
+          }),
+        ],
+      ]),
+    );
+    redis.strings.set(
+      (chat as any).chatAttachmentKey(attachmentId),
+      JSON.stringify({
+        objectKey,
+        contentType: "image/png",
+        chatType: ChatLobbyType.CaptainPickTeam,
+        roomId: teamA,
+      }),
+    );
+    redis.strings.set(
+      (chat as any).videoMediaKey("v1"),
+      JSON.stringify({
+        objectKey: "chat-videos/v1.mp4",
+        chatType: ChatLobbyType.CaptainPickTeam,
+        roomId: teamA,
+      }),
+    );
+
+    await createMatch();
+
+    const carried = Object.fromEntries(
+      [
+        ...redis.hashes.get(`chat_${ChatLobbyType.MatchTeam}_${matchTeamA}`)!,
+      ].map(([id, raw]) => [id, JSON.parse(raw)]),
+    );
+    expect(carried.m1.gifUrl).toBe("https://media.giphy.com/media/x/giphy.gif");
+    expect(carried.m2.attachment).toEqual({
+      id: attachmentId,
+      contentType: "image/png",
+    });
+    expect(carried.m3.media).toEqual({ type: "video", id: "v1" });
+    // Files are kept, now belong to Team A's match room, and are removed when
+    // that room's messages expire.
+    expect(s3.remove).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(
+        redis.strings.get((chat as any).chatAttachmentKey(attachmentId))!,
+      ),
+    ).toMatchObject({
+      objectKey,
+      chatType: ChatLobbyType.MatchTeam,
+      roomId: matchTeamA,
+    });
+    expect(
+      JSON.parse(redis.strings.get((chat as any).videoMediaKey("v1"))!),
+    ).toMatchObject({ chatType: ChatLobbyType.MatchTeam, roomId: matchTeamA });
+    expect(cleanup.add.mock.calls.map(([name]) => name).sort()).toEqual(
+      [ExpireChatAttachmentJobName, ExpireSentChatVideoMediaJobName].sort(),
+    );
+
+    // Team A may open the upload; Team B, asking with the same id, may not.
+    asLineup(true, LINEUP_1);
+    await expect(
+      chat.getChatAttachmentForViewer(attachmentId, player("5")),
+    ).resolves.toEqual({ objectKey, contentType: "image/png" });
+    asLineup(false, LINEUP_1);
+    await expect(
+      chat.getChatAttachmentForViewer(attachmentId, player("6")),
+    ).resolves.toBeUndefined();
+  });
+
+  it("recovers the whole history when the first carry-over fails", async () => {
+    await post("2", teamA, "pick Tricked");
+    await post("1", teamB, "B plan");
+    redis.hashes.get(DRAFT_KEY)!.set("state", draftState("MatchCreated"));
+    jest
+      .spyOn((captainPick as any).logger, "warn")
+      .mockImplementation(() => {});
+    const migrate = jest
+      .spyOn(chat, "migrateLobbyMessages")
+      .mockRejectedValueOnce(new Error("redis down"));
+
+    await (captainPick as any).carryOverTeamChat(DRAFT_ID, {
+      id: MATCH_ID,
+      status: "Live",
+      lineupIds: { 1: LINEUP_1, 2: LINEUP_2 },
+    });
+
+    // Nothing lost: still in the draft rooms, and a retry is queued.
+    expect(stored(ChatLobbyType.CaptainPickTeam, teamA)).toEqual([
+      "pick Tricked",
+    ]);
+    expect(matchmakingQueue.add).toHaveBeenCalledTimes(1);
+    const [name, data] = matchmakingQueue.add.mock.calls[0];
+    expect(name).toBe("CaptainPickTeamChatCarryOver");
+
+    await new CaptainPickTeamChatCarryOver(captainPick).process({
+      data,
+    } as any);
+
+    expect(migrate).toHaveBeenCalledTimes(3);
+    expect(stored(ChatLobbyType.MatchTeam, matchTeamA)).toEqual([
+      "pick Tricked",
+    ]);
+    expect(stored(ChatLobbyType.MatchTeam, matchTeamB)).toEqual(["B plan"]);
+    expect(stored(ChatLobbyType.CaptainPickTeam, teamA)).toEqual([]);
   });
 
   it("gets ChatService from the matchmaking module's own imports", () => {
