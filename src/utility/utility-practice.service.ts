@@ -2356,7 +2356,9 @@ export class UtilityPracticeService {
     }
   }
 
-  private async assertRole(user: User): Promise<void> {
+  // DEAFCS: public (upstream private) so Discover, which books a practice
+  // server too, can apply the same create_matches_role gate.
+  public async assertRole(user: User): Promise<void> {
     const minRole = ((await this.setting("public.create_matches_role")) ??
       "user") as e_player_roles_enum;
 

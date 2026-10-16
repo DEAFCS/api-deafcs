@@ -14,6 +14,7 @@ import {
   UtilityDiscoveryService,
 } from "./../src/utility/utility-discovery.service";
 import { UtilityLineupsService } from "./../src/utility/utility-lineups.service";
+import { UtilityPracticeService } from "./../src/utility/utility-practice.service";
 import { Fixtures } from "./utils/fixtures";
 import {
   bootMigratedDb,
@@ -134,6 +135,8 @@ describe("utility lineup discovery (SQL-driven)", () => {
       predicted?: ParsedDiscoverResponse | null;
       status?: number;
       cache?: CacheService;
+      // DEAFCS: the real practice service, for the role gate tests below.
+      practice?: UtilityPracticeService;
     } = {},
   ) {
     const predicted =
@@ -181,11 +184,20 @@ describe("utility lineup discovery (SQL-driven)", () => {
           error: null as string | null,
         })),
       } as unknown as never,
-      {
-        isEnabled: jest.fn(async () => true),
-        canPracticeOn: jest.fn(async () => true),
-        renderServerId: jest.fn(async () => serverId),
-      } as unknown as never,
+      (options.practice
+        ? {
+            isEnabled: () => options.practice!.isEnabled(),
+            assertRole: (who: User) => options.practice!.assertRole(who),
+            canPracticeOn: jest.fn(async () => true),
+            renderServerId: jest.fn(async () => serverId),
+          }
+        : {
+            isEnabled: jest.fn(async () => true),
+            // DEAFCS: the role gate passes unless a test brings the real one.
+            assertRole: jest.fn(async () => undefined),
+            canPracticeOn: jest.fn(async () => true),
+            renderServerId: jest.fn(async () => serverId),
+          }) as unknown as never,
       lineups,
       {
         discovery: jest.fn(
@@ -501,6 +513,112 @@ describe("utility lineup discovery (SQL-driven)", () => {
           }),
         ),
       ).rejects.toThrow(/at most 2048/);
+    });
+  });
+
+  // DEAFCS: a discovery books a practice server, so starting one takes the
+  // practice role gate (public.create_matches_role) and the practice switch.
+  describe("DEAFCS: who may start a discovery", () => {
+    const practice = () =>
+      new UtilityPracticeService(
+        new Logger("UtilityDiscoveryTest"),
+        postgres,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        { get: () => ({}) } as never,
+        { getConnection: () => ({}) } as never,
+      );
+
+    const setting = (name: string, value: string) =>
+      postgres.query(
+        `INSERT INTO settings (name, value) VALUES ($1, $2)
+         ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value`,
+        [name, value],
+      );
+
+    async function nothingBooked() {
+      const [row] = await postgres.query<
+        Array<{ discoveries: number; sessions: number; reserved: number }>
+      >(
+        `SELECT (SELECT count(*) FROM utility_discoveries)::int AS discoveries,
+                (SELECT count(*) FROM utility_practice_sessions)::int AS sessions,
+                (SELECT count(*) FROM servers WHERE reserved_by_match_id IS NOT NULL)::int AS reserved`,
+      );
+      expect(row).toEqual({ discoveries: 0, sessions: 0, reserved: 0 });
+      expect(queued).toEqual([]);
+    }
+
+    beforeEach(async () => {
+      await setting("public.create_matches_role", "verified_user");
+      await setting("public.utility_practice_enabled", "true");
+    });
+
+    afterAll(async () => {
+      await postgres.query(
+        "DELETE FROM settings WHERE name = 'public.create_matches_role'",
+      );
+      await setting("public.utility_practice_enabled", "false");
+    });
+
+    it.each(["guest", "user"])(
+      "refuses a %s and books nothing",
+      async (role) => {
+        const steamId = await fx.player();
+
+        await expect(
+          service({ practice: practice() }).start(user(steamId, role), ask()),
+        ).rejects.toThrow("you are not allowed to start a practice session");
+
+        await nothingBooked();
+      },
+    );
+
+    it.each(["verified_user", "administrator"])(
+      "lets a %s start one while practice is on",
+      async (role) => {
+        const steamId = await fx.player();
+
+        const answer = await service({ practice: practice() }).start(
+          user(steamId, role),
+          ask(),
+        );
+
+        expect(answer.status).toBe("Queued");
+        expect(queued).toEqual(["RunUtilityDiscovery"]);
+      },
+    );
+
+    it("follows create_matches_role rather than a fixed role", async () => {
+      await setting("public.create_matches_role", "user");
+      const steamId = await fx.player();
+
+      const answer = await service({ practice: practice() }).start(
+        user(steamId, "user"),
+        ask(),
+      );
+
+      expect(answer.status).toBe("Queued");
+    });
+
+    it("refuses everyone while practice is off, and books nothing", async () => {
+      await setting("public.utility_practice_enabled", "false");
+      const steamId = await fx.player();
+
+      await expect(
+        service({ practice: practice() }).start(
+          user(steamId, "administrator"),
+          ask(),
+        ),
+      ).rejects.toThrow(
+        "lineup discovery needs the utility library and practice servers",
+      );
+
+      await nothingBooked();
     });
   });
 

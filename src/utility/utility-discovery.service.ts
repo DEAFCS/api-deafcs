@@ -156,6 +156,11 @@ export class UtilityDiscoveryService {
       );
     }
 
+    // DEAFCS: a discovery books a practice server, so it takes the same role
+    // gate as starting a practice session (public.create_matches_role).
+    // Upstream lets any signed-in player start one.
+    await this.practice.assertRole(user);
+
     if (!(await this.practice.canPracticeOn(request.map))) {
       throw Error("that map is not available for practice");
     }
