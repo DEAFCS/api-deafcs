@@ -37,6 +37,9 @@ type JobData = {
   runAttempts?: number;
   idleSince?: number;
   bookingSince?: number;
+  // DEAFCS: servers booked for this discovery that went away before ever
+  // reaching Ready, in a row.
+  bootFailures?: { discoveryId: string; count: number };
 };
 
 @UseQueue("Utility", UtilityQueues.UtilityDiscovery, {
@@ -120,9 +123,38 @@ export class RunUtilityDiscovery extends WorkerHost {
       );
       if (head.status === "Verifying") {
         await this.discoveries.finish(head.id, "Failed", "the server stopped");
+        await this.release(job);
+        return this.delayUntilNext(job, CHECK_DELAY_MS);
       }
+
+      // DEAFCS: upstream re-books here with no limit, so a server that dies
+      // while booting (a pod that cannot start, a Job the cluster refuses) was
+      // booked again, about once a minute, for as long as the discovery stayed
+      // queued. Give up after RUN_ATTEMPTS in a row, like the other caps here.
+      const bootFailures =
+        (job.data.bootFailures?.discoveryId === head.id
+          ? job.data.bootFailures.count
+          : 0) + 1;
+
       await this.release(job);
+
+      if (bootFailures >= RUN_ATTEMPTS) {
+        await this.discoveries.finish(
+          head.id,
+          "Failed",
+          "the server could not start, try again later",
+        );
+        return this.delayUntilNext(job, 0);
+      }
+
+      await this.patch(job, {
+        bootFailures: { discoveryId: head.id, count: bootFailures },
+      });
       return this.delayUntilNext(job, CHECK_DELAY_MS);
+    }
+
+    if (session.status === "Ready" && job.data.bootFailures) {
+      await this.patch(job, { bootFailures: undefined });
     }
 
     if (session.status !== "Ready") {

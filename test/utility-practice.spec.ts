@@ -485,6 +485,60 @@ describe("utility practice sessions (SQL-driven)", () => {
         }),
       ).rejects.toThrow(/not enabled/);
     });
+
+    // DEAFCS: the discovery job re-books after a failed boot, so every booking
+    // must take the same headroom check, with the DEAFCS reserve of 4.
+    describe("DEAFCS: discovery bookings and the reserve of 4", () => {
+      let requester: string;
+
+      const book = (free: number) =>
+        makeService({
+          matchAssistant: {
+            countFreeOnDemandServers: jest.fn(async (): Promise<number> => free),
+          },
+        }).startForRender({
+          mapName: "de_mirage",
+          requestedBySteamId: requester,
+          region: "TestA",
+          isDiscovery: true,
+        });
+
+      beforeEach(async () => {
+        requester = await fx.player();
+        await setting("public.utility_practice_enabled", "true");
+        await setting("public.utility_practice_reserved_servers", "4");
+      });
+
+      it.each([4, 3, 0])(
+        "refuses with %i free on-demand slots and books nothing",
+        async (free) => {
+          await expect(book(free)).rejects.toThrow(/no practice servers are free/);
+
+          const rows = await postgres.query<Array<unknown>>(
+            "SELECT 1 FROM utility_practice_sessions",
+          );
+          expect(rows.length).toBe(0);
+          const reserved = await postgres.query<Array<unknown>>(
+            "SELECT 1 FROM servers WHERE reserved_by_match_id IS NOT NULL",
+          );
+          expect(reserved.length).toBe(0);
+        },
+      );
+
+      // Past the headroom check the booking goes on to create the hidden match
+      // through Hasura, which this suite does not wire up: reaching that step
+      // is the proof the reserve let it through.
+      it("lets one through with 5 free", async () => {
+        const error = await book(5).then(
+          () => null,
+          (thrown: Error) => thrown,
+        );
+
+        expect(String(error?.message)).not.toMatch(
+          /no practice servers are free/,
+        );
+      });
+    });
   });
 
   // Nothing serves this table -- it is only ever cleared by the same player

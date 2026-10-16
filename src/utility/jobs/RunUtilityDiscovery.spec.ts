@@ -277,6 +277,138 @@ describe("RunUtilityDiscovery", () => {
     expect(bullJob.data).toEqual({});
   });
 
+  // DEAFCS: upstream re-books a server that died while booting with no limit.
+  describe("DEAFCS: servers that never come up", () => {
+    let booked: number;
+
+    beforeEach(() => {
+      booked = 0;
+      practice.startForRender.mockImplementation(async () => ({
+        id: `session-${++booked}`,
+        status: "Starting",
+      }));
+      // Every booked server goes away before it is Ready.
+      practice.session.mockImplementation(async (id: string) => ({
+        id,
+        status: "Failed",
+        failure_reason: "no practice server was available",
+        map_name: "de_mirage",
+        match_id: "match-1",
+      }));
+    });
+
+    it("stops after three, releasing every server it booked", async () => {
+      const bullJob = makeJob({});
+
+      // book, went away, book, went away, book, went away
+      for (let i = 0; i < 6; i++) {
+        await step(bullJob);
+      }
+
+      expect(practice.startForRender).toHaveBeenCalledTimes(3);
+      expect(practice.endRenderSession.mock.calls).toEqual([
+        ["session-1"],
+        ["session-2"],
+        ["session-3"],
+      ]);
+      expect(discoveries.finish).toHaveBeenCalledWith(
+        "discovery-1",
+        "Failed",
+        "the server could not start, try again later",
+      );
+      expect(bullJob.data).toEqual({});
+
+      // Nothing left queued: it does not book a fourth.
+      await expect(job.process(bullJob)).resolves.toBeUndefined();
+      expect(practice.startForRender).toHaveBeenCalledTimes(3);
+    });
+
+    it("keeps going while it is under three", async () => {
+      const bullJob = makeJob({});
+
+      await step(bullJob); // book
+      await step(bullJob); // went away
+
+      expect(discoveries.finish).not.toHaveBeenCalled();
+      expect(bullJob.data).toEqual({
+        bootFailures: { discoveryId: "discovery-1", count: 1 },
+      });
+    });
+
+    it("counts each discovery on its own", async () => {
+      const bullJob = makeJob({
+        sessionId: "session-0",
+        bookedAt: Date.now(),
+        bootFailures: { discoveryId: "discovery-0", count: 2 },
+      });
+
+      await step(bullJob);
+
+      expect(discoveries.finish).not.toHaveBeenCalled();
+      expect(bullJob.data.bootFailures).toEqual({
+        discoveryId: "discovery-1",
+        count: 1,
+      });
+    });
+
+    it("forgets the failures once a server comes up, and runs normally", async () => {
+      practice.session.mockImplementation(async (id: string) => ({
+        id,
+        status: "Ready",
+        map_name: "de_mirage",
+        match_id: "match-1",
+      }));
+      const bullJob = makeJob({
+        sessionId: "session-9",
+        bookedAt: Date.now(),
+        bootFailures: { discoveryId: "discovery-1", count: 2 },
+      });
+
+      await step(bullJob);
+
+      expect(bullJob.data.bootFailures).toBeUndefined();
+      expect(load.discovery).toHaveBeenCalledWith(
+        "server-1",
+        "run",
+        "discovery-1",
+      );
+      expect(discoveries.finish).not.toHaveBeenCalled();
+    });
+
+    it("does not count a booking the reserve refused, and books nothing", async () => {
+      practice.startForRender.mockRejectedValue(
+        new Error("no practice servers are free right now"),
+      );
+      const bullJob = makeJob({});
+
+      await step(bullJob);
+      await step(bullJob);
+
+      expect(practice.endRenderSession).not.toHaveBeenCalled();
+      expect(discoveries.finish).not.toHaveBeenCalled();
+      expect(bullJob.data.sessionId).toBeUndefined();
+      expect(bullJob.data.bootFailures).toBeUndefined();
+    });
+
+    it("still fails a discovery whose server stopped mid-throw straight away", async () => {
+      head = {
+        ...head!,
+        status: "Verifying",
+        utility_practice_session_id: "session-1",
+        started_at: new Date(),
+      };
+
+      await step(makeJob({ sessionId: "session-1", bookedAt: Date.now() }));
+
+      expect(discoveries.finish).toHaveBeenCalledWith(
+        "discovery-1",
+        "Failed",
+        "the server stopped",
+      );
+      expect(practice.endRenderSession).toHaveBeenCalledWith("session-1");
+    });
+  });
+
   it("finishes straight away with nothing queued and no server", async () => {
     head = null;
 
