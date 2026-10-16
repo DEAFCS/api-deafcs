@@ -78,6 +78,83 @@ $$;
 DROP TRIGGER IF EXISTS tbi_tournament_team ON public.tournament_teams;
 CREATE TRIGGER tbi_tournament_team BEFORE INSERT ON public.tournament_teams FOR EACH ROW EXECUTE FUNCTION public.tbi_tournament_team();
 
+-- DEAFCS: owning or captaining a registered team is being in the tournament, so
+-- a Free Agent cannot register one (is_tournament_free_agent). Named to fire
+-- after tbi_tournament_team, which has resolved the owner and captain by then.
+-- Changing a team's owner to a Free Agent is refused the same way: the draft
+-- skips team owners, so the pool place would otherwise be lost without the
+-- player ever leaving the pool. Drafted teams are the pool's own and are left
+-- alone.
+CREATE OR REPLACE FUNCTION public.tbiu_tournament_team_single_entry() RETURNS TRIGGER
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    _registration_version int;
+    _session_steam_id bigint;
+    _owner_is_free_agent boolean;
+    _captain_is_free_agent boolean;
+BEGIN
+    IF NEW.is_drafted OR current_setting('fivestack.free_agent_draft', true) = 'true' THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT t.registration_version INTO _registration_version
+      FROM public.tournaments t
+     WHERE t.id = NEW.tournament_id;
+
+    -- Only registration version 2 has a Free Agent pool.
+    IF _registration_version IS DISTINCT FROM 2 THEN
+        RETURN NEW;
+    END IF;
+
+    -- No registration lock on an owner change: this row is already locked by
+    -- then, and a roster insert holding the registration lock goes on to update
+    -- this same row (check_team_eligibility), so waiting here could deadlock.
+    IF TG_OP = 'UPDATE' THEN
+        IF NEW.owner_steam_id IS DISTINCT FROM OLD.owner_steam_id
+           AND public.is_tournament_free_agent(NEW.tournament_id, NEW.owner_steam_id) THEN
+            RAISE EXCEPTION USING ERRCODE = '22000',
+                MESSAGE = 'The new owner is a Free Agent in a tournament this team is in. They need to leave the Free Agent pool first.';
+        END IF;
+
+        RETURN NEW;
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtext('deafcs.tournament_registration'), hashtext(NEW.tournament_id::text));
+
+    _session_steam_id := nullif(nullif(current_setting('hasura.user', true), '')::json ->> 'x-hasura-user-id', '')::bigint;
+
+    _owner_is_free_agent := public.is_tournament_free_agent(NEW.tournament_id, NEW.owner_steam_id);
+    _captain_is_free_agent := NEW.captain_steam_id IS NOT NULL
+        AND public.is_tournament_free_agent(NEW.tournament_id, NEW.captain_steam_id);
+
+    IF _owner_is_free_agent OR _captain_is_free_agent THEN
+        IF (_owner_is_free_agent AND _session_steam_id = NEW.owner_steam_id)
+           OR (_captain_is_free_agent AND _session_steam_id = NEW.captain_steam_id) THEN
+            RAISE EXCEPTION USING ERRCODE = '22000',
+                MESSAGE = 'You are a Free Agent in this tournament. Leave the Free Agent pool first to register a team.';
+        END IF;
+
+        RAISE EXCEPTION USING ERRCODE = '22000',
+            MESSAGE = 'This team''s owner or captain is a Free Agent in this tournament. They need to leave the Free Agent pool first.';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tbi_tournament_team_single_entry ON public.tournament_teams;
+CREATE TRIGGER tbi_tournament_team_single_entry
+    BEFORE INSERT ON public.tournament_teams
+    FOR EACH ROW EXECUTE FUNCTION public.tbiu_tournament_team_single_entry();
+
+DROP TRIGGER IF EXISTS tbu_tournament_team_single_entry ON public.tournament_teams;
+CREATE TRIGGER tbu_tournament_team_single_entry
+    BEFORE UPDATE OF owner_steam_id ON public.tournament_teams
+    FOR EACH ROW
+    WHEN (NEW.owner_steam_id IS DISTINCT FROM OLD.owner_steam_id)
+    EXECUTE FUNCTION public.tbiu_tournament_team_single_entry();
+
 
 CREATE OR REPLACE FUNCTION public.tbd_tournament_team()
 RETURNS TRIGGER
@@ -160,6 +237,11 @@ BEGIN
                AND ttr.tournament_id = NEW.tournament_id
             WHERE tr.team_id = NEW.team_id
               AND ttr.player_steam_id IS NULL
+              -- DEAFCS: a team member who signed up as a Free Agent stays in the
+              -- pool and is left off this lineup, the same way a member already
+              -- rostered on another team is; tbi_tournament_team_roster_single_entry
+              -- would otherwise fail the whole registration over them.
+              AND NOT public.is_tournament_free_agent(NEW.tournament_id, tr.player_steam_id)
             ORDER BY
                 CASE
                     WHEN tr.player_steam_id = COALESCE(NEW.captain_steam_id, t.captain_steam_id) THEN 0
@@ -200,7 +282,8 @@ BEGIN
                 FROM tournament_team_roster ttr
                 WHERE ttr.tournament_id = NEW.tournament_id
                   AND ttr.player_steam_id = NEW.captain_steam_id
-            ) THEN
+            )
+            AND NOT public.is_tournament_free_agent(NEW.tournament_id, NEW.captain_steam_id) THEN
             INSERT INTO tournament_team_roster (
                 tournament_team_id,
                 player_steam_id,
