@@ -7,6 +7,8 @@ import { InjectQueue } from "@nestjs/bullmq";
 import { HasuraService } from "src/hasura/hasura.service";
 import { RedisManagerService } from "src/redis/redis-manager/redis-manager.service";
 import { MatchAssistantService } from "src/matches/match-assistant/match-assistant.service";
+import { ChatService } from "src/chat/chat.service";
+import { ChatLobbyType } from "src/chat/enums/ChatLobbyTypes";
 import { MatchmakingQueues } from "../enums/MatchmakingQueues";
 import {
   getCaptainPickDraftCacheKey,
@@ -18,6 +20,7 @@ import {
 import { getMatchmakingMatchSetup } from "../utilities/matchmakingMatchSetup";
 import { CaptainPickSettingsService } from "./captain-pick-settings.service";
 import { startCaptainPickTimer } from "./captain-pick-settings";
+import { getCaptainPickTeamChatId } from "./captain-pick-team-chat";
 import {
   applyCaptainPick,
   CAPTAIN_PICK_PLAYER_COUNT,
@@ -174,6 +177,7 @@ export class CaptainPickService {
     private readonly matchAssistant: MatchAssistantService,
     private readonly settings: CaptainPickSettingsService,
     @InjectQueue(MatchmakingQueues.Matchmaking) private readonly queue: Queue,
+    private readonly chat: ChatService,
   ) {
     this.redis = this.redisManager.getConnection();
   }
@@ -549,7 +553,7 @@ export class CaptainPickService {
         );
       }
 
-      await this.recordMatchCreated(state);
+      await this.recordMatchCreated(state, inspection.match);
     });
   }
 
@@ -581,7 +585,7 @@ export class CaptainPickService {
       switch (inspection.kind) {
         case "complete":
           await this.ensureLineups(state, inspection.match);
-          await this.recordMatchCreated(state);
+          await this.recordMatchCreated(state, inspection.match);
           this.logger.warn(
             `[captain-pick] ${confirmationId} recovered existing match ${state.matchId} after failed attempts`,
           );
@@ -645,7 +649,10 @@ export class CaptainPickService {
     }
   }
 
-  private async recordMatchCreated(state: CaptainPickState) {
+  private async recordMatchCreated(
+    state: CaptainPickState,
+    match: InspectedMatch,
+  ) {
     const { confirmationId, matchId } = state;
 
     await this.redis.hset(
@@ -673,6 +680,37 @@ export class CaptainPickService {
     }
 
     await this.afterTransition(result);
+    await this.carryOverTeamChat(confirmationId, match);
+  }
+
+  /**
+   * The draft's private team rooms close at MatchCreated, where the match
+   * page switches to the match's own Team Chat. Each side's history moves
+   * into the lineup that side was seated in (side N is lineup N, see
+   * ensureLineups), so nothing said while picking is lost and no team ever
+   * sees the other's messages. Runs after the phase change, so every message
+   * the draft room accepted is carried. A retry finds the draft rooms empty.
+   * Chat never holds up the match: a failure is logged, not thrown.
+   */
+  private async carryOverTeamChat(
+    confirmationId: string,
+    match: InspectedMatch,
+  ) {
+    for (const lineup of [1, 2] as const) {
+      try {
+        await this.chat.migrateLobbyMessages(
+          ChatLobbyType.CaptainPickTeam,
+          getCaptainPickTeamChatId(confirmationId, lineup),
+          ChatLobbyType.MatchTeam,
+          `${match.id}:${match.lineupIds[lineup]}`,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `[captain-pick] ${confirmationId} could not carry team ${lineup} chat into match ${match.id}`,
+          error,
+        );
+      }
+    }
   }
 
   private async withFinalizeLock(

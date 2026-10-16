@@ -17,6 +17,7 @@ import { MatchmakingController } from "./matchmaking.controller";
 import { MarkPlayerOffline } from "./jobs/MarkPlayerOffline";
 import { TermsModule } from "src/terms/terms.module";
 import { NotificationsModule } from "src/notifications/notifications.module";
+import { ChatModule } from "src/chat/chat.module";
 import { CaptainPickSettingsService } from "./captain-pick/captain-pick-settings.service";
 import { CaptainPickService } from "./captain-pick/captain-pick.service";
 import { CaptainPickTimeout } from "./jobs/CaptainPickTimeout";
@@ -30,6 +31,7 @@ import { CaptainPickFinalize } from "./jobs/CaptainPickFinalize";
     CacheModule,
     TermsModule,
     NotificationsModule,
+    forwardRef(() => ChatModule),
     forwardRef(() => MatchesModule),
     BullModule.registerQueue({
       name: MatchmakingQueues.Matchmaking,

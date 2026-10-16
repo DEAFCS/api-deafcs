@@ -4,6 +4,7 @@ jest.mock("crypto", () => {
 });
 
 import { Logger } from "@nestjs/common";
+import { ChatLobbyType } from "../../chat/enums/ChatLobbyTypes";
 import { randomInt } from "crypto";
 import { FakeQueue, FakeRedis } from "../../../test/mocks/fake-redis";
 import {
@@ -96,6 +97,7 @@ describe("CaptainPickService", () => {
   let redis: FakeRedis;
   let queue: FakeQueue;
   let service: CaptainPickService;
+  let chat: { migrateLobbyMessages: jest.Mock };
   let pickSeconds: number;
   let players: Map<string, any>;
   let matches: Map<string, Match>;
@@ -282,6 +284,10 @@ describe("CaptainPickService", () => {
       }),
     };
 
+    chat = {
+      migrateLobbyMessages: jest.fn(async (): Promise<void> => undefined),
+    };
+
     service = new CaptainPickService(
       new Logger("Test"),
       hasura as any,
@@ -291,6 +297,7 @@ describe("CaptainPickService", () => {
         getSettings: jest.fn(async () => ({ enabled: true, pickSeconds })),
       } as any,
       queue as any,
+      chat as any,
     );
     jest.spyOn((service as any).logger, "log").mockImplementation(() => {});
     jest.spyOn((service as any).logger, "error").mockImplementation(() => {});
@@ -919,6 +926,44 @@ describe("CaptainPickService", () => {
       expect(last.data.confirmation.captainPick.phase).toBe("MatchCreated");
     });
 
+    it("carries each side's Team Chat into its own lineup once the match exists", async () => {
+      const phases: Array<string> = [];
+      chat.migrateLobbyMessages.mockImplementation(async () => {
+        phases.push((await state()).phase);
+      });
+
+      await service.finalize(CONFIRMATION_ID);
+      const s = await state();
+      const match = matches.get(s.matchId!);
+
+      expect(chat.migrateLobbyMessages.mock.calls).toEqual([
+        [
+          ChatLobbyType.CaptainPickTeam,
+          `${CONFIRMATION_ID}:1`,
+          ChatLobbyType.MatchTeam,
+          `${s.matchId}:${match.lineup_1_id}`,
+        ],
+        [
+          ChatLobbyType.CaptainPickTeam,
+          `${CONFIRMATION_ID}:2`,
+          ChatLobbyType.MatchTeam,
+          `${s.matchId}:${match.lineup_2_id}`,
+        ],
+      ]);
+      // Only after the draft rooms have closed.
+      expect(phases).toEqual(["MatchCreated", "MatchCreated"]);
+    });
+
+    it("still creates the match when the Team Chat can't be carried over", async () => {
+      jest.spyOn((service as any).logger, "warn").mockImplementation(() => {});
+      chat.migrateLobbyMessages.mockRejectedValue(new Error("redis down"));
+
+      await expect(service.finalize(CONFIRMATION_ID)).resolves.toBeUndefined();
+
+      expect((await state()).phase).toBe("MatchCreated");
+      expect(chat.migrateLobbyMessages).toHaveBeenCalledTimes(2);
+    });
+
     it("creates only one match when finalized repeatedly", async () => {
       await service.finalize(CONFIRMATION_ID);
       await service.finalize(CONFIRMATION_ID);
@@ -1481,6 +1526,12 @@ describe("CaptainPickService", () => {
         await exhaust();
 
         const s = await state();
+        expect(chat.migrateLobbyMessages).toHaveBeenCalledWith(
+          ChatLobbyType.CaptainPickTeam,
+          `${CONFIRMATION_ID}:1`,
+          ChatLobbyType.MatchTeam,
+          `${s.matchId}:${onlyMatch().lineup_1_id}`,
+        );
         expect(s.phase).toBe("MatchCreated");
         expect(onlyMatch().status).toBe("Veto");
         expect(matches.size).toBe(1);
