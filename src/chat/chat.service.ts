@@ -308,10 +308,14 @@ export class ChatService {
           return;
         }
 
+        // Truthiness, not `=== false`: is_match_organizer is NULL rather than
+        // false for a match with no organizer (every matchmaking match), and a
+        // strict comparison let anyone signed in into those rooms.
+        // (Upstream 5Stack dd17775e.)
         if (
-          matches_by_pk.is_coach === false &&
-          matches_by_pk.is_in_lineup === false &&
-          matches_by_pk.is_organizer === false &&
+          !matches_by_pk.is_coach &&
+          !matches_by_pk.is_in_lineup &&
+          !matches_by_pk.is_organizer &&
           !canStaffReadMatchChat(user.role) &&
           // Captain Pick: the draft's ten players, before they're seated.
           !(await isCaptainPickPlayerOfMatch(

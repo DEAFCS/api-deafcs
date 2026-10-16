@@ -209,6 +209,16 @@ describe("ChatService Match chat during Captain Pick", () => {
     expect(await joinMatch(player("11"))).toEqual([]);
   });
 
+  // What Hasura really returns for a match with no organizer (every
+  // matchmaking match): is_match_organizer is NULL, not false.
+  it("keeps a spectator out when is_organizer comes back null", async () => {
+    for (const status of ["PickingPlayers", "Veto", "Live", "Finished"]) {
+      expect(
+        await joinMatch(player("999"), { is_organizer: null } as any, status),
+      ).toEqual([]);
+    }
+  });
+
   it("keeps the existing admin/organizer access to the shared Match chat", async () => {
     expect(
       joined(
