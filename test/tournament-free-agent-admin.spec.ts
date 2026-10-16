@@ -173,7 +173,7 @@ describe("tournament free agent pool, organizer controls (SQL-driven)", () => {
         [t.id],
       );
       await expect(add(t.id, rostered.steam, as(t.organizer))).rejects.toThrow(
-        /already on a tournament roster/i,
+        /already on a team in this tournament/i,
       );
       expect(await entry(t.id, rostered.steam)).toBeUndefined();
     });
@@ -187,7 +187,7 @@ describe("tournament free agent pool, organizer controls (SQL-driven)", () => {
         [t.id, team.owner],
       );
       await expect(add(t.id, team.owner, as(t.organizer))).rejects.toThrow(
-        /already have a team|already on a tournament roster/i,
+        /already has a team|already on a team in this tournament/i,
       );
     });
 
