@@ -7,6 +7,7 @@ export default (): {
     // The runtime is picked in application settings. SERVER_IMAGE remains an
     // escape hatch for custom or mirrored images and takes precedence over it.
     serverImageOverride: process.env.SERVER_IMAGE || null,
+    practiceServerImage: process.env.PRACTICE_SERVER_IMAGE || null,
     pluginRuntimeImages: {
       swiftlys2: "ghcr.io/deafcs/game-server-sw",
       counterstrikesharp: "ghcr.io/deafcs/game-server-css",

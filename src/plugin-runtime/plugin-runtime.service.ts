@@ -70,6 +70,15 @@ export class PluginRuntimeService {
   }
 
   public async resolvePracticeServerImage(pin?: PluginPin): Promise<string> {
+    // DEAFCS: a pinned practice image, when configured, wins over pins and
+    // SERVER_IMAGE for practice servers only; match servers are unaffected.
+    const { practiceServerImage } =
+      this.config.get<GameServersConfig>("gameServers");
+
+    if (practiceServerImage) {
+      return practiceServerImage;
+    }
+
     return await this.resolveGameServerPluginImage(
       { pin_plugin_version: await this.practicePluginVersion(pin) },
       PRACTICE_PLUGIN_RUNTIME,

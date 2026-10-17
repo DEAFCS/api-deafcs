@@ -9,6 +9,7 @@ describe("PluginRuntimeService practice servers", () => {
     options: {
       activeRuntime?: string;
       serverImageOverride?: string | null;
+      practiceServerImage?: string | null;
       supported?: boolean;
       known?: boolean;
     } = {},
@@ -38,6 +39,7 @@ describe("PluginRuntimeService practice servers", () => {
       {
         get: jest.fn(() => ({
           serverImageOverride: options.serverImageOverride ?? null,
+          practiceServerImage: options.practiceServerImage ?? null,
           pluginRuntimeImages: {
             swiftlys2: "ghcr.io/5stackgg/game-server-sw",
             counterstrikesharp: "ghcr.io/5stackgg/game-server-css",
@@ -123,6 +125,35 @@ describe("PluginRuntimeService practice servers", () => {
           pin_plugin_runtime: "swiftlys2",
         }),
       ).resolves.toBe("registry.local/game-server:v0.1.4");
+    });
+
+    // DEAFCS: PRACTICE_SERVER_IMAGE.
+    it("takes the practice image when one is configured, over pins and SERVER_IMAGE", async () => {
+      const practiceImage = "ghcr.io/deafcs/game-server-sw@sha256:abc";
+      const { service } = build({
+        practiceServerImage: practiceImage,
+        serverImageOverride: "registry.local/game-server:dev",
+      });
+
+      await expect(service.resolvePracticeServerImage()).resolves.toBe(
+        practiceImage,
+      );
+      await expect(
+        service.resolvePracticeServerImage({
+          pin_plugin_version: "0.1.4",
+          pin_plugin_runtime: "swiftlys2",
+        }),
+      ).resolves.toBe(practiceImage);
+    });
+
+    it("leaves the match image alone when a practice image is configured", async () => {
+      const { service } = build({
+        practiceServerImage: "ghcr.io/deafcs/game-server-sw@sha256:abc",
+      });
+
+      await expect(service.resolveGameServerPluginImage()).resolves.toBe(
+        "ghcr.io/5stackgg/game-server-sw:latest",
+      );
     });
   });
 

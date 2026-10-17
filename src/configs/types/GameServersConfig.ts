@@ -15,6 +15,9 @@ export const isPluginRuntime = (
 export type GameServersConfig = {
   namespace: string;
   serverImageOverride: string | null;
+  // DEAFCS: an image for practice servers only (PRACTICE_SERVER_IMAGE), so
+  // practice can ship its plugin without changing the image every match uses.
+  practiceServerImage: string | null;
   pluginRuntimeImages: Record<PluginRuntime, string>;
   gameStreamerImage: string;
   utilityRenderStreamerImage: string | null;
