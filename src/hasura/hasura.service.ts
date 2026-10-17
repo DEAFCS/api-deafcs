@@ -425,6 +425,9 @@ export class HasuraService {
     }
   }
 
+  // Line endings are normalized first: an image built from a CRLF checkout
+  // must not look like a change to every SQL file (2026-10-16, when that
+  // re-ran all of them, maps.sql included). Stored digests are LF already.
   public calcSqlDigest(data: string | Array<string>) {
     const hash = crypto.createHash("sha256");
     if (!Array.isArray(data)) {
@@ -432,7 +435,7 @@ export class HasuraService {
     }
 
     for (const datum of data) {
-      hash.update(datum);
+      hash.update(datum.replace(/\r\n/g, "\n"));
     }
 
     return hash.digest("base64");

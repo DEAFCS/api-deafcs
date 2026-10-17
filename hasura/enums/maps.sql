@@ -15,6 +15,25 @@ insert into e_game_cfg_types ("value", "description") values
     ('Duel', 'Duel game configuration')
 on conflict(value) do update set "description" = EXCLUDED."description";
 
+-- DEAFCS map-pool protection (incidents 2026-07-29 and 2026-10-16).
+--
+-- This file re-runs whenever its digest changes (an edit, or once a build
+-- changed every digest). Upstream 5Stack then re-syncs the seed pools with
+-- active duty: it disables any seed pool whose maps differ and creates a new
+-- one. That replaced DEAFCS's customized Competitive, Wingman and Duel pools.
+--
+-- So automatic syncing is opt-in here. The admin "Automatic Update Map Pools"
+-- switch (setting update_map_pools) is seeded off once, when the row is
+-- missing, and never overwritten. While it is off, a re-run:
+--   - keeps every existing map's active_pool flag,
+--   - never disables, replaces or adds maps to a seed pool that has maps,
+--   - refreshes existing seed maps but adds no new ones, and creates and
+--     fills a seed pool only when a type has none or it is empty (a fresh
+--     installation).
+-- Turning the switch on restores the upstream behavior.
+insert into settings ("name", "value") values ('update_map_pools', 'false')
+on conflict ("name") do nothing;
+
 WITH map_data AS (
     SELECT * FROM (VALUES
         -- Valve maps
@@ -162,8 +181,21 @@ SELECT
     patch,
     label
 FROM all_maps
-on conflict("name", "type") do update set 
-    "active_pool" = EXCLUDED."active_pool", 
+-- New seed maps arrive on a fresh install or with auto-update on; otherwise
+-- only the maps already here are refreshed (poster, patch, label).
+WHERE (SELECT value FROM settings WHERE name = 'update_map_pools') = 'true'
+   OR NOT EXISTS (SELECT 1 FROM map_pools WHERE seed = true)
+   OR EXISTS (
+       SELECT 1 FROM maps existing
+       WHERE existing.name = all_maps.name AND existing.type = all_maps.type
+   )
+on conflict("name", "type") do update set
+    -- An admin's active duty choice is kept unless auto-update is on.
+    "active_pool" = CASE
+        WHEN (SELECT value FROM settings WHERE name = 'update_map_pools') = 'true'
+            THEN EXCLUDED."active_pool"
+        ELSE maps."active_pool"
+    END,
     "workshop_map_id" = EXCLUDED."workshop_map_id", 
     "poster" = EXCLUDED."poster", 
     "patch" = EXCLUDED."patch", 
@@ -202,6 +234,8 @@ pools_to_disable AS (
   FROM existing_pools ep
   JOIN expected_maps em ON ep.type = em.type
   WHERE ep.current_map_names != em.expected_map_names
+    -- Replacing a configured pool is the auto-update behavior only.
+    AND (SELECT value FROM settings WHERE name = 'update_map_pools') = 'true'
 )
 -- Disable mismatched pools
 UPDATE map_pools
@@ -243,11 +277,19 @@ begin
         update_map_pools = 'true';
     end if;
 
-    if(update_map_pools = 'true') then
+    -- With auto-update off, only an empty enabled seed pool is filled: it
+    -- is new (a fresh install), never one an admin configured.
+    if(update_map_pools = 'true' or exists (
+        select 1 from map_pools p
+        where p.type in ('Competitive', 'Wingman', 'Duel') and p.seed = true and p.enabled = true
+          and not exists (select 1 from _map_pool l where l.map_pool_id = p.id)
+    )) then
         WITH pool_ids AS (
             SELECT id, type
             FROM map_pools
             WHERE type IN ('Competitive', 'Wingman', 'Duel') and seed = true and enabled = true
+              AND (update_map_pools = 'true'
+                   OR NOT EXISTS (SELECT 1 FROM _map_pool l WHERE l.map_pool_id = map_pools.id))
             ORDER BY type
         )
         INSERT INTO _map_pool (map_id, map_pool_id)

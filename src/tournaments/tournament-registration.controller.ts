@@ -315,6 +315,35 @@ export class TournamentRegistrationController {
       return await this.joinFreeAgentPoolWithLobby(tournament, data.user);
     }
 
+    // DEAFCS: one entry per tournament. tbi_tournament_free_agents refuses this
+    // too (and is what holds under a race); asking first lets the player read
+    // the reason as themselves, since this insert carries no session.
+    const [entry] = await this.postgres.query<
+      Array<{ rostered: boolean; owns_team: boolean }>
+    >(
+      `SELECT EXISTS (
+                  SELECT 1 FROM tournament_team_roster ttr
+                   WHERE ttr.tournament_id = $1::uuid
+                     AND ttr.player_steam_id = $2::bigint
+              ) AS rostered,
+              EXISTS (
+                  SELECT 1 FROM tournament_teams tt
+                   WHERE tt.tournament_id = $1::uuid
+                     AND tt.owner_steam_id = $2::bigint
+              ) AS owns_team`,
+      [tournament_id, data.user.steam_id],
+    );
+
+    if (entry?.rostered) {
+      throw Error(
+        "You are already on a team in this tournament. Leave your team first to sign up as a Free Agent.",
+      );
+    }
+
+    if (entry?.owns_team) {
+      throw Error("You already have a team in this tournament");
+    }
+
     await this.postgres.query(
       `INSERT INTO tournament_free_agents (tournament_id, player_steam_id)
        VALUES ($1::uuid, $2::bigint)

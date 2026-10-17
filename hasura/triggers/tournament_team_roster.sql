@@ -156,6 +156,57 @@ $$;
 DROP TRIGGER IF EXISTS tbi_tournament_team_roster ON public.tournament_team_roster;
 CREATE TRIGGER tbi_tournament_team_roster BEFORE INSERT ON public.tournament_team_roster FOR EACH ROW EXECUTE FUNCTION public.tbi_tournament_team_roster();
 
+-- DEAFCS: a Free Agent cannot also be put on a team (is_tournament_free_agent).
+-- Its own trigger, named to fire after tbi_tournament_team_roster: when that one
+-- turns the insert into an invite (RETURN NULL) this never runs, so a Free Agent
+-- can still be invited. Accepting is the roster insert, and that is refused
+-- until they have left the pool. Every route is covered here: an accepted
+-- invite, a captain or organizer adding them, and a team registering with them
+-- (tai_tournament_team skips pool members instead of failing the whole team).
+--
+-- The lock is the one the pool sign-up (tbi_tournament_free_agents) and team
+-- registration (tbi_tournament_team) take, so a sign-up and a team join for the
+-- same player in flight at the same time cannot both miss each other's row.
+CREATE OR REPLACE FUNCTION public.tbi_tournament_team_roster_single_entry() RETURNS TRIGGER
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    _registration_version int;
+BEGIN
+    IF current_setting('fivestack.free_agent_draft', true) = 'true' THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT t.registration_version INTO _registration_version
+      FROM public.tournaments t
+     WHERE t.id = NEW.tournament_id;
+
+    -- Only registration version 2 has a Free Agent pool.
+    IF _registration_version IS DISTINCT FROM 2 THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtext('deafcs.tournament_registration'), hashtext(NEW.tournament_id::text));
+
+    IF public.is_tournament_free_agent(NEW.tournament_id, NEW.player_steam_id) THEN
+        IF NEW.player_steam_id = nullif(nullif(current_setting('hasura.user', true), '')::json ->> 'x-hasura-user-id', '')::bigint THEN
+            RAISE EXCEPTION USING ERRCODE = '22000',
+                MESSAGE = 'You are a Free Agent in this tournament. Leave the Free Agent pool first to join a team.';
+        END IF;
+
+        RAISE EXCEPTION USING ERRCODE = '22000',
+            MESSAGE = 'This player is a Free Agent in this tournament. They need to leave the Free Agent pool first.';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tbi_tournament_team_roster_single_entry ON public.tournament_team_roster;
+CREATE TRIGGER tbi_tournament_team_roster_single_entry
+    BEFORE INSERT ON public.tournament_team_roster
+    FOR EACH ROW EXECUTE FUNCTION public.tbi_tournament_team_roster_single_entry();
+
 CREATE OR REPLACE FUNCTION public.tbi_tournament_team_roster_snapshot() RETURNS TRIGGER
     LANGUAGE plpgsql
     AS $$

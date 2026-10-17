@@ -124,6 +124,14 @@ describe("Captain Pick team chat access", () => {
     await expect(can(1, "2")).resolves.toBe(false);
   });
 
+  it("closes both team chats once the match exists (its history moved into the match)", async () => {
+    draft = draftState({ 1: ["2", "5"], 2: ["1"] }, "MatchCreated");
+
+    await expect(can(1, "2")).resolves.toBe(false);
+    await expect(can(1, "5")).resolves.toBe(false);
+    await expect(can(2, "1")).resolves.toBe(false);
+  });
+
   it("can't be tricked by a malformed room id", async () => {
     await expect(
       canAccessCaptainPickTeamChat(redis as any, `${DRAFT_ID}:1:2`, "2"),

@@ -308,10 +308,14 @@ export class ChatService {
           return;
         }
 
+        // Truthiness, not `=== false`: is_match_organizer is NULL rather than
+        // false for a match with no organizer (every matchmaking match), and a
+        // strict comparison let anyone signed in into those rooms.
+        // (Upstream 5Stack dd17775e.)
         if (
-          matches_by_pk.is_coach === false &&
-          matches_by_pk.is_in_lineup === false &&
-          matches_by_pk.is_organizer === false &&
+          !matches_by_pk.is_coach &&
+          !matches_by_pk.is_in_lineup &&
+          !matches_by_pk.is_organizer &&
           !canStaffReadMatchChat(user.role) &&
           // Captain Pick: the draft's ten players, before they're seated.
           !(await isCaptainPickPlayerOfMatch(
@@ -4344,6 +4348,11 @@ export class ChatService {
     fromId: string,
     toType: ChatLobbyType,
     toId: string,
+    // Keep GIFs, uploads and videos even in a Match/MatchTeam room, retargeted
+    // to it, as upstream 5Stack's move does. Safe for history: nothing carried
+    // here is relayed to the game server (only new sends are), and the files
+    // stay readable only to whoever may read the destination room.
+    { keepMedia = false }: { keepMedia?: boolean } = {},
   ) {
     const fromKey = `chat_${fromType}_${fromId}`;
     const toKey = `chat_${toType}_${toId}`;
@@ -4352,7 +4361,8 @@ export class ChatService {
     const messagesObject = await this.redis.hgetall(fromKey);
 
     const attachmentIncompatibleDestination =
-      toType === ChatLobbyType.Match || toType === ChatLobbyType.MatchTeam;
+      !keepMedia &&
+      (toType === ChatLobbyType.Match || toType === ChatLobbyType.MatchTeam);
 
     for (const [field, message] of Object.entries(messagesObject)) {
       const parsed = JSON.parse(message);
@@ -4421,6 +4431,15 @@ export class ChatService {
             "EX",
             messageTtlSeconds,
           );
+          // The file now lives as long as the destination's messages, so it
+          // is removed with them, as a long-retention room's uploads are.
+          if (keepMedia) {
+            await this.scheduleChatAttachmentCleanup(
+              attachmentId,
+              record.objectKey,
+              messageTtlSeconds,
+            );
+          }
         }
       } else if (attachmentId) {
         await this.removeChatAttachment(attachmentId).catch((error) =>

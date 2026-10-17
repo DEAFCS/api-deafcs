@@ -36,7 +36,11 @@ BEGIN
 
     IF EXISTS (SELECT 1 FROM public.tournament_team_roster r
         WHERE r.tournament_id = NEW.tournament_id AND r.player_steam_id = NEW.player_steam_id) THEN
-        RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Player is already on a tournament roster';
+        RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = CASE
+            WHEN NEW.player_steam_id = nullif(_session ->> 'x-hasura-user-id', '')::bigint
+                THEN 'You are already on a team in this tournament. Leave your team first to sign up as a Free Agent.'
+            ELSE 'This player is already on a team in this tournament'
+        END;
     END IF;
 
     -- A session with no role is an internal write and stays unrestricted, the
@@ -71,8 +75,11 @@ BEGIN
         WHERE tt.tournament_id = NEW.tournament_id
           AND tt.owner_steam_id = NEW.player_steam_id
     ) THEN
-        RAISE EXCEPTION USING ERRCODE = '22000',
-            MESSAGE = 'You already have a team in this tournament';
+        RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = CASE
+            WHEN NEW.player_steam_id = nullif(_session ->> 'x-hasura-user-id', '')::bigint
+                THEN 'You already have a team in this tournament'
+            ELSE 'This player already has a team in this tournament'
+        END;
     END IF;
 
     IF NOT public.tournament_free_agent_party_fits(NEW.tournament_id, NEW.party_id, NEW.id) THEN
@@ -112,6 +119,25 @@ BEGIN
     IF NEW.status = 'registered' AND OLD.status IN ('withdrawn', 'waitlisted')
        AND public.player_meets_tournament_requirements(NEW.tournament_id, NEW.player_steam_id) IS NOT TRUE THEN
         RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Player does not meet tournament entry requirements';
+    END IF;
+
+    -- DEAFCS: a withdrawn row coming back into the pool is a new sign-up, so it
+    -- gets the sign-up's one-entry rule. Only from withdrawn: a reset puts
+    -- drafted players back while their generated team still exists.
+    IF OLD.status = 'withdrawn' AND NEW.status IN ('registered', 'waitlisted') THEN
+        IF EXISTS (SELECT 1 FROM public.tournament_team_roster r
+            WHERE r.tournament_id = NEW.tournament_id AND r.player_steam_id = NEW.player_steam_id) THEN
+            RAISE EXCEPTION USING ERRCODE = '22000',
+                MESSAGE = 'This player is already on a team in this tournament';
+        END IF;
+
+        IF EXISTS (SELECT 1 FROM public.tournament_teams tt
+            WHERE tt.tournament_id = NEW.tournament_id
+              AND tt.owner_steam_id = NEW.player_steam_id
+              AND NOT tt.is_drafted) THEN
+            RAISE EXCEPTION USING ERRCODE = '22000',
+                MESSAGE = 'This player already has a team in this tournament';
+        END IF;
     END IF;
 
     IF NEW.party_id IS NOT NULL
