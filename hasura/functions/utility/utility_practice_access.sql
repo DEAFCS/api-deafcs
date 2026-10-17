@@ -142,3 +142,33 @@ BEGIN
     RETURN public.get_match_connection_string(_match, hasura_session);
 END;
 $$;
+
+-- The game server a session runs on, for the staff console only. The website
+-- cannot read it off session.match: practice matches are filtered out of
+-- every role's matches select, so that relationship is always null there.
+-- Administrators only, because only they can open RCON on a practice server
+-- (RconService.canAccessServer); anyone else gets NULL, not the id.
+CREATE OR REPLACE FUNCTION public.utility_practice_server_id(
+    session public.utility_practice_sessions,
+    hasura_session json
+) RETURNS uuid
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    _server_id uuid;
+BEGIN
+    IF coalesce(hasura_session ->> 'x-hasura-role', '')
+        NOT IN ('admin', 'administrator') THEN
+        RETURN NULL;
+    END IF;
+
+    IF session.match_id IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT m.server_id INTO _server_id FROM public.matches m WHERE m.id = session.match_id;
+
+    RETURN _server_id;
+END;
+$$;

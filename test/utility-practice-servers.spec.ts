@@ -184,6 +184,67 @@ describe("utility practice servers (SQL-driven)", () => {
     });
   });
 
+  // The website's staff console needs the server a session runs on, and it
+  // cannot read it off session.match: practice matches are hidden from every
+  // role's matches select. utility_practice_server_id answers it, to
+  // administrators alone (only they can open RCON on a practice server).
+  describe("the staff console's server id", () => {
+    async function sessionOnServer(): Promise<{ sessionId: string; serverId: string }> {
+      const serverId = await practiceServer();
+      const { matchId } = await fx.bareMatch();
+      await postgres.query(
+        "UPDATE matches SET server_id = $2::uuid WHERE id = $1::uuid",
+        [matchId, serverId],
+      );
+      const host = await fx.player();
+      const [session] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO utility_practice_sessions
+           (host_steam_id, map_name, region, status, match_id)
+         VALUES ($1::bigint, 'de_mirage', 'TestA', 'Ready', $2::uuid)
+         RETURNING id::text AS id`,
+        [host, matchId],
+      );
+      return { sessionId: session.id, serverId };
+    }
+
+    async function serverIdAs(sessionId: string, role: string | null): Promise<string | null> {
+      const hasuraSession = role == null ? {} : { "x-hasura-role": role, "x-hasura-user-id": "1" };
+      const [row] = await postgres.query<Array<{ server_id: string | null }>>(
+        `SELECT utility_practice_server_id(s.*, $2::json)::text AS server_id
+           FROM utility_practice_sessions s WHERE s.id = $1::uuid`,
+        [sessionId, JSON.stringify(hasuraSession)],
+      );
+      return row.server_id;
+    }
+
+    it("tells an administrator", async () => {
+      const { sessionId, serverId } = await sessionOnServer();
+
+      expect(await serverIdAs(sessionId, "administrator")).toBe(serverId);
+      expect(await serverIdAs(sessionId, "admin")).toBe(serverId);
+    });
+
+    it("tells nobody else", async () => {
+      const { sessionId } = await sessionOnServer();
+
+      for (const role of ["moderator", "match_organizer", "verified_user", "user", "guest", null]) {
+        expect(await serverIdAs(sessionId, role)).toBeNull();
+      }
+    });
+
+    it("is null for a session that has no match yet", async () => {
+      const host = await fx.player();
+      const [session] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO utility_practice_sessions (host_steam_id, map_name, region, status)
+         VALUES ($1::bigint, 'de_mirage', 'TestA', 'Starting')
+         RETURNING id::text AS id`,
+        [host],
+      );
+
+      expect(await serverIdAs(session.id, "administrator")).toBeNull();
+    });
+  });
+
   describe("reservations", () => {
     it("counts a reserved practice server as unavailable", async () => {
       const id = await practiceServer();
