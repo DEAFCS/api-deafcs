@@ -73,6 +73,17 @@ describe("UtilityPracticeService in-game map change", () => {
     });
   });
 
+  it("lists Valve's Active Duty maps first", async () => {
+    const { service } = makeService();
+
+    await service.mapsForServer("server-1", HOST);
+
+    const [sql] = (service.postgres.query as jest.Mock).mock.calls.find(
+      ([text]: [string]) => text.includes("FROM public.maps"),
+    );
+    expect(sql).toMatch(/ORDER BY active_pool IS TRUE DESC, name/);
+  });
+
   it("shows a guest the maps but not the change", async () => {
     const { service } = makeService();
 

@@ -1501,7 +1501,8 @@ export class UtilityPracticeService {
           WHERE type = $1
             AND enabled = true
             AND deleted_at IS NULL
-          ORDER BY name`,
+          -- DEAFCS: Valve's Active Duty maps first, then the rest.
+          ORDER BY active_pool IS TRUE DESC, name`,
         [UtilityPracticeService.MATCH_TYPE],
       ),
     ]);
