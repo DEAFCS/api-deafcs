@@ -310,6 +310,17 @@ export class UtilityCalloutsService {
       return { stored: 0 };
     }
 
+    // DEAFCS: the extract may simply never have been pulled. It is synced when
+    // a node finishes updating to a new CS2 build, so an install that turned
+    // the feature on between builds had no extract at all, and the first
+    // report filled the gap -- including one a practice server read off the
+    // map it was leaving (de_cache stored with Mirage's 23 places on
+    // 2026-10-18). Ask for the extract first; the report only ever fills a
+    // map the extract does not cover, which is what it is for.
+    if ((await this.sync(map)) > 0) {
+      return { stored: 0 };
+    }
+
     await this.write(map, clean, "plugin");
     return { stored: clean.length };
   }

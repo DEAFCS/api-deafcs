@@ -343,3 +343,138 @@ describe("UtilityCalloutsService.calloutsUrl", () => {
     );
   });
 });
+
+// 2026-10-18: a practice server changed Mirage -> Cache and reported Mirage's
+// 23 places as de_cache (its first walk ran while Mirage's entities were still
+// alive). With no extract ever synced, that report was stored, and every board
+// showed Cache's radar with Mirage's callouts. A report now asks for the
+// published extract first and is only kept for a map the extract lacks.
+describe("UtilityCalloutsService.report", () => {
+  const originalCdn = process.env.MAP_MESH_CDN;
+  const originalFetch = global.fetch;
+
+  const mirage = [
+    { name: "Jungle", boxes: [box([0, 0, 0], [100, 100, 100])] },
+    { name: "PalaceAlley", boxes: [box([200, 0, 0], [300, 100, 100])] },
+  ];
+  const cache = [
+    { name: "AMain", boxes: [box([0, 0, 0], [80, 80, 80])] },
+    { name: "Highway", boxes: [box([500, 0, 0], [600, 80, 80])] },
+  ];
+  const workshop = [{ name: "Mid", boxes: [box([0, 0, 0], [50, 50, 50])] }];
+
+  let extracts: Record<string, unknown[]>;
+  let table: Map<string, { source: string; names: string[] }>;
+  let service: UtilityCalloutsService;
+
+  beforeEach(() => {
+    process.env.MAP_MESH_CDN = "https://cdn.test/maps";
+    extracts = { de_mirage: mirage, de_cache: cache };
+    table = new Map();
+    global.fetch = jest.fn(async (url: string) => {
+      const map = url
+        .replace("https://cdn.test/maps/", "")
+        .replace(".callouts.json", "");
+      const callouts = extracts[map];
+      return {
+        ok: !!callouts,
+        status: callouts ? 200 : 404,
+        json: async () => ({ callouts }),
+      };
+    }) as any;
+
+    const postgres = {
+      query: jest.fn(async (sql: string, params: unknown[]) => {
+        if (sql.includes("source = 'cdn'")) {
+          const row = table.get(params[0] as string);
+          return [
+            { count: row?.source === "cdn" ? String(row.names.length) : "0" },
+          ];
+        }
+        return [];
+      }),
+    };
+    service = new UtilityCalloutsService(
+      { warn: jest.fn(), log: jest.fn() } as never,
+      postgres as never,
+    );
+    jest
+      .spyOn(service as any, "write")
+      .mockImplementation(
+        async (map: unknown, rows: unknown, source: unknown) => {
+          table.set(map as string, {
+            source: source as string,
+            names: (rows as Array<{ name: string }>).map((row) => row.name),
+          });
+        },
+      );
+  });
+
+  afterEach(() => {
+    if (originalCdn === undefined) {
+      delete process.env.MAP_MESH_CDN;
+    } else {
+      process.env.MAP_MESH_CDN = originalCdn;
+    }
+    global.fetch = originalFetch;
+    jest.restoreAllMocks();
+  });
+
+  it("stores Cache's extract, not the Mirage places a map change reported as de_cache", async () => {
+    await expect(service.report("de_cache", mirage)).resolves.toEqual({
+      stored: 0,
+    });
+
+    expect(table.get("de_cache")).toEqual({
+      source: "cdn",
+      names: ["AMain", "Highway"],
+    });
+  });
+
+  it("keeps every map's callouts its own across Mirage -> Cache -> Mirage", async () => {
+    await service.report("de_mirage", mirage);
+    await service.report("de_cache", mirage); // the stale walk
+    await service.report("de_mirage", cache); // and the same on the way back
+
+    expect(table.get("de_mirage")).toEqual({
+      source: "cdn",
+      names: ["Jungle", "PalaceAlley"],
+    });
+    expect(table.get("de_cache")).toEqual({
+      source: "cdn",
+      names: ["AMain", "Highway"],
+    });
+  });
+
+  it("does not fetch again once a map has its extract", async () => {
+    await service.report("de_cache", cache);
+    (global.fetch as jest.Mock).mockClear();
+
+    await expect(service.report("de_cache", mirage)).resolves.toEqual({
+      stored: 0,
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("still fills a workshop map the extract does not cover", async () => {
+    await expect(service.report("workshop_aim_map", workshop)).resolves.toEqual(
+      { stored: 1 },
+    );
+
+    expect(table.get("workshop_aim_map")).toEqual({
+      source: "plugin",
+      names: ["Mid"],
+    });
+  });
+
+  it("falls back to the report when the CDN is unreachable", async () => {
+    global.fetch = jest.fn(async () => {
+      throw new Error("offline");
+    }) as any;
+
+    await expect(service.report("de_cache", cache)).resolves.toEqual({
+      stored: 2,
+    });
+    expect(table.get("de_cache")?.source).toBe("plugin");
+  });
+});
