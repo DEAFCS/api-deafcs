@@ -1967,6 +1967,63 @@ export class UtilityPracticeService {
    * still a server that is up, and a flag that never clears would leave every
    * "load me in" button refusing forever.
    */
+  /**
+   * DEAFCS: the skins plugin's settings for a practice server.
+   *
+   * A match server gets them from the Competitive server config
+   * (match_type_cfgs, edited under the panel's match type cfgs): the match
+   * plugin writes it as 5stack.competitive.cfg and execs it, and that is where
+   * the DEAFCS inventory service and its key are set (invsim_url,
+   * invsim_apikey, ...). A practice server runs no match plugin and never
+   * execs that cfg, so InventorySimulator fell back to its public default and
+   * players saw their real Steam items. The same lines, and only the
+   * InventorySimulator ones, now go to the practice server with its session,
+   * over the plugin-key-authenticated call that already hands it its password.
+   * Never logged: the key is among them.
+   */
+  public async inventorySettings(): Promise<
+    Array<{ name: string; value: string }>
+  > {
+    const [row] = await this.postgres.query<Array<{ cfg: string | null }>>(
+      `SELECT cfg
+         FROM public.match_type_cfgs
+        WHERE type = $1`,
+      [UtilityPracticeService.MATCH_TYPE],
+    );
+
+    return UtilityPracticeService.inventorySettings(row?.cfg);
+  }
+
+  /**
+   * The InventorySimulator lines of a server cfg, as name/value pairs. Only
+   * `invsim_<name> value` or `invsim_<name> "value"`; anything else in the
+   * cfg (game rules, comments, other plugins) is left out, and a value that
+   * could carry a second command (a quote, ;, a line break) is dropped.
+   */
+  public static inventorySettings(
+    cfg: string | null | undefined,
+  ): Array<{ name: string; value: string }> {
+    const settings: Array<{ name: string; value: string }> = [];
+
+    for (const raw of String(cfg ?? "").split(/\r?\n/)) {
+      const match = /^\s*(invsim_[a-z0-9_]{1,48})\s+(?:"([^"]*)"|([^\s"]+))/i.exec(
+        raw,
+      );
+      if (!match) {
+        continue;
+      }
+
+      const value = match[2] ?? match[3] ?? "";
+      if (value.length > 512 || /[";\u0000-\u001f\u007f]/.test(value)) {
+        continue;
+      }
+
+      settings.push({ name: match[1].toLowerCase(), value });
+    }
+
+    return settings;
+  }
+
   public async markMapLoaded(
     sessionId: string,
     reportedMap?: string | null,

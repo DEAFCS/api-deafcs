@@ -8,6 +8,11 @@ import { UtilityController } from "./utility.controller";
 describe("UtilityController session", () => {
   const session = { session_id: "session-1", match_id: "match-1" };
   const request = { utilityServerId: "server-1" } as any;
+  // Placeholders: no real service or key ever appears in a test.
+  const settings = [
+    { name: "invsim_url", value: "https://inventory.example.test" },
+    { name: "invsim_apikey", value: "test-key" },
+  ];
 
   function make(running = true) {
     const calls: Array<string> = [];
@@ -23,6 +28,7 @@ describe("UtilityController session", () => {
         calls.push("ready");
       }),
       markMapLoaded: jest.fn().mockResolvedValue(undefined),
+      inventorySettings: jest.fn(async () => settings),
     };
     const controller = new UtilityController(
       { log: jest.fn(), warn: jest.fn(), error: jest.fn() } as any,
@@ -72,7 +78,7 @@ describe("UtilityController session", () => {
 
     await expect(
       controller.session(request, "de_mirage", "true"),
-    ).resolves.toBe(session);
+    ).resolves.toEqual({ ...session, inventory_settings: settings });
 
     expect(practice.markReady).not.toHaveBeenCalled();
   });
@@ -102,5 +108,26 @@ describe("UtilityController session", () => {
       null,
       false,
     );
+  });
+
+  // DEAFCS: the skins plugin is told where the DEAFCS inventory lives, the
+  // same settings a match server execs from the Competitive cfg.
+  it("hands the server its inventory settings with the session", async () => {
+    const { controller, practice } = make();
+
+    const answer: any = await controller.session(request, "de_mirage", "false");
+
+    expect(practice.inventorySettings).toHaveBeenCalled();
+    expect(answer.inventory_settings).toEqual(settings);
+    expect(answer.session_id).toBe("session-1");
+  });
+
+  it("gives a server with no session nothing, inventory settings included", async () => {
+    const { controller, practice } = make(false);
+
+    await expect(controller.session(request, "de_mirage", "false")).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(practice.inventorySettings).not.toHaveBeenCalled();
   });
 });

@@ -229,7 +229,12 @@ export class UtilityController {
       reportedMap ? String(reportedMap) : null,
     );
 
-    return session;
+    // DEAFCS: the skins plugin's settings, from the Competitive server cfg a
+    // match server execs (see UtilityPracticeService.inventorySettings).
+    return {
+      ...session,
+      inventory_settings: await this.practice.inventorySettings(),
+    };
   }
 
   // The in-game menu's map list. The session is the authenticated server's,
