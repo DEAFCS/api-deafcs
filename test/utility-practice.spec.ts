@@ -878,6 +878,68 @@ describe("utility practice sessions (SQL-driven)", () => {
       expect(await lineupCount(matchId)).toBe(2);
     });
 
+    // DEAFCS: Join Pracc from the friends list goes through this same join, so
+    // being the host's friend must open a Friends session and nothing tighter.
+    it.each(["Invite", "Private"])(
+      "refuses an accepted friend of the host on an %s session",
+      async (access) => {
+        const { host, matchId, sessionId } = await liveSession({ access });
+        const friend = await fx.player();
+
+        await postgres.query(
+          `INSERT INTO friends (player_steam_id, other_player_steam_id, status)
+           VALUES ($1, $2, 'Accepted')`,
+          [friend, host],
+        );
+
+        await expect(
+          makeService({}).join({ steam_id: friend, role: "user" } as never, {
+            session_id: sessionId,
+          }),
+        ).rejects.toThrow(/not invited/);
+
+        expect(await lineupCount(matchId)).toBe(1);
+      },
+    );
+
+    it("joins a friend onto the existing server without booking another", async () => {
+      const { host, matchId, sessionId } = await liveSession();
+      const friend = await fx.player();
+
+      await postgres.query(
+        `INSERT INTO friends (player_steam_id, other_player_steam_id, status)
+         VALUES ($1, $2, 'Accepted')`,
+        [host, friend],
+      );
+
+      const [before] = await postgres.query<
+        Array<{ sessions: string; matches: string; server: string | null }>
+      >(
+        `SELECT (SELECT count(*) FROM utility_practice_sessions)::text AS sessions,
+                (SELECT count(*) FROM matches)::text AS matches,
+                (SELECT server_id::text FROM matches WHERE id = $1::uuid) AS server`,
+        [matchId],
+      );
+
+      await expect(
+        makeService({}).join({ steam_id: friend, role: "user" } as never, {
+          session_id: sessionId,
+        }),
+      ).resolves.toEqual({ session_id: sessionId, match_id: matchId });
+
+      const [after] = await postgres.query<
+        Array<{ sessions: string; matches: string; server: string | null }>
+      >(
+        `SELECT (SELECT count(*) FROM utility_practice_sessions)::text AS sessions,
+                (SELECT count(*) FROM matches)::text AS matches,
+                (SELECT server_id::text FROM matches WHERE id = $1::uuid) AS server`,
+        [matchId],
+      );
+
+      expect(after).toEqual(before);
+      expect(await lineupCount(matchId)).toBe(2);
+    });
+
     it("refuses once the lineup is at max_players_per_lineup", async () => {
       const { matchId, sessionId, host } = await liveSession({
         is_open: true,

@@ -72,6 +72,21 @@ BEGIN
         RETURN true;
     END IF;
 
+    -- DEAFCS: a Friends session is visible to the host's accepted friends, the
+    -- same people UtilityPracticeService.canJoin already lets in -- without it
+    -- the friends list could never offer them the session. Friends only: an
+    -- Invite or Private session stays out of a friend's sight.
+    IF session.access = 'Friends' AND EXISTS (
+        SELECT 1 FROM public.friends f
+         WHERE f.status = 'Accepted'
+           AND (
+               (f.player_steam_id = session.host_steam_id AND f.other_player_steam_id = _steam_id)
+            OR (f.other_player_steam_id = session.host_steam_id AND f.player_steam_id = _steam_id)
+           )
+    ) THEN
+        RETURN true;
+    END IF;
+
     RETURN public.is_utility_team_member(session.team_id, _steam_id);
 END;
 $$;
