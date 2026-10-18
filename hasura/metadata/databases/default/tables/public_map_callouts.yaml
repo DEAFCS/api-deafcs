@@ -1,6 +1,17 @@
 table:
   name: map_callouts
   schema: public
+object_relationships:
+  - name: custom_label
+    using:
+      manual_configuration:
+        column_mapping:
+          map_name: map_name
+          name: name
+        insertion_order: null
+        remote_table:
+          name: map_callout_labels
+          schema: public
 select_permissions:
   - role: guest
     permission:

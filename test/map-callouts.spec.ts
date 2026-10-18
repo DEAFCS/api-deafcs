@@ -19,8 +19,19 @@ describe("map callouts (SQL-driven)", () => {
     await db?.stop();
   });
 
+  // report() asks the published extract first (126bfa4e). No test may reach
+  // the real CDN: a map is "not extracted" unless a test says otherwise.
+  beforeEach(() => {
+    jest.spyOn(global, "fetch").mockResolvedValue({ ok: false } as never);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   beforeEach(async () => {
     await postgres.query("DELETE FROM map_callouts");
+    await postgres.query("DELETE FROM map_callout_labels");
   });
 
   const service = () =>
@@ -125,7 +136,90 @@ describe("map callouts (SQL-driven)", () => {
     await callouts_.report("de_mirage", callouts("Window"));
 
     expect(await callouts_.forMap("de_mirage")).toEqual([
-      { name: "Window", boxes: [{ min: [0, 0, 0], max: [100, 100, 100] }] },
+      {
+        name: "Window",
+        boxes: [{ min: [0, 0, 0], max: [100, 100, 100] }],
+        label: null,
+      },
     ]);
+  });
+
+  // DEAFCS: an administrator's label lives in its own table, so the sync that
+  // rewrites map_callouts from the 5Stack extract never touches it.
+  describe("custom labels", () => {
+    async function label(name: string, text: string, map = "de_mirage") {
+      await postgres.query(
+        "INSERT INTO map_callout_labels (map_name, name, label) VALUES ($1, $2, $3)",
+        [map, name, text],
+      );
+    }
+
+    async function labels() {
+      return await postgres.query<Array<{ name: string; label: string }>>(
+        "SELECT name, label FROM map_callout_labels ORDER BY name",
+      );
+    }
+
+    async function syncFromCdn(callouts_: UtilityCalloutsService, ...names: string[]) {
+      const fetched = jest.spyOn(global, "fetch").mockResolvedValue({
+        ok: true,
+        json: async () => ({ callouts: callouts(...names) }),
+      } as never);
+      try {
+        await callouts_.sync("de_mirage");
+      } finally {
+        fetched.mockRestore();
+      }
+    }
+
+    it("survives a sync and leaves the original name and boxes alone", async () => {
+      const callouts_ = service();
+      await syncFromCdn(callouts_, "Connector", "Window");
+      await label("Connector", "Jungle");
+
+      await syncFromCdn(callouts_, "Connector", "Window");
+
+      expect(await labels()).toEqual([{ name: "Connector", label: "Jungle" }]);
+      expect(await rows()).toEqual([
+        { name: "Connector", source: "cdn" },
+        { name: "Window", source: "cdn" },
+      ]);
+    });
+
+    it("waits, untouched, while its callout is missing from the extract", async () => {
+      const callouts_ = service();
+      await syncFromCdn(callouts_, "Connector", "Window");
+      await label("Connector", "Jungle");
+
+      await syncFromCdn(callouts_, "Window");
+      expect(await labels()).toEqual([{ name: "Connector", label: "Jungle" }]);
+
+      await syncFromCdn(callouts_, "Connector", "Window");
+      expect(
+        (await callouts_.forMap("de_mirage")).find((c) => c.name === "Connector")
+          ?.label,
+      ).toBe("Jungle");
+    });
+
+    it("names a throw with the label", async () => {
+      const callouts_ = service();
+      await syncFromCdn(callouts_, "Connector");
+      await label("Connector", "Jungle");
+
+      await expect(
+        callouts_.autoName(
+          "de_mirage",
+          "Smoke",
+          { x: 50, y: 50, z: 50 },
+          { x: 50, y: 50, z: 50 },
+        ),
+      ).resolves.toBe("Jungle Smoke");
+    });
+
+    it("refuses an empty or padded label", async () => {
+      await expect(label("Window", "")).rejects.toThrow();
+      await expect(label("Window", " Jungle")).rejects.toThrow();
+      await expect(label("Window", "x".repeat(49))).rejects.toThrow();
+    });
   });
 });

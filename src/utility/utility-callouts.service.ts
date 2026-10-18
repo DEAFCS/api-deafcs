@@ -25,6 +25,8 @@ export type CalloutPoint = {
 type CalloutRow = {
   name: string;
   boxes: CalloutBox[];
+  // DEAFCS: an administrator's display name (public.map_callout_labels).
+  label?: string | null;
 };
 
 @Injectable()
@@ -117,9 +119,11 @@ export class UtilityCalloutsService {
     }
 
     const rows = await this.postgres.query<Array<CalloutRow>>(
-      `SELECT name, boxes
-         FROM public.map_callouts
-        WHERE map_name = $1`,
+      `SELECT c.name, c.boxes, l.label
+         FROM public.map_callouts c
+         LEFT JOIN public.map_callout_labels l
+           ON l.map_name = c.map_name AND l.name = c.name
+        WHERE c.map_name = $1`,
       [map],
     );
 
@@ -440,6 +444,21 @@ export class UtilityCalloutsService {
   }
 
   /**
+   * DEAFCS: what a callout is called on screen. An administrator's label wins;
+   * otherwise the original name, humanised as before.
+   */
+  public static display(
+    name: string | null | undefined,
+    callouts: ReadonlyArray<CalloutRow>,
+  ): string {
+    if (!name) {
+      return "";
+    }
+    const label = callouts.find((callout) => callout.name === name)?.label;
+    return label?.trim() || UtilityCalloutsService.humanize(name);
+  }
+
+  /**
    * The name a throw would be given if nobody typed one. Empty when the map has
    * nothing to say about either end, so callers keep their own fallback rather
    * than being handed a name that says nothing.
@@ -455,11 +474,13 @@ export class UtilityCalloutsService {
       return "";
     }
 
-    const from = UtilityCalloutsService.humanize(
+    const from = UtilityCalloutsService.display(
       UtilityCalloutsService.calloutAt(origin, callouts),
+      callouts,
     );
-    const to = UtilityCalloutsService.humanize(
+    const to = UtilityCalloutsService.display(
       UtilityCalloutsService.calloutAt(landing, callouts),
+      callouts,
     );
     const type = UtilityCalloutsService.TYPE_LABELS[utilityType] ?? utilityType;
 

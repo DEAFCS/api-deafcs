@@ -1,0 +1,39 @@
+table:
+  name: map_callout_labels
+  schema: public
+insert_permissions:
+  - role: administrator
+    permission:
+      check: {}
+      set:
+        updated_by: x-hasura-user-id
+      columns:
+        - map_name
+        - name
+        - label
+    comment: Administrators rename callouts; the original name is the key.
+select_permissions:
+  - role: guest
+    permission:
+      columns:
+        - map_name
+        - name
+        - label
+        - updated_at
+      filter: {}
+    comment: ""
+update_permissions:
+  - role: administrator
+    permission:
+      columns:
+        - label
+      filter: {}
+      check: {}
+      set:
+        updated_by: x-hasura-user-id
+    comment: Needed for the upsert; only the label changes.
+delete_permissions:
+  - role: administrator
+    permission:
+      filter: {}
+    comment: Removing a label goes back to the original name.

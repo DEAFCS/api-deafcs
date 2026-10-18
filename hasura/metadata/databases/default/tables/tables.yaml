@@ -97,6 +97,7 @@
 - "!include public_lobbies.yaml"
 - "!include public_lobby_camera_tokens.yaml"
 - "!include public_lobby_players.yaml"
+- "!include public_map_callout_labels.yaml"
 - "!include public_map_callouts.yaml"
 - "!include public_map_pools.yaml"
 - "!include public_maps.yaml"

@@ -35,7 +35,9 @@ describe("map callouts and demo versions through Hasura", () => {
         "content-type": "application/json",
         "x-hasura-admin-secret": adminSecret,
         ...(role ? { "x-hasura-role": role } : {}),
-        ...(role === "user" ? { "x-hasura-user-id": "76561199965000001" } : {}),
+        ...(role && role !== "guest"
+          ? { "x-hasura-user-id": "76561199965000001" }
+          : {}),
       },
       body: JSON.stringify({ query, variables }),
     });
@@ -49,6 +51,9 @@ describe("map callouts and demo versions through Hasura", () => {
          ('de_anubis', 'Mid', '[{"min":[0,0,0],"max":[10,10,10]}]', 'cdn'),
          ('de_anubis', 'A Site', '[{"min":[20,20,0],"max":[30,30,10]}]', 'cdn'),
          ('de_mirage', 'Window', '[{"min":[0,0,0],"max":[5,5,5]}]', 'cdn')`,
+    );
+    await db.postgres.query(
+      "INSERT INTO players (steam_id, name) VALUES (76561199965000001, 'Staff')",
     );
 
     const c = db.container!;
@@ -120,6 +125,75 @@ describe("map callouts and demo versions through Hasura", () => {
       expect(result.errors?.[0]?.message).toMatch(/not found in type/);
     },
   );
+
+  // DEAFCS: custom callout labels. Everyone reads them with the callouts;
+  // only an administrator writes them. Moderators and organizers keep exactly
+  // what they had, which is no write access here.
+  const upsertLabel = `mutation ($label: String!) {
+    insert_map_callout_labels_one(
+      object: {map_name: "de_anubis", name: "Mid", label: $label}
+      on_conflict: {constraint: map_callout_labels_pkey, update_columns: [label]}
+    ) { name label }
+  }`;
+
+  it.each(["guest", "user", "verified_user", "streamer", "moderator", "match_organizer", "tournament_organizer"])(
+    "gives a %s no way to write a callout label",
+    async (role) => {
+      const result = await gql(upsertLabel, role, { label: "Middle" });
+      expect(result.errors?.[0]?.message).toMatch(/not found in type/);
+      const removed = await gql(
+        `mutation { delete_map_callout_labels(where: {}) { affected_rows } }`,
+        role,
+      );
+      expect(removed.errors?.[0]?.message).toMatch(/not found in type/);
+    },
+  );
+
+  it("lets an administrator set, change and clear a label", async () => {
+    let result = await gql(upsertLabel, "administrator", { label: "Middle" });
+    expect(result.errors).toBeUndefined();
+    result = await gql(upsertLabel, "administrator", { label: "Courtyard" });
+    expect(result.data.insert_map_callout_labels_one).toEqual({
+      name: "Mid",
+      label: "Courtyard",
+    });
+
+    const [row] = await db.postgres.query<Array<{ updated_by: string }>>(
+      "SELECT updated_by::text FROM map_callout_labels WHERE map_name = 'de_anubis' AND name = 'Mid'",
+    );
+    expect(row.updated_by).toBe("76561199965000001");
+
+    const read = await gql(
+      `query ($mapName: String!) {
+        map_callouts(where: {map_name: {_eq: $mapName}}, order_by: [{name: asc}]) {
+          name
+          custom_label { label }
+        }
+      }`,
+      "guest",
+      { mapName: "de_anubis" },
+    );
+    expect(read.errors).toBeUndefined();
+    expect(read.data.map_callouts).toEqual([
+      { name: "A Site", custom_label: null },
+      { name: "Mid", custom_label: { label: "Courtyard" } },
+    ]);
+
+    const cleared = await gql(
+      `mutation { delete_map_callout_labels_by_pk(map_name: "de_anubis", name: "Mid") { name } }`,
+      "administrator",
+    );
+    expect(cleared.errors).toBeUndefined();
+    const [{ count }] = await db.postgres.query<Array<{ count: string }>>(
+      "SELECT count(*)::text AS count FROM map_callout_labels",
+    );
+    expect(count).toBe("0");
+    // The callout itself is never touched.
+    const [mid] = await db.postgres.query<Array<{ name: string }>>(
+      "SELECT name FROM map_callouts WHERE map_name = 'de_anubis' AND name = 'Mid'",
+    );
+    expect(mid.name).toBe("Mid");
+  });
 
   it.each(["guest", "user"])(
     "shows a %s the demo's parser and playback versions",
