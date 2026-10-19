@@ -13,9 +13,21 @@ export class StopOnDemandServer extends WorkerHost {
   async process(
     job: Job<{
       matchId: string;
+      jobName?: string;
+      jobUid?: string;
     }>,
   ): Promise<void> {
-    const { matchId } = job.data;
-    await this.matchAssistant.stopOnDemandServer(matchId);
+    const { matchId, jobName, jobUid } = job.data;
+
+    if (jobUid) {
+      await this.matchAssistant.removeUnstoppedOnDemandServer(
+        matchId,
+        jobUid,
+        jobName,
+      );
+      return;
+    }
+
+    await this.matchAssistant.stopEndedMatchServer(matchId);
   }
 }

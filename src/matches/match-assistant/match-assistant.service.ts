@@ -6,6 +6,8 @@ import {
   CoreV1Api,
   KubeConfig,
   Exec,
+  V1Job,
+  V1Pod,
 } from "@kubernetes/client-node";
 import { RconService } from "../../rcon/rcon.service";
 import { User } from "../../auth/types/User";
@@ -69,6 +71,7 @@ export class MatchAssistantService {
     "practice",
   ];
   public static readonly ON_DEMAND_SERVER_BOOT_CHECK_DELAY_MS = 15 * 1000;
+  public static readonly ON_DEMAND_SERVER_STOP_CHECK_DELAY_MS = 2 * 60 * 1000;
   private static readonly INITIAL_BOOT_STATUS_DETAIL =
     "Waiting for Kubernetes to create the match server pod.";
 
@@ -83,6 +86,8 @@ export class MatchAssistantService {
     private readonly pluginRuntimeService: PluginRuntimeService,
     @InjectQueue(MatchQueues.MatchServers) private queue: Queue,
     private readonly postgres: PostgresService,
+    @InjectQueue(MatchQueues.ScheduledMatches)
+    private scheduledMatchesQueue: Queue,
   ) {
     this.appConfig = this.config.get<AppConfig>("app");
     this.gameServerConfig = this.config.get<GameServersConfig>("gameServers");
@@ -1606,6 +1611,11 @@ export class MatchAssistantService {
       // A deleted match no longer says whether it ran as u- or m-, so every
       // candidate name is stopped, not just the first.
       for (const jobName of await this.getMatchServerJobIds(matchId)) {
+        if (!remove) {
+          await this.signalOnDemandServerStop(matchId, jobName);
+          continue;
+        }
+
         const podList = await core.listNamespacedPod({
           namespace: this.namespace,
           labelSelector: `job-name=${jobName}`,
@@ -1614,25 +1624,6 @@ export class MatchAssistantService {
         for (const pod of podList.items) {
           this.logger.verbose(`[${matchId}] remove pod`);
 
-          if (!remove) {
-            try {
-              await new Exec(kc).exec(
-                this.namespace,
-                pod.metadata!.name!,
-                pod.spec!.containers?.at(0)?.name,
-                ["kill", "-SIGUSR1", "1"],
-                process.stdout,
-                process.stderr,
-                process.stdin,
-                false,
-              );
-            } catch (error) {
-              this.logger.warn(
-                `[${matchId}] graceful shutdown signal failed: ${error?.message || "exec error"}`,
-              );
-            }
-            continue;
-          }
           await core
             .deleteNamespacedPod({
               name: pod.metadata!.name!,
@@ -1644,10 +1635,6 @@ export class MatchAssistantService {
                 throw error;
               }
             });
-        }
-
-        if (!remove) {
-          continue;
         }
 
         this.logger.verbose(`[${matchId}] remove job`);
@@ -1717,6 +1704,320 @@ export class MatchAssistantService {
     });
 
     await this.setServerError(matchId, null);
+  }
+
+  // The queued stop can run after a restart, when the Job under this name is the new server's.
+  public async stopEndedMatchServer(matchId: string) {
+    if (!(await this.hasMatchEnded(matchId))) {
+      this.logger.log(
+        `[${matchId}] match was started again, leaving its server running`,
+      );
+      return;
+    }
+
+    await this.stopOnDemandServer(matchId);
+  }
+
+  public async hasMatchEnded(matchId: string): Promise<boolean> {
+    const { matches_by_pk } = await this.hasura.query({
+      matches_by_pk: {
+        __args: {
+          id: matchId,
+        },
+        status: true,
+      },
+    });
+
+    return (
+      !matches_by_pk ||
+      MatchAssistantService.TERMINAL_MATCH_STATUSES.includes(
+        matches_by_pk.status,
+      )
+    );
+  }
+
+  // A SIGUSR1 sent before setup.sh hands PID 1 to server.sh is silently ignored.
+  public async removeUnstoppedOnDemandServer(
+    matchId: string,
+    jobUid: string,
+    jobName = MatchAssistantService.GetMatchServerJobId(matchId),
+  ) {
+    const kc = new KubeConfig();
+    kc.loadFromDefault();
+    const batch = kc.makeApiClient(BatchV1Api);
+
+    const job = await this.readOnDemandServerJob(batch, jobName);
+
+    if (
+      !job ||
+      job.metadata?.uid !== jobUid ||
+      MatchAssistantService.isJobFinished(job)
+    ) {
+      return;
+    }
+
+    const { matches, servers } = await this.getOnDemandServerJobMatches([
+      matchId,
+    ]);
+
+    if (MatchAssistantService.holdsOnDemandServer(matches.at(0), servers)) {
+      return;
+    }
+
+    this.logger.warn(
+      `[${matchId}] on demand server did not stop after it was signalled, removing it`,
+    );
+
+    await this.removeOnDemandServerJob(matchId, jobName, { uid: jobUid });
+  }
+
+  private async getOnDemandServerJobMatches(matchIds: Array<string>) {
+    const { matches } = await this.hasura.query({
+      matches: {
+        __args: {
+          where: {
+            id: {
+              _in: matchIds,
+            },
+          },
+        },
+        id: true,
+        status: true,
+        server_id: true,
+      },
+    });
+
+    const { servers } = await this.hasura.query({
+      servers: {
+        __args: {
+          where: {
+            reserved_by_match_id: {
+              _in: matchIds,
+            },
+            is_dedicated: {
+              _eq: false,
+            },
+          },
+        },
+        id: true,
+        reserved_by_match_id: true,
+      },
+    });
+
+    return { matches, servers };
+  }
+
+  private static holdsOnDemandServer(
+    match: { id: string; status: e_match_status_enum; server_id?: string },
+    servers: Array<{ id: string; reserved_by_match_id?: string }>,
+  ) {
+    return (
+      !!match?.server_id &&
+      !MatchAssistantService.TERMINAL_MATCH_STATUSES.includes(match.status) &&
+      servers.some(
+        (server) =>
+          server.id === match.server_id &&
+          server.reserved_by_match_id === match.id,
+      )
+    );
+  }
+
+  private static isJobFinished(job: V1Job) {
+    return (job.status?.conditions ?? []).some(
+      (condition) =>
+        condition.status === "True" &&
+        ["Complete", "Failed", "SuccessCriteriaMet", "FailureTarget"].includes(
+          condition.type,
+        ),
+    );
+  }
+
+  private static isGameServerRunning(pod: V1Pod) {
+    if (pod.status?.phase !== "Running" || pod.metadata?.deletionTimestamp) {
+      return false;
+    }
+
+    const container = pod.spec?.containers?.at(0)?.name;
+
+    return (pod.status.containerStatuses ?? []).some(
+      (status) => status.name === container && !!status.state?.running,
+    );
+  }
+
+  private static isNotFound(error: { code?: number | string }) {
+    return error?.code?.toString() === "404";
+  }
+
+  private static isConflict(error: { code?: number | string }) {
+    return error?.code?.toString() === "409";
+  }
+
+  private static isOwnedBy(pod: V1Pod, jobUid?: string) {
+    return (
+      !jobUid ||
+      (pod.metadata?.ownerReferences ?? []).some(
+        (owner) => owner.uid === jobUid,
+      )
+    );
+  }
+
+  private async readOnDemandServerJob(
+    batch: BatchV1Api,
+    jobName: string,
+  ): Promise<V1Job | null> {
+    try {
+      return await batch.readNamespacedJob({
+        name: jobName,
+        namespace: this.namespace,
+      });
+    } catch (error) {
+      if (MatchAssistantService.isNotFound(error)) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private async signalOnDemandServerStop(matchId: string, jobName: string) {
+    const kc = new KubeConfig();
+    kc.loadFromDefault();
+
+    const core = kc.makeApiClient(CoreV1Api);
+    const batch = kc.makeApiClient(BatchV1Api);
+
+    const job = await this.readOnDemandServerJob(batch, jobName);
+
+    if (!job || MatchAssistantService.isJobFinished(job)) {
+      return;
+    }
+
+    const { items: pods } = await core.listNamespacedPod({
+      namespace: this.namespace,
+      labelSelector: `job-name=${jobName}`,
+    });
+
+    const running = pods.filter((pod) =>
+      MatchAssistantService.isGameServerRunning(pod),
+    );
+
+    if (running.length === 0) {
+      if (pods.some((pod) => pod.status?.phase === "Succeeded")) {
+        return;
+      }
+
+      // Nothing to signal: a pending pod boots anyway and a failed one is replaced (backoffLimit).
+      await this.removeOnDemandServerJob(matchId, jobName, {
+        uid: job.metadata?.uid,
+      });
+      return;
+    }
+
+    for (const pod of running) {
+      this.logger.verbose(`[${matchId}] signal pod to stop`);
+
+      try {
+        await new Exec(kc).exec(
+          this.namespace,
+          pod.metadata!.name!,
+          pod.spec!.containers?.at(0)?.name,
+          ["kill", "-SIGUSR1", "1"],
+          process.stdout,
+          process.stderr,
+          process.stdin,
+          false,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `[${matchId}] graceful shutdown signal failed: ${error?.message || "exec error"}`,
+        );
+      }
+    }
+
+    await this.scheduledMatchesQueue.add(
+      MatchJobs.StopOnDemandServer,
+      {
+        matchId,
+        jobName,
+        jobUid: job.metadata?.uid,
+      },
+      {
+        delay: MatchAssistantService.ON_DEMAND_SERVER_STOP_CHECK_DELAY_MS,
+        attempts: 3,
+        backoff: {
+          type: "exponential",
+          delay: 10 * 1000,
+        },
+        removeOnFail: true,
+        removeOnComplete: true,
+        jobId: `match.${matchId}.server-stop-check.${job.metadata?.uid}`,
+      },
+    );
+  }
+
+  // A uid pins the Job and its pods (409 = already replaced): a reassignment reuses the name.
+  private async removeOnDemandServerJob(
+    matchId: string,
+    jobName: string,
+    options: { uid?: string } = {},
+  ): Promise<boolean> {
+    const kc = new KubeConfig();
+    kc.loadFromDefault();
+
+    const core = kc.makeApiClient(CoreV1Api);
+    const batch = kc.makeApiClient(BatchV1Api);
+
+    this.logger.verbose(`[${matchId}] remove job`);
+
+    let removed = true;
+
+    // Job before pods, or the Job controller replaces the deleted pods.
+    // The API server ignores query params once a body is sent, so options go in the body.
+    await batch
+      .deleteNamespacedJob({
+        name: jobName,
+        namespace: this.namespace,
+        body: {
+          propagationPolicy: "Background",
+          gracePeriodSeconds: 0,
+          ...(options.uid ? { preconditions: { uid: options.uid } } : {}),
+        },
+      })
+      .catch((error) => {
+        if (
+          !MatchAssistantService.isNotFound(error) &&
+          !(options.uid && MatchAssistantService.isConflict(error))
+        ) {
+          throw error;
+        }
+        removed = false;
+      });
+
+    const { items: pods } = await core.listNamespacedPod({
+      namespace: this.namespace,
+      labelSelector: `job-name=${jobName}`,
+    });
+
+    for (const pod of pods) {
+      if (!MatchAssistantService.isOwnedBy(pod, options.uid)) {
+        continue;
+      }
+
+      this.logger.verbose(`[${matchId}] remove pod`);
+
+      await core
+        .deleteNamespacedPod({
+          name: pod.metadata!.name!,
+          namespace: this.namespace,
+          gracePeriodSeconds: 0,
+        })
+        .catch((error) => {
+          if (!MatchAssistantService.isNotFound(error)) {
+            throw error;
+          }
+        });
+    }
+
+    return removed;
   }
 
   // A practice server booted before practice moved to u- still runs as m-, and
