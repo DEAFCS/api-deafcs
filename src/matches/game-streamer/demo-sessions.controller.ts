@@ -84,7 +84,12 @@ export class DemoSessionsController {
   }
 
   @Post("snapshot")
-  @UseInterceptors(FileInterceptor("file"))
+  // Multer stops reading at the limit instead of holding the whole body.
+  @UseInterceptors(
+    FileInterceptor("file", {
+      limits: { fileSize: SNAPSHOT_MAX_BYTES, files: 1, fields: 0 },
+    }),
+  )
   public async putSnapshot(
     @Param("sessionId") sessionId: string,
     @UploadedFile(
@@ -95,6 +100,21 @@ export class DemoSessionsController {
     file: Express.Multer.File,
     @Res() response: Response,
   ) {
+    let known = false;
+    try {
+      known = await this.gameStreamer.isDemoSession(sessionId);
+    } catch (error) {
+      this.logger.warn(
+        `[demo ${sessionId}] snapshot POST: session lookup failed: ${(error as Error)?.message ?? error}`,
+      );
+    }
+    if (!known) {
+      this.logger.warn(
+        `[demo ${sessionId}] snapshot POST rejected: unknown session`,
+      );
+      return response.status(404).json({ error: "unknown session" });
+    }
+
     try {
       await this.gameStreamer.storeSnapshot("demo", sessionId, file.buffer);
     } catch (error) {
