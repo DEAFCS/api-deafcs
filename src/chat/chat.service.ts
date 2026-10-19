@@ -473,6 +473,8 @@ export class ChatService {
         return;
     }
 
+    await this.trackStaffViewer(type, id, user);
+
     const userData = await this.addUserToLobby(type, id, user, false);
 
     const [added, count] = await this.addSession(
@@ -985,6 +987,99 @@ export class ChatService {
   // verified users and ordinary users stay out.
   public static readonly ORGANIZER_CHAT_MIN_ROLE: e_player_roles_enum =
     "moderator";
+
+  // Rooms staff may read because of their role alone (Match Chat, a finished
+  // match's Team Chat, any Draft room). Unlike Team, Tournament and Organizer
+  // chat they are only checked when joining, so whoever joins one while
+  // holding this role is remembered and re-read on every delivery.
+  private static readonly STAFF_VIEWER_MIN_ROLE: Partial<
+    Record<ChatLobbyType, e_player_roles_enum>
+  > = {
+    [ChatLobbyType.Match]: "moderator",
+    [ChatLobbyType.MatchTeam]: "moderator",
+    [ChatLobbyType.Draft]: "match_organizer",
+  };
+
+  private staffViewersKey(type: ChatLobbyType, id: string) {
+    return `chat:staff-viewers:${type}:${id}`;
+  }
+
+  private async trackStaffViewer(type: ChatLobbyType, id: string, user: User) {
+    const minRole = ChatService.STAFF_VIEWER_MIN_ROLE[type];
+    if (!minRole || !isRoleAbove(user.role, minRole)) {
+      return;
+    }
+    try {
+      const key = this.staffViewersKey(type, id);
+      await this.redis.sadd(key, String(user.steam_id));
+      await this.redis.expire(key, this.expiresIn);
+    } catch (error) {
+      this.logger.warn(
+        `[chat] unable to remember staff viewer of ${type}:${id}: ${(error as Error)?.message ?? error}`,
+      );
+    }
+  }
+
+  // The remembered staff viewers among `steamIds` who no longer hold the role
+  // and have no other way into the room (lineup, coach, organizer, Captain
+  // Pick, draft player). Players who never joined as staff are not read at
+  // all, and a failed lookup drops nobody.
+  private async staffViewersWhoLostAccess(
+    type: ChatLobbyType,
+    id: string,
+    steamIds: Array<string>,
+  ): Promise<Set<string>> {
+    const lost = new Set<string>();
+    const minRole = ChatService.STAFF_VIEWER_MIN_ROLE[type];
+    if (!minRole || steamIds.length === 0) {
+      return lost;
+    }
+
+    try {
+      const key = this.staffViewersKey(type, id);
+      const tracked = (await this.redis.smembers(key)).filter((steamId) =>
+        steamIds.includes(steamId),
+      );
+      if (tracked.length === 0) {
+        return lost;
+      }
+
+      const { players } = await this.hasuraService.query({
+        players: {
+          __args: { where: { steam_id: { _in: tracked } } },
+          steam_id: true,
+          role: true,
+        },
+      });
+      const roles = new Map(
+        (players ?? []).map((player) => [String(player.steam_id), player.role]),
+      );
+
+      for (const steamId of tracked) {
+        const role = roles.get(steamId);
+        if (role && isRoleAbove(role, minRole)) {
+          continue;
+        }
+        await this.redis.srem(key, steamId);
+        if (
+          role &&
+          (await this.hasLobbyPermission(type, id, {
+            steam_id: steamId,
+            role,
+          } as User))
+        ) {
+          continue;
+        }
+        lost.add(steamId);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `[chat] unable to re-check staff viewers of ${type}:${id}: ${(error as Error)?.message ?? error}`,
+      );
+    }
+
+    return lost;
+  }
 
   // Team Chat: one private room per team, id = the team's uuid. The only
   // authority is the team's current roster (team_roster covers admins, the
@@ -4023,6 +4118,12 @@ export class ChatService {
       );
     }
 
+    const staffLost = await this.staffViewersWhoLostAccess(
+      type,
+      id,
+      users.map(({ steamId }) => String(steamId)),
+    );
+
     for (const { steamId } of users) {
       if (
         type === ChatLobbyType.Direct &&
@@ -4039,7 +4140,8 @@ export class ChatService {
           !(await this.canAccessTournamentChat(id, String(steamId)))) ||
         (type === ChatLobbyType.Team &&
           !(await this.canAccessTeamChat(id, String(steamId)))) ||
-        (organizerAllowed && !organizerAllowed.has(String(steamId)))
+        (organizerAllowed && !organizerAllowed.has(String(steamId))) ||
+        staffLost.has(String(steamId))
       ) {
         await this.removeUserData(type, id, steamId);
         await this.redis.del(this.sessionsKey(type, id, steamId));
