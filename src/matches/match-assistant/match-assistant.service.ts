@@ -1596,10 +1596,6 @@ export class MatchAssistantService {
   public async stopOnDemandServer(matchId: string, remove = false) {
     this.logger.log(`[${matchId}] stopping match servers`);
 
-    // u- for a practice match, m- for every other (DEAFCS never ran practice
-    // under m-, so upstream's legacy m- fallback has nothing to find here).
-    const [jobName] = await this.getMatchServerJobIds(matchId);
-
     try {
       const kc = new KubeConfig();
       kc.loadFromDefault();
@@ -1607,37 +1603,60 @@ export class MatchAssistantService {
       const core = kc.makeApiClient(CoreV1Api);
       const batch = kc.makeApiClient(BatchV1Api);
 
-      const podList = await core.listNamespacedPod({
-        namespace: this.namespace,
-        labelSelector: `job-name=${jobName}`,
-      });
+      // A deleted match no longer says whether it ran as u- or m-, so every
+      // candidate name is stopped, not just the first.
+      for (const jobName of await this.getMatchServerJobIds(matchId)) {
+        const podList = await core.listNamespacedPod({
+          namespace: this.namespace,
+          labelSelector: `job-name=${jobName}`,
+        });
 
-      for (const pod of podList.items) {
-        this.logger.verbose(`[${matchId}] remove pod`);
+        for (const pod of podList.items) {
+          this.logger.verbose(`[${matchId}] remove pod`);
+
+          if (!remove) {
+            try {
+              await new Exec(kc).exec(
+                this.namespace,
+                pod.metadata!.name!,
+                pod.spec!.containers?.at(0)?.name,
+                ["kill", "-SIGUSR1", "1"],
+                process.stdout,
+                process.stderr,
+                process.stdin,
+                false,
+              );
+            } catch (error) {
+              this.logger.warn(
+                `[${matchId}] graceful shutdown signal failed: ${error?.message || "exec error"}`,
+              );
+            }
+            continue;
+          }
+          await core
+            .deleteNamespacedPod({
+              name: pod.metadata!.name!,
+              namespace: this.namespace,
+              gracePeriodSeconds: 0,
+            })
+            .catch((error) => {
+              if (error.code.toString() !== "404") {
+                throw error;
+              }
+            });
+        }
 
         if (!remove) {
-          try {
-            await new Exec(kc).exec(
-              this.namespace,
-              pod.metadata!.name!,
-              pod.spec!.containers?.at(0)?.name,
-              ["kill", "-SIGUSR1", "1"],
-              process.stdout,
-              process.stderr,
-              process.stdin,
-              false,
-            );
-          } catch (error) {
-            this.logger.warn(
-              `[${matchId}] graceful shutdown signal failed: ${error?.message || "exec error"}`,
-            );
-          }
           continue;
         }
-        await core
-          .deleteNamespacedPod({
-            name: pod.metadata!.name!,
+
+        this.logger.verbose(`[${matchId}] remove job`);
+
+        await batch
+          .deleteNamespacedJob({
+            name: jobName,
             namespace: this.namespace,
+            propagationPolicy: "Background",
             gracePeriodSeconds: 0,
           })
           .catch((error) => {
@@ -1645,44 +1664,29 @@ export class MatchAssistantService {
               throw error;
             }
           });
+
+        // Wait for the job to be fully gone from the k8s API before returning.
+        // Without this, a subsequent createNamespacedJob with the same name races
+        // against delete propagation and gets HTTP 409 AlreadyExists.
+        const deadline = Date.now() + 15_000;
+        while (Date.now() < deadline) {
+          try {
+            await batch.readNamespacedJob({
+              name: jobName,
+              namespace: this.namespace,
+            });
+          } catch (error) {
+            if (error.code?.toString() === "404") {
+              break;
+            }
+            throw error;
+          }
+          await new Promise((r) => setTimeout(r, 200));
+        }
       }
 
       if (!remove) {
         return;
-      }
-
-      this.logger.verbose(`[${matchId}] remove job`);
-
-      await batch
-        .deleteNamespacedJob({
-          name: jobName,
-          namespace: this.namespace,
-          propagationPolicy: "Background",
-          gracePeriodSeconds: 0,
-        })
-        .catch((error) => {
-          if (error.code.toString() !== "404") {
-            throw error;
-          }
-        });
-
-      // Wait for the job to be fully gone from the k8s API before returning.
-      // Without this, a subsequent createNamespacedJob with the same name races
-      // against delete propagation and gets HTTP 409 AlreadyExists.
-      const deadline = Date.now() + 15_000;
-      while (Date.now() < deadline) {
-        try {
-          await batch.readNamespacedJob({
-            name: jobName,
-            namespace: this.namespace,
-          });
-        } catch (error) {
-          if (error.code?.toString() === "404") {
-            break;
-          }
-          throw error;
-        }
-        await new Promise((r) => setTimeout(r, 200));
       }
 
       this.logger.verbose(`[${matchId}] stopped on demand server`);
