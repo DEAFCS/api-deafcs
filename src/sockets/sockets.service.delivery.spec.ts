@@ -22,6 +22,7 @@ function build() {
     {} as any,
     {} as any,
     {} as any,
+    {} as any,
   );
 
   const connect = (steamId: string, id: string) => {

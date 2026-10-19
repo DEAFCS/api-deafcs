@@ -80,6 +80,12 @@ export class SystemGateway {
     const stream = new PassThrough();
 
     stream.on("data", (chunk) => {
+      // DEAFCS: the socket's role is refreshed on every ping, so a stream
+      // started before a demotion stops at its next chunk.
+      if (!isRoleAbove(client.user?.role, "administrator")) {
+        stream.destroy();
+        return;
+      }
       client.send(
         JSON.stringify({
           event: `logs:${service}`,
