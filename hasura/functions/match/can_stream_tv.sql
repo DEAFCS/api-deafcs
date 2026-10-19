@@ -28,6 +28,7 @@ BEGIN
     END IF;
 
     -- Defer to the existing tv_delay/started_at gating.
-    RETURN get_match_tv_connection_string(match, hasura_session) IS NOT NULL;
+    -- "pending" means the delay is not up yet.
+    RETURN COALESCE(get_match_tv_connection_string(match, hasura_session), 'pending') <> 'pending';
 END;
 $$;
