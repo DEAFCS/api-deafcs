@@ -22,4 +22,7 @@ export type GameServersConfig = {
   gameStreamerImage: string;
   utilityRenderStreamerImage: string | null;
   utilityRenderServerImage: string | null;
+  // DEAFCS: the orphaned match-server sweep only reports what it would remove
+  // until MATCH_SERVER_REAPER=enforce.
+  matchServerReaperEnforce: boolean;
 };

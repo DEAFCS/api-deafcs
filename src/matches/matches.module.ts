@@ -64,6 +64,7 @@ import { BackfillSeasonElo } from "./jobs/BackfillSeasonElo";
 import { SeasonEloBackfillService } from "./season-elo-backfill.service";
 import { PostgresService } from "src/postgres/postgres.service";
 import { StopOnDemandServer } from "./jobs/StopOnDemandServer";
+import { ReconcileOnDemandServerJobs } from "./jobs/ReconcileOnDemandServerJobs";
 import { MatchRelayController } from "./match-relay/match-relay.controller";
 import { MatchRelayService } from "./match-relay/match-relay.service";
 import { MatchRelayAuthMiddleware } from "./match-relay/match-relay-auth-middleware";
@@ -198,6 +199,7 @@ import { TournamentCallService } from "./camera/tournament-call.service";
     CheckForScheduledMatches,
     RemoveCancelledMatches,
     StopOnDemandServer,
+    ReconcileOnDemandServerJobs,
     CancelInvalidTournaments,
     CleanAbandonedMatches,
     ReapIdleDemoSessions,
@@ -376,6 +378,16 @@ export class MatchesModule implements NestModule {
 
     void scheduleMatchQueue.add(
       ReapIdleDemoSessions.name,
+      {},
+      {
+        repeat: {
+          pattern: "* * * * *",
+        },
+      },
+    );
+
+    void scheduleMatchQueue.add(
+      ReconcileOnDemandServerJobs.name,
       {},
       {
         repeat: {

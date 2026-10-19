@@ -23,6 +23,7 @@ import {
   e_match_status_enum,
   e_match_types_enum,
   e_timeout_settings_enum,
+  servers_bool_exp,
 } from "../../../generated";
 import { CacheService } from "../../cache/cache.service";
 import { EncryptionService } from "../../encryption/encryption.service";
@@ -38,6 +39,9 @@ export class MatchAssistantService {
   private gameServerConfig: GameServersConfig;
 
   private readonly namespace: string;
+  // Jobs created before the match labels only match by name, so the sweep lists everything until none is left.
+  // DEAFCS does not label its server Jobs yet, so it always lists every Job in the namespace.
+  private unlabelledServerJobsRemain = true;
   private static readonly REBOOTABLE_ON_DEMAND_STATUSES: readonly e_match_status_enum[] =
     [
       "Scheduled",
@@ -72,6 +76,17 @@ export class MatchAssistantService {
   ];
   public static readonly ON_DEMAND_SERVER_BOOT_CHECK_DELAY_MS = 15 * 1000;
   public static readonly ON_DEMAND_SERVER_STOP_CHECK_DELAY_MS = 2 * 60 * 1000;
+  private static readonly ORPHANED_JOB_CREATE_GRACE_MS = 5 * 60 * 1000;
+  private static readonly ORPHANED_JOB_UNASSIGNED_GRACE_MS = 5 * 60 * 1000;
+  private static readonly ORPHANED_JOB_ENDED_GRACE_MS = 10 * 60 * 1000;
+  // DEAFCS: a bad read must not empty the cluster in one sweep; the rest wait a minute.
+  private static readonly ORPHANED_JOB_MAX_REMOVALS_PER_SWEEP = 3;
+  private static readonly MATCH_SERVER_JOB_SELECTOR =
+    "app=game-server,role=match";
+  private static readonly MATCH_SERVER_JOB_NAME =
+    /^m-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+  private static readonly UUID =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   private static readonly INITIAL_BOOT_STATUS_DETAIL =
     "Waiting for Kubernetes to create the match server pod.";
 
@@ -1771,6 +1786,275 @@ export class MatchAssistantService {
     await this.removeOnDemandServerJob(matchId, jobName, { uid: jobUid });
   }
 
+  // Upstream 5Stack's match-server reaper (5stackgg/api 085511d4), with DEAFCS
+  // guards: only m-<uuid> Jobs (Pracc u- Jobs are never looked at), a match
+  // that is not over keeps its server even without a reservation, a deleted
+  // match waits out a grace period, the Job and match are read again right
+  // before a removal, at most a few removals per sweep, and nothing is removed
+  // unless MATCH_SERVER_REAPER=enforce (otherwise it only reports).
+  public async reconcileOnDemandServerJobs(): Promise<void> {
+    const kc = new KubeConfig();
+    kc.loadFromDefault();
+    const batch = kc.makeApiClient(BatchV1Api);
+
+    let jobs: Array<V1Job>;
+    try {
+      ({ items: jobs } = await batch.listNamespacedJob({
+        namespace: this.namespace,
+        ...(this.unlabelledServerJobsRemain
+          ? {}
+          : { labelSelector: MatchAssistantService.MATCH_SERVER_JOB_SELECTOR }),
+      }));
+    } catch (error) {
+      this.logger.error(
+        `[match-server-reaper] listJobs failed: ${error?.message}`,
+      );
+      return;
+    }
+
+    const now = Date.now();
+    const candidates = new Map<string, V1Job>();
+    let unlabelledServerJobsRemain = false;
+
+    for (const job of jobs) {
+      const matchId = MatchAssistantService.getServerJobMatchId(job);
+
+      if (!matchId || MatchAssistantService.isJobFinished(job)) {
+        continue;
+      }
+
+      if (job.metadata?.labels?.role !== "match") {
+        unlabelledServerJobsRemain = true;
+      }
+
+      const createdAt = new Date(
+        job.metadata?.creationTimestamp ?? now,
+      ).getTime();
+
+      if (
+        now - createdAt <
+        MatchAssistantService.ORPHANED_JOB_CREATE_GRACE_MS
+      ) {
+        continue;
+      }
+
+      candidates.set(matchId, job);
+    }
+
+    this.unlabelledServerJobsRemain = unlabelledServerJobsRemain;
+
+    if (candidates.size === 0) {
+      return;
+    }
+
+    const { matches, servers } = await this.getOnDemandServerJobMatches([
+      ...candidates.keys(),
+    ]);
+
+    const heldKeys: Array<string> = [];
+    let removals = 0;
+
+    for (const [matchId, job] of candidates) {
+      const match = matches.find(({ id }) => id === matchId);
+      const orphanedKey = `match-server-job:orphaned-since:${job.metadata?.uid ?? job.metadata?.name}`;
+
+      if (MatchAssistantService.holdsOnDemandServer(match, servers)) {
+        heldKeys.push(orphanedKey);
+        continue;
+      }
+
+      // DEAFCS: upstream removes these after 5 minutes. A tournament reset
+      // puts a finished match back to WaitingForCheckIn with its server_id and
+      // no reservation, and it can go Live on that same server, so a match
+      // that is not over is never treated as an orphan.
+      if (
+        match &&
+        !MatchAssistantService.TERMINAL_MATCH_STATUSES.includes(match.status)
+      ) {
+        await this.reportOnDemandServerJob(
+          job,
+          "kept",
+          `[${matchId}] keeping on demand server job ${job.metadata?.name}: match is ${match.status} but does not hold its server`,
+        );
+        continue;
+      }
+
+      if (match) {
+        const since =
+          MatchAssistantService.getMatchEndedAt(match) ||
+          (await this.getOrphanedSince(orphanedKey, now));
+        const grace =
+          (match.options?.tv_delay ?? 0) * 1000 +
+          MatchAssistantService.ORPHANED_JOB_ENDED_GRACE_MS;
+
+        if (now - since < grace) {
+          continue;
+        }
+      } else if (
+        // DEAFCS: a deleted match waits like an unassigned one, so a single
+        // read that misses the match never removes its server.
+        now - (await this.getOrphanedSince(orphanedKey, now)) <
+        MatchAssistantService.ORPHANED_JOB_UNASSIGNED_GRACE_MS
+      ) {
+        continue;
+      }
+
+      if (!this.gameServerConfig.matchServerReaperEnforce) {
+        await this.reportOnDemandServerJob(
+          job,
+          "would-remove",
+          `[${matchId}] would remove orphaned on demand server job ${job.metadata?.name} (${match ? `match is ${match.status}` : "match was deleted"}), MATCH_SERVER_REAPER is not enforce`,
+        );
+        continue;
+      }
+
+      if (
+        removals >= MatchAssistantService.ORPHANED_JOB_MAX_REMOVALS_PER_SWEEP
+      ) {
+        this.logger.warn(
+          `[match-server-reaper] removed ${removals} on demand server jobs, leaving the rest for the next sweep`,
+        );
+        break;
+      }
+
+      try {
+        if (!(await this.confirmOrphanedOnDemandServerJob(matchId, job))) {
+          continue;
+        }
+
+        this.logger.warn(
+          `[${matchId}] removing orphaned on demand server job ${job.metadata?.name} (${match ? `match is ${match.status}` : "match was deleted"})`,
+        );
+
+        const removed = await this.removeOnDemandServerJob(
+          matchId,
+          job.metadata.name,
+          { uid: job.metadata?.uid },
+        );
+
+        // Rows were read before the loop; the write-time condition keeps a reassignment's row.
+        if (removed) {
+          removals++;
+
+          for (const server of servers) {
+            if (server.reserved_by_match_id === matchId) {
+              await this.releaseOnDemandServer(
+                matchId,
+                server.id,
+                MatchAssistantService.reservationNotHeld(matchId),
+              );
+            }
+          }
+        }
+
+        await this.cache.forget(orphanedKey);
+      } catch (error) {
+        this.logger.error(
+          `[${matchId}] unable to remove orphaned on demand server: ${error?.message}`,
+        );
+      }
+    }
+
+    await this.cache.forget(...heldKeys);
+  }
+
+  // DEAFCS: the sweep read the Jobs and matches before its grace checks, so
+  // both are read again right before a removal. Anything unexpected keeps the
+  // server and is reported.
+  private async confirmOrphanedOnDemandServerJob(
+    matchId: string,
+    job: V1Job,
+  ): Promise<boolean> {
+    const kc = new KubeConfig();
+    kc.loadFromDefault();
+    const batch = kc.makeApiClient(BatchV1Api);
+
+    const current = await this.readOnDemandServerJob(batch, job.metadata.name);
+
+    if (
+      !current ||
+      current.metadata?.uid !== job.metadata?.uid ||
+      MatchAssistantService.isJobFinished(current)
+    ) {
+      return false;
+    }
+
+    const { matches, servers } = await this.getOnDemandServerJobMatches([
+      matchId,
+    ]);
+    const match = matches.at(0);
+
+    if (
+      match &&
+      !MatchAssistantService.TERMINAL_MATCH_STATUSES.includes(match.status)
+    ) {
+      await this.reportOnDemandServerJob(
+        job,
+        "kept",
+        `[${matchId}] keeping on demand server job ${job.metadata?.name}: match is ${match.status} again`,
+      );
+      return false;
+    }
+
+    // A deleted match's reservations are cleared with it (FK and delete trigger).
+    if (!match && servers.length > 0) {
+      await this.reportOnDemandServerJob(
+        job,
+        "kept",
+        `[${matchId}] keeping on demand server job ${job.metadata?.name}: match is gone but a server is still reserved by it`,
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  // Once per Job and reason a day, so a kept or reported Job does not log every minute.
+  private async reportOnDemandServerJob(
+    job: V1Job,
+    reason: string,
+    message: string,
+  ) {
+    const key = `match-server-job:reported:${reason}:${job.metadata?.uid ?? job.metadata?.name}`;
+
+    if (await this.cache.has(key)) {
+      return;
+    }
+
+    await this.cache.put(key, true, 24 * 60 * 60);
+
+    this.logger.warn(message);
+  }
+
+  private async releaseOnDemandServer(
+    matchId: string,
+    serverId: string,
+    condition: servers_bool_exp,
+  ) {
+    await this.hasura.mutation({
+      update_servers: {
+        __args: {
+          where: {
+            reserved_by_match_id: {
+              _eq: matchId,
+            },
+            id: {
+              _eq: serverId,
+            },
+            ...condition,
+          },
+          _set: {
+            boot_status: null,
+            boot_status_detail: null,
+            connected: false,
+            reserved_by_match_id: null,
+          },
+        },
+        __typename: true,
+      },
+    });
+  }
+
   private async getOnDemandServerJobMatches(matchIds: Array<string>) {
     const { matches } = await this.hasura.query({
       matches: {
@@ -1783,7 +2067,12 @@ export class MatchAssistantService {
         },
         id: true,
         status: true,
+        ended_at: true,
+        cancels_at: true,
         server_id: true,
+        options: {
+          tv_delay: true,
+        },
       },
     });
 
@@ -1820,6 +2109,68 @@ export class MatchAssistantService {
           server.reserved_by_match_id === match.id,
       )
     );
+  }
+
+  // Canceled clears ended_at; tbu_matches stamps cancels_at at cancel time instead.
+  private static getMatchEndedAt(match: {
+    status: e_match_status_enum;
+    ended_at?: string;
+    cancels_at?: string;
+  }): number | null {
+    const endedAt =
+      match.ended_at ?? (match.status === "Canceled" ? match.cancels_at : null);
+
+    return endedAt ? new Date(endedAt).getTime() : null;
+  }
+
+  private async getOrphanedSince(key: string, now: number): Promise<number> {
+    const since = await this.cache.get(key);
+
+    if (typeof since === "number") {
+      return since;
+    }
+
+    await this.cache.put(key, now, 24 * 60 * 60);
+
+    return now;
+  }
+
+  private static reservedByEndedMatch(): servers_bool_exp {
+    return {
+      current_match: {
+        status: {
+          _in: [...MatchAssistantService.TERMINAL_MATCH_STATUSES],
+        },
+      },
+    };
+  }
+
+  // holdsOnDemandServer, negated, for the update to evaluate at write time.
+  private static reservationNotHeld(matchId: string): servers_bool_exp {
+    return {
+      _or: [
+        MatchAssistantService.reservedByEndedMatch(),
+        {
+          _not: {
+            matches: {
+              id: {
+                _eq: matchId,
+              },
+            },
+          },
+        },
+      ],
+    };
+  }
+
+  // DEAFCS: by Job name only. Upstream also trusts the role=match label, which
+  // it puts on practice u- Jobs too; Pracc stays outside this sweep.
+  private static getServerJobMatchId(job: V1Job): string | null {
+    const matchId = MatchAssistantService.MATCH_SERVER_JOB_NAME.exec(
+      job.metadata?.name ?? "",
+    )?.[1];
+
+    return matchId && MatchAssistantService.UUID.test(matchId) ? matchId : null;
   }
 
   private static isJobFinished(job: V1Job) {

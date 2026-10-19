@@ -20,6 +20,7 @@ export default (): {
     utilityRenderStreamerImage:
       process.env.UTILITY_RENDER_STREAMER_IMAGE || null,
     utilityRenderServerImage: process.env.UTILITY_RENDER_SERVER_IMAGE || null,
+    matchServerReaperEnforce: process.env.MATCH_SERVER_REAPER === "enforce",
     namespace: "5stack",
   },
 });
