@@ -6,7 +6,7 @@ import RedisStore from "connect-redis";
 import { getCookieOptions } from "./utilities/getCookieOptions";
 import { NestExpressApplication } from "@nestjs/platform-express";
 import passport from "passport";
-import { WsAdapter } from "@nestjs/platform-ws";
+import { WebSocketAdapter } from "./sockets/web-socket.adapter";
 import { RedisManagerService } from "./redis/redis-manager/redis-manager.service";
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "./configs/types/AppConfig";
@@ -106,7 +106,12 @@ async function bootstrap() {
   app.use(passport.initialize());
   app.use(passport.session());
 
-  app.useWebSocketAdapter(new WsAdapter(app));
+  // The same exact list CORS uses (upstream builds it with isAllowedOrigin,
+  // which also admits the cookie domain's subdomains; DEAFCS does not).
+  const allowOrigin = (origin?: string) =>
+    !!origin && allowedOrigins.includes(origin);
+
+  app.useWebSocketAdapter(new WebSocketAdapter(app, allowOrigin));
 
   await app.startAllMicroservices();
   await app.listen(5585);
