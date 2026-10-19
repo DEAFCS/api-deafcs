@@ -2826,7 +2826,12 @@ export class GameStreamerService {
     if (mode === "tv") {
       if (usePlaycast) {
         return [
-          { name: "PLAYCAST_URL", value: `https://tv.5stack.gg/${matchId}` },
+          // DEAFCS: our own relay (the same one the match page and the game server
+          // use), not upstream's tv.5stack.gg, which has never heard of our matches.
+          {
+            name: "PLAYCAST_URL",
+            value: `${this.appConfig.relayDomain}/${matchId}`,
+          },
           { name: "PLAYCAST_PASSWORD", value: "" },
         ];
       }
