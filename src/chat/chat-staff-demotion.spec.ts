@@ -16,6 +16,8 @@ describe("ChatService staff demotion", () => {
 
   let ROLES: Record<string, string>;
   let status: string;
+  // The Hasura role header cache can still hold the old role for a moment.
+  let staleOrganizer: Set<string>;
   let sets: Map<string, Set<string>>;
   let service: ChatService;
   let hasura: { query: jest.Mock };
@@ -31,6 +33,7 @@ describe("ChatService staff demotion", () => {
       [MATCH_ORGANIZER]: "match_organizer",
     };
     status = "Live";
+    staleOrganizer = new Set();
     sets = new Map();
     hasura = {
       query: jest.fn(async (query: any, steamId: string) => {
@@ -42,9 +45,9 @@ describe("ChatService staff demotion", () => {
               is_coach: false,
               // is_match_organizer.sql: administrators and match organizers
               // organize every match, read with the caller's current role.
-              is_organizer: ["administrator", "match_organizer"].includes(
-                ROLES[id],
-              ),
+              is_organizer:
+                staleOrganizer.has(id) ||
+                ["administrator", "match_organizer"].includes(ROLES[id]),
               status,
             },
           };
@@ -209,6 +212,20 @@ describe("ChatService staff demotion", () => {
     await service.to(ChatLobbyType.Draft, DRAFT, "chat", { message: "hi" });
 
     expect(recipients()).toEqual([]);
+  });
+
+  it("drops a demoted administrator once the stale organizer access clears", async () => {
+    await join(ChatLobbyType.Match, MATCH, [PLAYER, MATCH_ORGANIZER]);
+
+    ROLES[MATCH_ORGANIZER] = "user";
+    staleOrganizer.add(MATCH_ORGANIZER);
+    await service.to(ChatLobbyType.Match, MATCH, "chat", { message: "1" });
+    expect(recipients().sort()).toEqual([MATCH_ORGANIZER, PLAYER].sort());
+
+    redis.publish.mockClear();
+    staleOrganizer.clear();
+    await service.to(ChatLobbyType.Match, MATCH, "chat", { message: "2" });
+    expect(recipients()).toEqual([PLAYER]);
   });
 
   it("delivers to everyone when the roles cannot be read", async () => {

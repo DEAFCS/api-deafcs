@@ -1060,7 +1060,8 @@ export class ChatService {
         if (role && isRoleAbove(role, minRole)) {
           continue;
         }
-        await this.redis.srem(key, steamId);
+        // Still remembered while they keep other access: the computed
+        // is_organizer can trail a role change by a few seconds.
         if (
           role &&
           (await this.hasLobbyPermission(type, id, {
@@ -1070,6 +1071,7 @@ export class ChatService {
         ) {
           continue;
         }
+        await this.redis.srem(key, steamId);
         lost.add(steamId);
       }
     } catch (error) {
