@@ -2423,6 +2423,17 @@ export class UtilityPracticeService {
     if (!isRoleAbove(user.role, minRole)) {
       throw Error("you are not allowed to start a practice session");
     }
+
+    // DEAFCS: practice servers follow the matchmaking role, so a player who is
+    // not verified yet cannot book one either (the website blurs the controls,
+    // this is the check that holds when someone calls the API directly).
+    const matchmakingMinRole = (await this.setting(
+      "public.matchmaking_min_role",
+    )) as e_player_roles_enum | null;
+
+    if (matchmakingMinRole && !isRoleAbove(user.role, matchmakingMinRole)) {
+      throw Error("you must be verified to start a practice session");
+    }
   }
 
   // An explicitly chosen server. Anything that is not a free, connected
