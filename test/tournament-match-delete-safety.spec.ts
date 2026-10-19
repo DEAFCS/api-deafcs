@@ -250,6 +250,16 @@ describe("tournament match delete safety and orphan recovery (SQL-driven)", () =
         "UPDATE tournament_brackets SET scheduled_at = now() + interval '5 minutes' WHERE id = $1",
         [b.id],
       );
+      // A time inside the 15-minute window recreates the match at once
+      // (5stackgg/api 75798d84). Delete it again to leave the slot orphaned
+      // with its time set, which is what the scheduled job picks up.
+      expect(await matchCount(b.id)).toBe(1);
+      const [recreated] = await postgres.query<Array<{ match_id: string }>>(
+        "SELECT match_id FROM tournament_brackets WHERE id = $1",
+        [b.id],
+      );
+      await postgres.query("DELETE FROM matches WHERE id = $1", [recreated.match_id]);
+      expect(await matchCount(b.id)).toBe(0);
       const job = new CheckForScheduledTournamentBrackets({ log: jest.fn() } as any, postgres);
       expect(await job.process()).toBe(1);
       expect(await matchCount(b.id)).toBe(1);
