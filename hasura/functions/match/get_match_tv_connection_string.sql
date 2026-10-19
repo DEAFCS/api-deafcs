@@ -1,5 +1,10 @@
 DROP FUNCTION IF EXISTS public.get_match_tv_connection_link(match matches, hasura_session json);
 
+-- What a viewer is shown for watching the match, one line per way to watch:
+--   playcast "<relay>/<match>"            verified users and up (no server address)
+--   connect <host>:<tv_port>; password .. streamers and up (GOTV: shows the real address)
+-- Players in the match get nothing, and nothing shows before the tv delay is up.
+-- The website picks the lines apart by their first word.
 CREATE OR REPLACE FUNCTION public.get_match_tv_connection_string(match public.matches, hasura_session json) RETURNS text
      LANGUAGE plpgsql STABLE
      AS $$
@@ -12,6 +17,7 @@ CREATE OR REPLACE FUNCTION public.get_match_tv_connection_string(match public.ma
      match_id uuid;
      use_playcast text;
      relay_domain text;
+     lines text[] := ARRAY[]::text[];
  BEGIN
      SELECT s.host, s.tv_port, m.started_at, mo.tv_delay, m.id
      INTO server_host, tv_port, started_at, tv_delay, match_id
@@ -25,19 +31,32 @@ CREATE OR REPLACE FUNCTION public.get_match_tv_connection_string(match public.ma
          RETURN NULL;
      END IF;
 
-    password := player_match_password(match, 'tv', hasura_session);
+    IF is_in_lineup(match, hasura_session) THEN
+        RETURN NULL;
+    END IF;
 
-    if(password is null) then
-        return null;
-    end if;
-    
     relay_domain := get_setting('relay_domain', 'https://relay.5stack.gg');
     use_playcast := get_setting('use_playcast', 'false');
 
-    if(use_playcast = 'true' and relay_domain is not null) then
-        return CONCAT('playcast "', relay_domain, '/', match_id, '"');
-    else
-        return CONCAT('connect ', CONCAT(server_host, ':', tv_port), '; password ', password);
-    end if;
+    -- Playcast carries no server address, so every verified user may have it.
+    IF use_playcast = 'true' AND relay_domain IS NOT NULL
+       AND is_above_role('verified_user', hasura_session) THEN
+        lines := lines || CONCAT('playcast "', relay_domain, '/', match_id, '"');
+    END IF;
+
+    -- GOTV connects to the real address, so it is for streamers and up.
+    IF tv_port IS NOT NULL AND is_above_role('streamer', hasura_session) THEN
+        password := player_match_password(match, 'tv', hasura_session);
+
+        IF password IS NOT NULL THEN
+            lines := lines || CONCAT('connect ', server_host, ':', tv_port, '; password ', password);
+        END IF;
+    END IF;
+
+    IF array_length(lines, 1) IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    RETURN array_to_string(lines, E'\n');
  END;
  $$;
