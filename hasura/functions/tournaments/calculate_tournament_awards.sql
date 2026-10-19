@@ -33,8 +33,10 @@ DECLARE
     _runner_up_team_id uuid;
     _third_team_id uuid;
     _award_third boolean := false;
+    _award_rules_version integer;
 BEGIN
-    SELECT awards_enabled INTO _awards_enabled
+    SELECT awards_enabled, award_rules_version
+      INTO _awards_enabled, _award_rules_version
     FROM public.tournaments WHERE id = _tournament_id;
 
     -- Always clear prior auto rows so disabling / recalculating lands in a known state.
@@ -79,6 +81,34 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Award rules 2 (tournaments created after the award rules migration):
+    -- 5Stack upstream's (5stackgg/api 30ca37b3). The medals follow
+    -- tournament_placements, the same placements the podium shows: the final
+    -- and a third-place decider order 1st to 3rd, a shared 3rd (both
+    -- semifinal losers, no decider) gets no bronze, and a final stage played
+    -- in several groups gets no medals at all.
+    --
+    -- Award rules 1 (every tournament from before): the original DEAFCS
+    -- selection below, kept unchanged so earned medals survive every
+    -- recalculation.
+    IF _award_rules_version = 2 THEN
+        SELECT p.tournament_team_id INTO _winning_team_id
+        FROM public.tournament_placements(_tournament_id) p
+        WHERE p.placement = 1;
+
+        SELECT p.tournament_team_id INTO _runner_up_team_id
+        FROM public.tournament_placements(_tournament_id) p
+        WHERE p.placement = 2;
+
+        -- No bronze for a shared 3rd.
+        SELECT p.tournament_team_id INTO _third_team_id
+        FROM public.tournament_placements(_tournament_id) p
+        WHERE p.placement = 3
+          AND (
+              SELECT COUNT(*) FROM public.tournament_placements(_tournament_id) shared
+              WHERE shared.placement = 3
+          ) = 1;
+    ELSE
     -- When the last stage played a third-place decider, the brackets order the
     -- medals directly: final winner/loser take gold/silver, the decider's
     -- winner takes bronze. The standings view cannot do this — the runner-up
@@ -146,6 +176,7 @@ BEGIN
           ) = 1
         LIMIT 1;
     END IF;
+    END IF; -- award rules 1
 
     _award_third := _third_team_id IS NOT NULL;
 

@@ -202,6 +202,10 @@ BEGIN
     IF NEW.registration_version IS DISTINCT FROM OLD.registration_version THEN
         RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Registration engine cannot be changed for an existing tournament';
     END IF;
+    -- Earned medals stay under the rules they were earned with.
+    IF NEW.award_rules_version IS DISTINCT FROM OLD.award_rules_version THEN
+        RAISE EXCEPTION USING ERRCODE = '22000', MESSAGE = 'Award rules cannot be changed for an existing tournament';
+    END IF;
     IF NEW.registration_version = 2 AND EXISTS (SELECT 1 FROM public.match_options mo
         WHERE mo.id = NEW.match_options_id AND mo.individual_registration_enabled)
        AND (NEW.registration_type <> 'free_agents' OR NEW.check_in_setting <> 'Players') THEN
