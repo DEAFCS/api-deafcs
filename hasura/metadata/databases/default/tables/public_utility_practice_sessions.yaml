@@ -65,6 +65,18 @@ computed_fields:
         name: utility_practice_server_id
         schema: public
       session_argument: hasura_session
+  - name: connected_players
+    definition:
+      function:
+        name: utility_practice_connected_players
+        schema: public
+      session_argument: hasura_session
+  - name: max_players
+    definition:
+      function:
+        name: utility_practice_max_players
+        schema: public
+      session_argument: hasura_session
 insert_permissions: []
 select_permissions:
   - role: user
@@ -133,6 +145,8 @@ select_permissions:
         - connection_link
         - connection_string
         - server_id
+        - connected_players
+        - max_players
       filter: {}
       allow_aggregations: true
     comment: ''

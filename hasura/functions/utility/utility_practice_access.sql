@@ -187,3 +187,61 @@ BEGIN
     RETURN _server_id;
 END;
 $$;
+
+-- Staff console: how many players are on a practice server right now, and how
+-- many it holds. Administrators only, like the server id above; everyone else
+-- gets NULL. is_connected is what the reaper's idle clock reads, so this is the
+-- same number that decides when an empty server is shut down.
+CREATE OR REPLACE FUNCTION public.utility_practice_connected_players(
+    session public.utility_practice_sessions,
+    hasura_session json
+) RETURNS integer
+LANGUAGE plpgsql
+STABLE
+AS $$
+BEGIN
+    IF coalesce(hasura_session ->> 'x-hasura-role', '')
+        NOT IN ('admin', 'administrator') THEN
+        RETURN NULL;
+    END IF;
+
+    IF session.match_id IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    RETURN (
+        SELECT COUNT(*)::integer
+          FROM public.match_lineup_players mlp
+          INNER JOIN public.match_lineups ml ON ml.id = mlp.match_lineup_id
+         WHERE ml.match_id = session.match_id
+           AND mlp.is_connected = true
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.utility_practice_max_players(
+    session public.utility_practice_sessions,
+    hasura_session json
+) RETURNS integer
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    _max integer;
+BEGIN
+    IF coalesce(hasura_session ->> 'x-hasura-role', '')
+        NOT IN ('admin', 'administrator') THEN
+        RETURN NULL;
+    END IF;
+
+    IF session.match_id IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    -- A practice match fills one lineup (see the lineup-full check on join).
+    SELECT public.match_max_players_per_lineup(m) INTO _max
+      FROM public.matches m WHERE m.id = session.match_id;
+
+    RETURN _max;
+END;
+$$;
