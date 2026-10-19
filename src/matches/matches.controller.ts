@@ -697,6 +697,13 @@ export class MatchesController {
       return;
     }
 
+    const endedServerId = MatchesController.endedMatchServerId(data);
+
+    // First: any later side effect can throw, and nothing else would stop the server.
+    if (endedServerId) {
+      await this.stopEndedMatchServer(data, matchId, endedServerId);
+    }
+
     if (
       data.op === "UPDATE" &&
       data.new.status === "WaitingForServer" &&
@@ -788,61 +795,25 @@ export class MatchesController {
         matchId,
       });
 
-      const serverId = data.new.server_id;
-
-      if (!serverId) {
+      if (!endedServerId) {
         return;
       }
 
-      const { servers_by_pk: server } = await this.hasura.query({
-        servers_by_pk: {
-          __args: {
-            id: serverId,
-          },
-          is_dedicated: true,
-        },
-      });
-
-      const { match_options_by_pk: matchOptions } = await this.hasura.query({
-        match_options_by_pk: {
-          __args: {
-            id: data.new.match_options_id,
-          },
-          tv_delay: true,
-        },
-      });
-
-      let delay = matchOptions?.tv_delay || 1;
-
-      if (status === "Canceled" || data.op === "DELETE") {
-        delay = 0;
-      }
-
-      this.logger.log(
-        `[${matchId}] adding stop / restart server job in ${delay} seconds`,
-      );
-
-      if (!server.is_dedicated) {
-        await this.scheduledMatchesQueue.add(
-          StopOnDemandServer.name,
-          { matchId },
-          delay ? { delay: delay * 1000 } : undefined,
-        );
-      }
-
-      await this.hasura.mutation({
-        update_matches_by_pk: {
-          __args: {
-            pk_columns: {
-              id: data.new.id || data.old.id,
+      if (data.op !== "DELETE") {
+        await this.hasura.mutation({
+          update_matches_by_pk: {
+            __args: {
+              pk_columns: {
+                id: matchId,
+              },
+              _set: {
+                server_id: null,
+              },
             },
-            _set: {
-              server_id: null,
-            },
+            __typename: true,
           },
-          __typename: true,
-        },
-      });
+        });
+      }
 
       await this.handleGpuFreed();
 
@@ -1083,6 +1054,65 @@ export class MatchesController {
         `[${matchId}] maybePauseRendersForServerNode failed: ${(error as Error)?.message}`,
       );
     }
+  }
+
+  // A DELETE event carries no new row, so the server it held is on the old one.
+  private static endedMatchServerId(
+    data: HasuraEventData<matches_set_input>,
+  ): string | null {
+    if (data.op === "DELETE") {
+      return (data.old.server_id as string) ?? null;
+    }
+
+    if (MatchesController.TERMINAL_STATUSES.includes(data.new.status)) {
+      return (data.new.server_id as string) ?? null;
+    }
+
+    return null;
+  }
+
+  private async stopEndedMatchServer(
+    data: HasuraEventData<matches_set_input>,
+    matchId: string,
+    serverId: string,
+  ) {
+    const { servers_by_pk: server } = await this.hasura.query({
+      servers_by_pk: {
+        __args: {
+          id: serverId,
+        },
+        is_dedicated: true,
+      },
+    });
+
+    if (server?.is_dedicated) {
+      return;
+    }
+
+    let delay = 0;
+
+    if (data.op !== "DELETE" && data.new.status !== "Canceled") {
+      const { match_options_by_pk: matchOptions } = await this.hasura.query({
+        match_options_by_pk: {
+          __args: {
+            id: data.new.match_options_id,
+          },
+          tv_delay: true,
+        },
+      });
+
+      delay = matchOptions?.tv_delay || 1;
+    }
+
+    this.logger.log(
+      `[${matchId}] adding stop / restart server job in ${delay} seconds`,
+    );
+
+    await this.scheduledMatchesQueue.add(
+      StopOnDemandServer.name,
+      { matchId },
+      delay ? { delay: delay * 1000 } : undefined,
+    );
   }
 
   private async removeDiscordIntegration(matchId: string) {
