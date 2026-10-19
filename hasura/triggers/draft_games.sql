@@ -97,3 +97,9 @@ $$;
 
 DROP TRIGGER IF EXISTS tad_draft_games ON public.draft_games;
 CREATE TRIGGER tad_draft_games AFTER DELETE ON public.draft_games FOR EACH ROW EXECUTE FUNCTION public.tad_draft_games();
+
+DROP TRIGGER IF EXISTS tbiu_draft_games_claim_match_options ON public.draft_games;
+CREATE TRIGGER tbiu_draft_games_claim_match_options
+    BEFORE INSERT OR UPDATE OF match_options_id ON public.draft_games
+    FOR EACH ROW
+    EXECUTE FUNCTION public.tbiu_claim_match_options();

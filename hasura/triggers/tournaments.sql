@@ -442,3 +442,9 @@ CREATE TRIGGER tau_tournaments_trophies
     AFTER UPDATE ON public.tournaments
     FOR EACH ROW
     EXECUTE FUNCTION public.tau_tournaments_trophies();
+
+DROP TRIGGER IF EXISTS tbiu_tournaments_claim_match_options ON public.tournaments;
+CREATE TRIGGER tbiu_tournaments_claim_match_options
+    BEFORE INSERT OR UPDATE OF match_options_id ON public.tournaments
+    FOR EACH ROW
+    EXECUTE FUNCTION public.tbiu_claim_match_options();
