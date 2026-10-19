@@ -228,6 +228,11 @@ computed_fields:
       function:
         name: tournament_missed_check_in_count
         schema: public
+  - name: podium
+    definition:
+      function:
+        name: tournament_podium
+        schema: public
   - name: registration_unlocked
     definition:
       function:
@@ -416,6 +421,7 @@ select_permissions:
         - current_stage
         - missed_check_in_count
         - registration_unlocked
+        - podium
       filter:
         status:
           _neq: Setup
@@ -499,6 +505,7 @@ select_permissions:
         - current_stage
         - missed_check_in_count
         - registration_unlocked
+        - podium
       filter:
         _or:
           - is_organizer:
@@ -568,6 +575,7 @@ select_permissions:
         - current_stage
         - missed_check_in_count
         - registration_unlocked
+        - podium
       filter:
         _or:
           - is_organizer:
