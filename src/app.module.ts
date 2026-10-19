@@ -4,6 +4,7 @@ import { HasuraModule } from "./hasura/hasura.module";
 import { RconModule } from "./rcon/rcon.module";
 import { TypeSenseModule } from "./type-sense/type-sense.module";
 import { AuthModule } from "./auth/auth.module";
+import { AdministratorOrLoopbackMiddleware } from "./auth/AdministratorOrLoopbackMiddleware";
 import { DiscordBotModule } from "./discord-bot/discord-bot.module";
 import { MatchesModule } from "./matches/matches.module";
 
@@ -115,6 +116,7 @@ import { WebsiteRestrictionGuard } from "./website-restrictions/website-restrict
     BullBoardModule.forRoot({
       route: "/queues",
       adapter: ExpressAdapter,
+      middleware: AdministratorOrLoopbackMiddleware,
     }),
     ConfigModule.forRoot({
       isGlobal: true,
