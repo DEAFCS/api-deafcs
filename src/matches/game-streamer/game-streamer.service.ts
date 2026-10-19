@@ -1200,6 +1200,18 @@ export class GameStreamerService {
     });
   }
 
+  // DEAFCS: a demo pod is given no secret, only its session id, so its
+  // snapshot is taken only while that session exists.
+  public async isDemoSession(sessionId: string): Promise<boolean> {
+    const { match_demo_sessions_by_pk } = await this.hasura.query({
+      match_demo_sessions_by_pk: {
+        __args: { id: sessionId },
+        id: true,
+      },
+    });
+    return !!match_demo_sessions_by_pk;
+  }
+
   // Rides the send-message-to-steam-id Redis channel so it reaches the
   // watcher's sockets on any api instance. false = session row gone.
   public async pushDemoSessionState(

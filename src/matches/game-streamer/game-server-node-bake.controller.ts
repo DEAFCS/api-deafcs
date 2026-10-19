@@ -55,7 +55,12 @@ export class GameServerNodeBakeController {
   }
 
   @Post("snapshot")
-  @UseInterceptors(FileInterceptor("file"))
+  // Multer stops reading at the limit instead of holding the whole body.
+  @UseInterceptors(
+    FileInterceptor("file", {
+      limits: { fileSize: SNAPSHOT_MAX_BYTES, files: 1, fields: 0 },
+    }),
+  )
   public async putSnapshot(
     @Param("nodeId") nodeId: string,
     @UploadedFile(

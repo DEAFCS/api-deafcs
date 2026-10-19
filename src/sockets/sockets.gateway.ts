@@ -31,6 +31,10 @@ export class SocketsGateway implements OnGatewayConnection {
       return;
     }
 
+    if (!(await this.sockets.refreshRole(client))) {
+      return;
+    }
+
     await this.sockets.updateClient(client.user.steam_id, client.id);
   }
 

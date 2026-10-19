@@ -264,7 +264,12 @@ export class UtilityRendersController {
   // see what the pod is looking at while it boots and films. Redis-held, 75s
   // TTL; read back through GET /snapshots/nades/:id.
   @Post("snapshot")
-  @UseInterceptors(FileInterceptor("file"))
+  // Multer stops reading at the limit instead of holding the whole body.
+  @UseInterceptors(
+    FileInterceptor("file", {
+      limits: { fileSize: SNAPSHOT_MAX_BYTES, files: 1, fields: 0 },
+    }),
+  )
   public async putSnapshot(
     @Param("jobId") jobId: string,
     @UploadedFile(

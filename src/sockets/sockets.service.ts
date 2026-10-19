@@ -14,6 +14,7 @@ import { MatchmakingLobbyService } from "src/matchmaking/matchmaking-lobby.servi
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { ClientProxy } from "@nestjs/microservices";
 import { DemoSessionWatcherService } from "src/matches/game-streamer/demo-session-watcher.service";
+import { HasuraService } from "src/hasura/hasura.service";
 
 @Injectable()
 export class SocketsService {
@@ -39,6 +40,7 @@ export class SocketsService {
     @Inject("GAME_SERVER_NODE_CLIENT_SERVICE")
     private readonly gameServerNodeClient: ClientProxy,
     private readonly demoSessionWatcher: DemoSessionWatcherService,
+    private readonly hasura: HasuraService,
   ) {
     this.redis = this.redisManager.getConnection();
     this.appConfig = this.config.get<AppConfig>("app");
@@ -192,6 +194,32 @@ export class SocketsService {
         });
       });
     });
+  }
+
+  // The socket keeps the user it was opened with, and the handlers on it check
+  // that role, so a demotion has to reach an open tab too.
+  // DEAFCS: public and called from the gateway's ping (upstream calls it from
+  // its heartbeat(), which DEAFCS does not have).
+  public async refreshRole(client: FiveStackWebSocketClient) {
+    let role: FiveStackWebSocketClient["user"]["role"] | undefined;
+    try {
+      role = await this.hasura.getPlayerRole(client.user.steam_id);
+    } catch (error) {
+      this.logger.warn(
+        `unable to refresh the role of ${client.user.steam_id}`,
+        error,
+      );
+      return true;
+    }
+
+    if (!role) {
+      client.close();
+      return false;
+    }
+
+    client.user.role = role;
+
+    return true;
   }
 
   public async updateClient(steamId: string, clientId: string) {
