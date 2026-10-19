@@ -13,12 +13,17 @@ import {
   Req,
   Res,
   UploadedFile,
+  UseGuards,
   UseInterceptors,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
 import { Request, Response } from "express";
 import { AwardsService } from "./awards.service";
 import { User } from "../auth/types/User";
+import { SteamGuard } from "../auth/strategies/SteamGuard";
+import { TournamentAwardUploadGuard } from "./tournament-award-upload.guard";
+
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 // Award artwork uploaded before the awards rename is served immutable, so
 // links to /trophies/<filename> stay in caches and embeds indefinitely.
@@ -27,7 +32,10 @@ export class TrophiesLegacyController {
   constructor(private readonly awards: AwardsService) {}
 
   @Post(":tournamentId/:placement")
-  @UseInterceptors(FileInterceptor("file"))
+  @UseGuards(SteamGuard, TournamentAwardUploadGuard)
+  @UseInterceptors(
+    FileInterceptor("file", { limits: { fileSize: MAX_IMAGE_BYTES } }),
+  )
   public async upload(
     @Req() request: Request,
     @Param("tournamentId") tournamentId: string,
@@ -35,7 +43,7 @@ export class TrophiesLegacyController {
     @UploadedFile(
       new ParseFilePipe({
         validators: [
-          new MaxFileSizeValidator({ maxSize: 5 * 1024 * 1024 }),
+          new MaxFileSizeValidator({ maxSize: MAX_IMAGE_BYTES }),
           new FileTypeValidator({ fileType: /image\/(png|jpeg|webp)/ }),
         ],
       }),

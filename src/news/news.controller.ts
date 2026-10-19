@@ -9,6 +9,7 @@ import {
   Req,
   Res,
   UploadedFile,
+  UseGuards,
   UseInterceptors,
   ParseFilePipe,
   MaxFileSizeValidator,
@@ -28,6 +29,8 @@ import { S3Service } from "../s3/s3.service";
 import { User } from "../auth/types/User";
 import { e_player_roles_enum } from "generated";
 import { NewsService } from "./news.service";
+import { SteamGuard } from "../auth/strategies/SteamGuard";
+import { RoleSettingGuard } from "../system/role-setting.guard";
 
 // Videos are much bigger than the images this endpoint was originally built
 // for, so they get their own caps and a multipart bypass for anything too big
@@ -99,7 +102,10 @@ export class NewsController {
   }
 
   @Post("upload")
-  @UseInterceptors(FileInterceptor("file"))
+  @UseGuards(SteamGuard, RoleSettingGuard(SystemSettingName.PostNewsRole))
+  @UseInterceptors(
+    FileInterceptor("file", { limits: { fileSize: DIRECT_MAX_SIZE } }),
+  )
   public async upload(
     @Req() request: Request,
     @UploadedFile(

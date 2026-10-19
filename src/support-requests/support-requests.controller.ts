@@ -6,6 +6,7 @@ import {
   Req,
   Res,
   UploadedFile,
+  UseGuards,
   UseInterceptors,
   ParseFilePipe,
   MaxFileSizeValidator,
@@ -27,6 +28,7 @@ import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "src/configs/types/AppConfig";
 import { S3Service } from "../s3/s3.service";
 import { User } from "../auth/types/User";
+import { SteamGuard } from "../auth/strategies/SteamGuard";
 
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 const ALLOWED_ATTACHMENT_TYPE =
@@ -77,7 +79,10 @@ export class SupportRequestsController {
   // scoped by the uploader's own steam_id instead and handed back for the
   // client to include as attachment_url on whichever row it inserts next.
   @Post("attachment")
-  @UseInterceptors(FileInterceptor("file"))
+  @UseGuards(SteamGuard)
+  @UseInterceptors(
+    FileInterceptor("file", { limits: { fileSize: MAX_ATTACHMENT_BYTES } }),
+  )
   public async uploadAttachment(
     @Req() request: Request,
     @UploadedFile(
