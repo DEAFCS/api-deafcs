@@ -53,6 +53,11 @@ export class MatchAssistantService {
     ];
   private static readonly TERMINAL_MATCH_STATUSES: readonly e_match_status_enum[] =
     ["Finished", "Canceled", "Forfeit", "Tie", "Surrendered"];
+  // DEAFCS: a match is given a new server when it goes Live (match_events,
+  // server_availability), so a match back in one of these after a tournament
+  // reset or a restart, with no reservation, has no server of its own yet.
+  private static readonly PRE_SERVER_MATCH_STATUSES: readonly e_match_status_enum[] =
+    ["Scheduled", "WaitingForCheckIn", "Veto"];
   private static readonly DRAFT_CANCELLABLE_STATUSES: readonly e_match_status_enum[] =
     [
       "Scheduled",
@@ -1722,15 +1727,60 @@ export class MatchAssistantService {
   }
 
   // The queued stop can run after a restart, when the Job under this name is the new server's.
+  // DEAFCS: the Jobs are pinned before the check, so one created after it (the
+  // match went Live again meanwhile) is a new server and is left alone.
   public async stopEndedMatchServer(matchId: string) {
-    if (!(await this.hasMatchEnded(matchId))) {
+    let jobs: Array<{ jobName: string; uid: string }>;
+
+    try {
+      jobs = await this.getOnDemandServerJobUids(matchId);
+    } catch (error) {
+      this.logger.error(
+        `[${matchId}] unable to stop on demand server`,
+        error?.response?.body?.message || error,
+      );
+      return;
+    }
+
+    if (!(await this.hasMatchEndedOrStartedOver(matchId))) {
       this.logger.log(
         `[${matchId}] match was started again, leaving its server running`,
       );
       return;
     }
 
-    await this.stopOnDemandServer(matchId);
+    this.logger.log(`[${matchId}] stopping match servers`);
+
+    try {
+      for (const { jobName, uid } of jobs) {
+        await this.signalOnDemandServerStop(matchId, jobName, uid);
+      }
+    } catch (error) {
+      this.logger.error(
+        `[${matchId}] unable to stop on demand server`,
+        error?.response?.body?.message || error,
+      );
+    }
+  }
+
+  private async getOnDemandServerJobUids(
+    matchId: string,
+  ): Promise<Array<{ jobName: string; uid: string }>> {
+    const kc = new KubeConfig();
+    kc.loadFromDefault();
+    const batch = kc.makeApiClient(BatchV1Api);
+
+    const jobs: Array<{ jobName: string; uid: string }> = [];
+
+    for (const jobName of await this.getMatchServerJobIds(matchId)) {
+      const job = await this.readOnDemandServerJob(batch, jobName);
+
+      if (job?.metadata?.uid && !MatchAssistantService.isJobFinished(job)) {
+        jobs.push({ jobName, uid: job.metadata.uid });
+      }
+    }
+
+    return jobs;
   }
 
   public async hasMatchEnded(matchId: string): Promise<boolean> {
@@ -1748,6 +1798,30 @@ export class MatchAssistantService {
       MatchAssistantService.TERMINAL_MATCH_STATUSES.includes(
         matches_by_pk.status,
       )
+    );
+  }
+
+  // DEAFCS: hasMatchEnded, plus a match sent back before Live (tournament reset,
+  // restart) that has no server reserved. Its old server still stops at the
+  // usual tv_delay time, so GOTV and the demo upload are not cut short. Any
+  // reservation counts: assignOnDemandServer reserves before it writes server_id.
+  private async hasMatchEndedOrStartedOver(matchId: string): Promise<boolean> {
+    const { matches, servers } = await this.getOnDemandServerJobMatches([
+      matchId,
+    ]);
+
+    const match = matches.at(0);
+
+    if (
+      !match ||
+      MatchAssistantService.TERMINAL_MATCH_STATUSES.includes(match.status)
+    ) {
+      return true;
+    }
+
+    return (
+      MatchAssistantService.PRE_SERVER_MATCH_STATUSES.includes(match.status) &&
+      !servers.some((server) => server.reserved_by_match_id === match.id)
     );
   }
 
@@ -2229,7 +2303,12 @@ export class MatchAssistantService {
     }
   }
 
-  private async signalOnDemandServerStop(matchId: string, jobName: string) {
+  // DEAFCS: with a jobUid, only that Job and its own pods (a reassignment reuses the name).
+  private async signalOnDemandServerStop(
+    matchId: string,
+    jobName: string,
+    jobUid?: string,
+  ) {
     const kc = new KubeConfig();
     kc.loadFromDefault();
 
@@ -2238,14 +2317,22 @@ export class MatchAssistantService {
 
     const job = await this.readOnDemandServerJob(batch, jobName);
 
-    if (!job || MatchAssistantService.isJobFinished(job)) {
+    if (
+      !job ||
+      MatchAssistantService.isJobFinished(job) ||
+      (jobUid && job.metadata?.uid !== jobUid)
+    ) {
       return;
     }
 
-    const { items: pods } = await core.listNamespacedPod({
+    const { items: listed } = await core.listNamespacedPod({
       namespace: this.namespace,
       labelSelector: `job-name=${jobName}`,
     });
+
+    const pods = listed.filter((pod) =>
+      MatchAssistantService.isOwnedBy(pod, jobUid),
+    );
 
     const running = pods.filter((pod) =>
       MatchAssistantService.isGameServerRunning(pod),

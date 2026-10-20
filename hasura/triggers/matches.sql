@@ -239,9 +239,13 @@ BEGIN
             WHERE match_lineup_id IN (NEW.lineup_1_id, NEW.lineup_2_id);
     END IF;
 
+    -- DEAFCS: runs on every update of an ended match, so only while the server
+    -- is still this match's (see tbu_matches).
     IF NEW.status IN ('Tie', 'Forfeit', 'Canceled', 'Finished', 'Surrendered') THEN
         select server_id into _server_id from matches where id = NEW.id;
-        UPDATE servers SET reserved_by_match_id = null WHERE id = _server_id;
+        UPDATE servers SET reserved_by_match_id = null
+        WHERE id = _server_id
+          AND reserved_by_match_id = NEW.id;
     END IF;
 
     IF is_tournament_match(NEW)
@@ -321,8 +325,13 @@ BEGIN
         NEW.status := 'Scheduled';
     END IF;
 
+    -- DEAFCS: only this match's own reservation. A finished match frees its
+    -- server at once, so by the time its stale server_id is cleared (late match
+    -- end, tournament reset) the server can already be another match's.
     IF OLD.server_id IS NOT NULL AND (NEW.server_id IS NULL OR OLD.server_id != NEW.server_id) THEN
-        UPDATE servers SET reserved_by_match_id = null WHERE id = OLD.server_id;
+        UPDATE servers SET reserved_by_match_id = null
+        WHERE id = OLD.server_id
+          AND reserved_by_match_id = OLD.id;
     END IF;
 
     IF (NEW.status = 'WaitingForServer' AND OLD.status = 'WaitingForServer') AND (NEW.region != OLD.region OR NEW.server_id != OLD.server_id) THEN
