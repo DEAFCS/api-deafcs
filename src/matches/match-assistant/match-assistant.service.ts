@@ -145,6 +145,35 @@ export class MatchAssistantService {
     }
   }
 
+  public async resetMatchMapToRound(matchMapId: string, round: number) {
+    await this.postgres.query("SELECT reset_match_map_to_round($1, $2)", [
+      matchMapId,
+      round,
+    ]);
+  }
+
+  public async restartServerMap(matchId: string) {
+    return await this.command(matchId, "match_state Warmup");
+  }
+
+  public async requestRoundRestore(matchId: string, round: number) {
+    return await this.command(matchId, `restore_round ${round}`);
+  }
+
+  // A server no longer reserved for the match gets nothing back from
+  // current-match, so the plugin drops whatever game it still has loaded.
+  public async refreshServerMatch(serverId: string) {
+    try {
+      const rcon = await this.rcon.connect(serverId);
+      await rcon?.send("get_match");
+    } catch (error) {
+      this.logger.warn(
+        `[${serverId}] unable to tell the server to reload its match`,
+        error.message,
+      );
+    }
+  }
+
   public async knifeSwitch(matchId: string) {
     try {
       await this.command(matchId, `api_knife_switch`);

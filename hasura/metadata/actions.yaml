@@ -522,6 +522,13 @@ actions:
       forward_client_headers: true
     permissions:
       - role: administrator
+  - name: getMatchRestoreRounds
+    definition:
+      kind: ""
+      handler: '{{HASURA_GRAPHQL_ACTIONS_HOOK}}'
+      forward_client_headers: true
+    permissions:
+      - role: user
   - name: getMediaServerStats
     definition:
       kind: ""
@@ -1042,6 +1049,13 @@ actions:
     permissions:
       - role: administrator
     comment: Reset a terminal-state clip_render_jobs row back to queued and re-enqueue the batch worker (admin only).
+  - name: restartMatchMap
+    definition:
+      kind: synchronous
+      handler: '{{HASURA_GRAPHQL_ACTIONS_HOOK}}'
+      forward_client_headers: true
+    permissions:
+      - role: user
   - name: restartService
     definition:
       kind: synchronous
@@ -1049,6 +1063,13 @@ actions:
       forward_client_headers: true
     permissions:
       - role: administrator
+  - name: restoreMatchRound
+    definition:
+      kind: synchronous
+      handler: '{{HASURA_GRAPHQL_ACTIONS_HOOK}}'
+      forward_client_headers: true
+    permissions:
+      - role: user
   - name: resumeClipRenderBatch
     definition:
       kind: synchronous
@@ -2248,6 +2269,9 @@ custom_types:
     - name: LiveSpecGsi
     - name: LiveStreamSpecState
     - name: TournamentMatchResetImpact
+    - name: MatchRestorePlayer
+    - name: MatchRestoreRound
+    - name: MatchRestoreRoundsOutput
     - name: PreviewTournamentMatchResetOutput
     - name: MeResponse
       relationships:

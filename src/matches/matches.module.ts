@@ -68,6 +68,8 @@ import { ReconcileOnDemandServerJobs } from "./jobs/ReconcileOnDemandServerJobs"
 import { MatchRelayController } from "./match-relay/match-relay.controller";
 import { MatchRelayService } from "./match-relay/match-relay.service";
 import { MatchRelayAuthMiddleware } from "./match-relay/match-relay-auth-middleware";
+import { MatchRecoveryController } from "./match-recovery/match-recovery.controller";
+import { MatchRecoveryService } from "./match-recovery/match-recovery.service";
 import { K8sModule } from "src/k8s/k8s.module";
 import { DiscordTournamentVoiceModule } from "../discord-bot/discord-tournament-voice/discord-tournament-voice.module";
 import { GameStreamerModule } from "./game-streamer/game-streamer.module";
@@ -173,6 +175,7 @@ import { TournamentCallService } from "./camera/tournament-call.service";
     CameraController,
     LobbyCallController,
     TournamentCallController,
+    MatchRecoveryController,
   ],
   exports: [MatchAssistantService, PlayerEloRecomputeService],
   providers: [
@@ -183,6 +186,7 @@ import { TournamentCallService } from "./camera/tournament-call.service";
     CameraService,
     LobbyCallService,
     TournamentCallService,
+    MatchRecoveryService,
     CheckOnDemandServerJob,
     CheckOnDemandServerJobEvents,
     CancelExpiredMatches,
