@@ -12,6 +12,7 @@ import {
 import { Request } from "express";
 import { User } from "../auth/types/User";
 import { parseMatchIds, TwitchStreamsService } from "./twitch-streams.service";
+import { TwitchLiveService } from "./twitch-live.service";
 
 // Twitch integration. Everything Twitch-facing (credentials, app token,
 // Helix calls) stays in TwitchService; these routes only return public data.
@@ -23,9 +24,15 @@ import { parseMatchIds, TwitchStreamsService } from "./twitch-streams.service";
 //                                  public  live CS2 POV streams of seated
 //                                          players per match; empty for a
 //                                          match the viewer plays/coaches in
+//   GET /twitch/live               public  linked players live in Counter-
+//                                          Strike, most viewers first (shared
+//                                          cache); hides the viewer's own match
 @Controller("twitch")
 export class TwitchController {
-  constructor(private readonly streams: TwitchStreamsService) {}
+  constructor(
+    private readonly streams: TwitchStreamsService,
+    private readonly live: TwitchLiveService,
+  ) {}
 
   private viewer(request: Request): User | undefined {
     return request.user as User | undefined;
@@ -59,6 +66,12 @@ export class TwitchController {
     );
     if ("error" in result) throw new BadRequestException({ error: result.error });
     return { channel: result.channel };
+  }
+
+  @Get("live")
+  public async getLive(@Req() request: Request) {
+    const user = this.viewer(request);
+    return this.live.getLiveStreamers(user?.steam_id ? String(user.steam_id) : null);
   }
 
   @Get("match-streams")

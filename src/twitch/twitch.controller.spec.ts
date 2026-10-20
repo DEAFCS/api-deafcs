@@ -10,6 +10,7 @@ describe("TwitchController", () => {
     setOwnChannel: jest.Mock;
     getMatchAutoStreams: jest.Mock;
   };
+  let live: { getLiveStreamers: jest.Mock };
   let controller: TwitchController;
   const req = (user?: any) => ({ user }) as any;
 
@@ -20,7 +21,15 @@ describe("TwitchController", () => {
       setOwnChannel: jest.fn(),
       getMatchAutoStreams: jest.fn(),
     };
-    controller = new TwitchController(streams as any);
+    live = { getLiveStreamers: jest.fn().mockResolvedValue({ available: true, checkedAt: null, streams: [] }) };
+    controller = new TwitchController(streams as any, live as any);
+  });
+
+  it("live list is public; a signed-in viewer's steam id is passed for the anti-cheat filter", async () => {
+    await controller.getLive(req());
+    expect(live.getLiveStreamers).toHaveBeenLastCalledWith(null);
+    await controller.getLive(req({ steam_id: 76561190000000001n }));
+    expect(live.getLiveStreamers).toHaveBeenLastCalledWith("76561190000000001");
   });
 
   it("player lookup is public and has a safe default", async () => {

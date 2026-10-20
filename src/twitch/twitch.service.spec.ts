@@ -77,6 +77,26 @@ describe("TwitchService", () => {
     });
   }
 
+  it("keeps viewer count, start time and a sized Twitch-CDN thumbnail for live streams", async () => {
+    routeTwitch([
+      {
+        ...liveStream("tricon"),
+        viewer_count: 42,
+        started_at: "2026-10-20T18:00:00Z",
+        thumbnail_url: "https://static-cdn.jtvnw.net/previews-ttv/live_user_tricon-{width}x{height}.jpg",
+      },
+    ]);
+    const status = await make().getStatus("tricon");
+    expect(status).toMatchObject({
+      live: true,
+      viewerCount: 42,
+      startedAt: "2026-10-20T18:00:00Z",
+      thumbnailUrl: "https://static-cdn.jtvnw.net/previews-ttv/live_user_tricon-320x180.jpg",
+    });
+    const offline = await make().getStatus("someoneelse");
+    expect(offline).toMatchObject({ live: false, viewerCount: null, startedAt: null, thumbnailUrl: null });
+  });
+
   it("gets an app token with client credentials in the POST body, not the URL", async () => {
     routeTwitch([]);
     await make().getStatuses(["tricon"]);
