@@ -828,7 +828,9 @@ export class MatchesController {
       data.old.region !== data.new.region
     ) {
       try {
-        await this.matchAssistant.stopOnDemandServer(matchId);
+        if (!(await this.isReplacedByOwnOnDemandServer(data, matchId))) {
+          await this.matchAssistant.stopOnDemandServer(matchId);
+        }
       } catch (error) {
         this.logger.error(
           `[${matchId}] unable to stop on demand server`,
@@ -1054,6 +1056,39 @@ export class MatchesController {
         `[${matchId}] maybePauseRendersForServerNode failed: ${(error as Error)?.message}`,
       );
     }
+  }
+
+  // Upstream 5Stack stopReplacedServer, its reboot case only (DEAFCS keeps the
+  // other cases as they were). assignOnDemandServer removes the old Job and
+  // reserves the new row before it writes server_id, and the Job is named per
+  // match, so the Job under this name is the new server: stopping it would end
+  // the server the match was just given.
+  private async isReplacedByOwnOnDemandServer(
+    data: HasuraEventData<matches_set_input>,
+    matchId: string,
+  ): Promise<boolean> {
+    const oldServerId = data.old.server_id as string | undefined;
+    const newServerId = data.new.server_id as string | undefined;
+
+    if (!oldServerId || !newServerId || newServerId === oldServerId) {
+      return false;
+    }
+
+    const { servers_by_pk: server } = await this.hasura.query({
+      servers_by_pk: {
+        __args: {
+          id: newServerId,
+        },
+        is_dedicated: true,
+        reserved_by_match_id: true,
+      },
+    });
+
+    return (
+      !!server &&
+      !server.is_dedicated &&
+      server.reserved_by_match_id === matchId
+    );
   }
 
   // A DELETE event carries no new row, so the server it held is on the old one.
@@ -2360,6 +2395,19 @@ export class MatchesController {
         resolvedResetStatus,
         resolvedScheduledAt,
       ],
+    );
+
+    // DEAFCS: the match starts over, so the server it finished on is no longer
+    // its server (its reservation was released when it finished). Normally the
+    // match end already cleared server_id; this covers a reset that got there
+    // first. Going Live again assigns a fresh server (match_events), and
+    // match_events stops the old one when server_id changes.
+    await this.postgres.query(
+      `UPDATE matches SET server_id = NULL
+        WHERE id = $1::uuid
+          AND server_id IS NOT NULL
+          AND status IN ('Scheduled', 'WaitingForCheckIn')`,
+      [match_id],
     );
 
     return {

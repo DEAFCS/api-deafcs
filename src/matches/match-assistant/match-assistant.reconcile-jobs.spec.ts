@@ -3,6 +3,7 @@ const readNamespacedJob = jest.fn();
 const deleteNamespacedJob = jest.fn();
 const listNamespacedPod = jest.fn();
 const deleteNamespacedPod = jest.fn();
+const exec = jest.fn();
 
 jest.mock("@kubernetes/client-node", () => ({
   BatchV1Api: class BatchV1Api {
@@ -20,7 +21,9 @@ jest.mock("@kubernetes/client-node", () => ({
       return new ctor();
     }
   },
-  Exec: class Exec {},
+  Exec: class Exec {
+    exec = exec;
+  },
 }));
 
 import { MatchAssistantService } from "./match-assistant.service";
@@ -96,6 +99,7 @@ describe("MatchAssistantService — reconciling on-demand server Jobs", () => {
       deleteNamespacedJob,
       listNamespacedPod,
       deleteNamespacedPod,
+      exec,
     ]) {
       fn.mockReset();
     }
@@ -577,9 +581,9 @@ describe("MatchAssistantService — reconciling on-demand server Jobs", () => {
       ]);
     });
 
-    // Finished clears the reservation (tau_matches); a tournament reset keeps
-    // server_id and puts the match back to WaitingForCheckIn, from where it
-    // goes Live on the server that is still running.
+    // Finished clears the reservation (tau_matches); a tournament reset puts
+    // the match back to WaitingForCheckIn. The reaper leaves its old server to
+    // the stop queued at the match end (stopEndedMatchServer), see below.
     it("keeps the server of a finished match reset to WaitingForCheckIn", async () => {
       matches = [match({ status: "WaitingForCheckIn" })];
 
@@ -670,6 +674,80 @@ describe("MatchAssistantService — reconciling on-demand server Jobs", () => {
       await sweep();
 
       expect(store.has("match-server-job:orphaned-since:uid-1")).toBe(false);
+      expect(deleteNamespacedJob).not.toHaveBeenCalled();
+    });
+  });
+
+  // DEAFCS: a tournament reset during the GOTV delay, as the reaper and the
+  // stop queued at the match end (stopEndedMatchServer) see it together.
+  describe("a reset match's old server, with the match-end stop", () => {
+    const runningPod = (uid: string, name: string) => ({
+      items: [
+        {
+          metadata: { name, ownerReferences: [{ uid }] },
+          spec: { containers: [{ name: "game-server" }] },
+          status: {
+            phase: "Running",
+            containerStatuses: [
+              { name: "game-server", state: { running: {} } },
+            ],
+          },
+        },
+      ],
+    });
+    const matchEndStop = () =>
+      (service as any).scheduledMatchesQueue.add as jest.Mock;
+
+    beforeEach(() => {
+      exec.mockResolvedValue({});
+      listNamespacedPod.mockImplementation(async ({ labelSelector }) =>
+        labelSelector === `job-name=${JOB_NAME}` && liveJobs.has(JOB_NAME)
+          ? runningPod(liveJobs.get(JOB_NAME)!.metadata.uid, `${JOB_NAME}-pod`)
+          : { items: [] },
+      );
+    });
+
+    it("is kept by the reaper and stopped by the queued stop", async () => {
+      matches = [match({ status: "WaitingForCheckIn", server_id: null })];
+
+      await sweep();
+      expect(deleteNamespacedJob).not.toHaveBeenCalled();
+
+      await service.stopEndedMatchServer(MATCH_ID);
+
+      expect(exec).toHaveBeenCalledTimes(1);
+      expect(exec.mock.calls[0][3]).toEqual(["kill", "-SIGUSR1", "1"]);
+      expect(matchEndStop()).toHaveBeenCalledWith(
+        "StopOnDemandServer",
+        { matchId: MATCH_ID, jobName: JOB_NAME, jobUid: "uid-1" },
+        expect.anything(),
+      );
+
+      // Once the server has exited, the reaper ignores the finished Job.
+      liveJobs.set(
+        JOB_NAME,
+        job({
+          status: {
+            active: 0,
+            conditions: [{ type: "Complete", status: "True" }],
+          },
+        }),
+      );
+      await sweep();
+      expect(deleteNamespacedJob).not.toHaveBeenCalled();
+      expect(hasura.mutation).not.toHaveBeenCalled();
+    });
+
+    it("leaves the new server once the reset match is Live again", async () => {
+      // assignOnDemandServer replaced the Job; the match holds its new server.
+      listJobs(job({ metadata: { uid: "uid-2" } }));
+      matches = [match({ status: "Live", server_id: "server-2" })];
+      reservedServers = [{ id: "server-2", reserved_by_match_id: MATCH_ID }];
+
+      await sweep();
+      await service.stopEndedMatchServer(MATCH_ID);
+
+      expect(exec).not.toHaveBeenCalled();
       expect(deleteNamespacedJob).not.toHaveBeenCalled();
     });
   });
