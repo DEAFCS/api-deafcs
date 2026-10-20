@@ -1,0 +1,217 @@
+// Ported from 5stackgg/api c0c576c (#606); the WHIP test is DEAFCS's (no sdp parser).
+import { Body, Controller, HttpCode, Post, Req } from "@nestjs/common";
+import { Request } from "express";
+import { NestFactory } from "@nestjs/core";
+import { NestExpressApplication } from "@nestjs/platform-express";
+import http from "http";
+import { AddressInfo } from "net";
+import request from "supertest";
+import { registerBodyParsers } from "./body-parsers";
+
+@Controller("sdp")
+class StreamController {
+  @Post("*path")
+  @HttpCode(200)
+  public async read(@Req() request: Request) {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(chunk as Buffer);
+    return { bytes: Buffer.concat(chunks).length };
+  }
+}
+
+@Controller()
+class EchoController {
+  @Post("*path")
+  @HttpCode(200)
+  public echo(@Body() body: unknown) {
+    return { bytes: JSON.stringify(body ?? null).length };
+  }
+}
+
+const MB = 1024 * 1024;
+
+const jsonOf = (bytes: number) => ({ pad: "x".repeat(bytes) });
+
+describe("registerBodyParsers", () => {
+  let app: NestExpressApplication;
+
+  beforeAll(async () => {
+    app = await NestFactory.create<NestExpressApplication>(
+      {
+        module: class {},
+        controllers: [StreamController, EchoController],
+      } as any,
+      { logger: false },
+    );
+    registerBodyParsers(app);
+    await app.listen(0, "127.0.0.1");
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  const post = (path: string) => request(app.getHttpServer()).post(path);
+
+  const rawPost = (path: string, body: string) =>
+    new Promise<number>((resolve, reject) => {
+      const { port } = app.getHttpServer().address() as AddressInfo;
+      const sent = http.request(
+        {
+          port,
+          path,
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(body),
+          },
+        },
+        (response) => {
+          response.resume();
+          response.on("end", () => resolve(response.statusCode!));
+        },
+      );
+      sent.on("error", reject);
+      sent.end(body);
+    });
+
+  it("refuses a JSON body over 1mb on an ordinary route, before any handler", async () => {
+    const response = await post("/matches/anything").send(jsonOf(2 * MB));
+
+    expect(response.status).toBe(413);
+  });
+
+  it("refuses a form body over 1mb the same way", async () => {
+    const response = await post("/telemetry")
+      .type("form")
+      .send(`pad=${"x".repeat(2 * MB)}`);
+
+    expect(response.status).toBe(413);
+  });
+
+  it("still reads an ordinary body under 1mb", async () => {
+    const response = await post("/matches/anything").send(jsonOf(900 * 1024));
+
+    expect(response.status).toBe(200);
+    expect(response.body.bytes).toBeGreaterThan(900 * 1024);
+  });
+
+  it("reads Hasura's large action and event payloads", async () => {
+    for (const path of ["/hasura/actions", "/hasura/events"]) {
+      const response = await post(path).send(jsonOf(10 * MB));
+
+      expect(response.status).toBe(200);
+      expect(response.body.bytes).toBeGreaterThan(10 * MB);
+    }
+  });
+
+  it("reads a recorded smoke's voxel log on the plugin's /utility routes", async () => {
+    const log = Buffer.alloc(MB).toString("base64");
+
+    const response = await post("/utility/lineup-1/smoke-voxels").send({
+      log,
+      samples: [],
+    });
+
+    expect(response.status).toBe(200);
+  });
+
+  it("caps /utility at 2mb", async () => {
+    const response = await post("/utility/ingest").send(jsonOf(3 * MB));
+
+    expect(response.status).toBe(413);
+  });
+
+  it("still refuses a 2mb body on an ordinary route", async () => {
+    const status = await rawPost(
+      "/matches/anything",
+      JSON.stringify(jsonOf(2 * MB)),
+    );
+
+    expect(status).toBe(413);
+  });
+
+  // nginx picks the ingress location by the normalised path but forwards the
+  // raw one, which express matches as a case-insensitive prefix.
+  it.each([
+    "/hasura/%2e%2e/x",
+    "/hasura/../x",
+    "/HASURA/%2E%2E/x",
+    "/hasura/.%2e/utility/x",
+    "/hasura/./x",
+    "/hasura/..",
+    "/x/%2f..",
+    "/hasura%2f..%2futility/x",
+    "/hasura/%5C../utility",
+  ])("refuses %s before any parser reads it", async (path) => {
+    expect(await rawPost(path, JSON.stringify(jsonOf(10)))).toBe(400);
+  });
+
+  it("refuses a climbing path before the general parser can answer 413", async () => {
+    const status = await rawPost(
+      "/matches/%2e%2e/x",
+      JSON.stringify(jsonOf(2 * MB)),
+    );
+
+    expect(status).toBe(400);
+  });
+
+  it.each([
+    "/matches/anything?next=../a%2Fb",
+    "/utility/lineup-1/trajectory",
+    "/clips/utility/lineup-1/take.mp4",
+    "/demos/match-1/pre-signed",
+    "/match-relay/match-1/s123t456/7/delta?final=0",
+  ])("leaves %s alone", async (path) => {
+    expect(await rawPost(path, JSON.stringify(jsonOf(10)))).toBe(200);
+  });
+
+  it("only widens the named path, not one that merely starts with it", async () => {
+    const response = await post("/utility-lineups/import").send(jsonOf(2 * MB));
+
+    expect(response.status).toBe(413);
+  });
+
+  // DEAFCS: the camera and admin-call handlers read WHIP/WHEP offers from the
+  // stream, so no parser may drain it first.
+  it("leaves a WHIP offer's stream for the handler", async () => {
+    const offer = "v=0\r\n" + "a=x\r\n".repeat(20_000);
+
+    const response = await post("/sdp/matches/camera/whip")
+      .set("content-type", "application/sdp")
+      .send(offer);
+
+    expect(response.status).toBe(200);
+    expect(response.body.bytes).toBe(Buffer.byteLength(offer));
+  });
+
+  // DEAFCS: GOTV relay fragments and the raw chat attachment upload are binary
+  // bodies the JSON and form parsers never claim, whatever their size.
+  it.each([
+    ["/sdp/match-relay/match-1/s1t2/7/full", "application/octet-stream"],
+    ["/sdp/chat/attachment", "video/mp4"],
+  ])(
+    "leaves a 5mb binary body on %s for its own reader",
+    async (path, type) => {
+      const body = Buffer.alloc(5 * MB, 1);
+
+      const response = await post(path).set("content-type", type).send(body);
+
+      expect(response.status).toBe(200);
+      expect(response.body.bytes).toBe(5 * MB);
+    },
+  );
+
+  // DEAFCS-only JSON routes all take small bodies.
+  it.each([
+    "/chat/direct/conversations/76561190000000001:76561190000000002/read",
+    "/matches/chat-video/sessions",
+    "/notifications/in-app/preferences",
+    "/admin-calls/76561190000000001/respond",
+    "/verification-applications/call/application-1/respond",
+  ])("still reads an ordinary body on DEAFCS's %s", async (path) => {
+    const response = await post(path).send(jsonOf(64 * 1024));
+
+    expect(response.status).toBe(200);
+  });
+});
