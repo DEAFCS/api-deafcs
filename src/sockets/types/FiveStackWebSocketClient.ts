@@ -7,4 +7,5 @@ export type FiveStackWebSocketClient = WebSocket.WebSocket & {
   node: string;
   sessionId: string;
   peerNodes: Set<string>;
+  lastSeenAt: number;
 };
