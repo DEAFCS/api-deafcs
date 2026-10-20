@@ -148,16 +148,44 @@ describe("Player of the Month rules", () => {
     expect(b.flags.some((f) => f.startsWith("removed ban"))).toBe(true);
   });
 
-  it("VAC ban disqualifies; Steam game bans are shown for review only", () => {
+  it("Steam VAC and game bans never disqualify; they stay in the evidence", () => {
     const matches = many(3, [["A"], ["B"]]);
     const snap = rankPlayerOfTheMonth("2026-10", matches, {
       ...none,
       players: [player("A", { vacBanned: true, vacBanCount: 1 }), player("B", { gameBanCount: 2 })],
     });
-    expect(snap.candidates.find((c) => c.steamId === "A")!.disqualifiedBy).toContain("VAC ban");
+    const a = snap.candidates.find((c) => c.steamId === "A")!;
     const b = snap.candidates.find((c) => c.steamId === "B")!;
+    expect(a.eligible).toBe(true);
+    expect(a.vac).toEqual({ banned: true, vacBanCount: 1, gameBanCount: 0 });
     expect(b.eligible).toBe(true);
-    expect(b.flags.some((f) => f.includes("game ban"))).toBe(true);
+    expect(b.vac.gameBanCount).toBe(2);
+  });
+
+  it("only staff-issued bans and warnings disqualify; the automatic Steam VAC ban sanction is information", () => {
+    const matches = [...many(5, [["A"], ["B"]]), ...many(3, [["C"], ["D"]])];
+    const snap = rankPlayerOfTheMonth("2026-10", matches, {
+      ...none,
+      sanctions: [
+        // steam-bans.service.ts: type ban, no staff member.
+        sanction("A", { type: "ban", system: true, createdAt: "2026-10-02T00:00:00Z", reason: "Auto: Steam VAC ban" }),
+        sanction("B", { type: "ban", system: false, createdAt: "2026-10-02T00:00:00Z" }),
+      ],
+    });
+    const a = snap.candidates.find((c) => c.steamId === "A")!;
+    const b = snap.candidates.find((c) => c.steamId === "B")!;
+    expect(a.eligible).toBe(true);
+    expect(a.sanctions[0].effect).toBe("info");
+    expect(b.eligible).toBe(false);
+    expect(snap.recommendedSteamId).toBe("A");
+  });
+
+  it("only the match count decides: performance never enters the ranking", () => {
+    // The ranking input has no rating/ADR/ELO/win fields at all; a player who
+    // lost every match still wins on count.
+    const matches = [...many(4, [["Loser"], ["W1"]]), ...many(3, [["W2"], ["X"]])];
+    const snap = rankPlayerOfTheMonth("2026-10", matches, { ...none, players: [] });
+    expect(snap.candidates[0]).toMatchObject({ steamId: "Loser", eligibleMatches: 4 });
   });
 
   it("a winner within the last 12 award months cannot win; 13 months ago can", () => {

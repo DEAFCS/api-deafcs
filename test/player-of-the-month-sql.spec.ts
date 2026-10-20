@@ -89,19 +89,38 @@ describe("Player of the Month (SQL-driven)", () => {
     expect(byId[a].name).toEqual(expect.any(String));
   });
 
-  it("a ban during the month disqualifies; the player is still listed with the reason", async () => {
+  it("a staff ban during the month disqualifies; the player is still listed with the reason", async () => {
     const [a, b] = await fx.players(2);
     await finished("Duel", a, b);
     await finished("Duel", a, b);
     await postgres.query(
-      `INSERT INTO player_sanctions (player_steam_id, type, reason, created_at, remove_sanction_date)
-       VALUES ($1, 'ban', 'test', '2026-08-20T00:00:00Z', '2026-08-25T00:00:00Z')`,
-      [a],
+      `INSERT INTO player_sanctions (player_steam_id, type, reason, created_at, remove_sanction_date, sanctioned_by_steam_id)
+       VALUES ($1, 'ban', 'test', '2026-08-20T00:00:00Z', '2026-08-25T00:00:00Z', $2)`,
+      [a, admin],
     );
     const snap = await service.calculateSnapshot(MONTH);
     const ca = snap.candidates.find((x) => x.steamId === a)!;
     expect(ca.eligible).toBe(false);
     expect(ca.disqualifiedBy[0]).toMatch(/^ban/);
+  });
+
+  it("a Steam VAC ban (automatic sanction, VAC flag) does not disqualify", async () => {
+    const [a, b] = await fx.players(2);
+    await finished("Duel", a, b);
+    await finished("Duel", a, b);
+    // Exactly what steam-bans.service.ts writes: a ban with no staff member.
+    await postgres.query(
+      `INSERT INTO player_sanctions (player_steam_id, type, sanctioned_by_steam_id, reason, created_at)
+       VALUES ($1, 'ban', NULL, 'Auto: Steam VAC ban', '2026-08-05T00:00:00Z')`,
+      [a],
+    );
+    await postgres.query(`UPDATE players SET vac_banned = true, vac_ban_count = 1, game_ban_count = 2 WHERE steam_id = $1`, [a]);
+    const snap = await service.calculateSnapshot(MONTH);
+    const ca = snap.candidates.find((x) => x.steamId === a)!;
+    expect(ca.eligible).toBe(true);
+    expect(ca.vac).toEqual({ banned: true, vacBanCount: 1, gameBanCount: 2 });
+    expect(ca.sanctions.map((x) => x.effect)).toEqual(["info"]);
+    expect(snap.recommendedSteamId).toBe(a);
   });
 
   it("calculate -> approve creates exactly one manual award occurrence in the player's history", async () => {
@@ -151,8 +170,8 @@ describe("Player of the Month (SQL-driven)", () => {
     const [a, b, outsider] = await fx.players(3);
     await finished("Duel", a, b);
     await postgres.query(
-      `INSERT INTO player_sanctions (player_steam_id, type, reason, created_at) VALUES ($1, 'warning', 'test', '2026-08-10T00:00:00Z')`,
-      [a],
+      `INSERT INTO player_sanctions (player_steam_id, type, reason, created_at, sanctioned_by_steam_id) VALUES ($1, 'warning', 'test', '2026-08-10T00:00:00Z', $2)`,
+      [a, admin],
     );
     await service.calculate(MONTH, admin);
     await expect(service.approve(MONTH, a, null, admin)).rejects.toThrow(/Not eligible/);

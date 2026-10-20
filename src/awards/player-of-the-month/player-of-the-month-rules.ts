@@ -13,7 +13,11 @@
 export type MatchCategory = "matchmaking" | "tournament" | "draft" | "custom";
 
 export const PLAYER_OF_THE_MONTH_RULES = {
-  version: 1,
+  // v2 (TricoN, 2026-10-20): only bans and warnings issued by DEAFCS staff
+  // disqualify; Steam VAC/game bans (and the automatic Steam VAC ban
+  // sanction) are shown for information only. Matchmaking eligibility and
+  // blacklist enforcement are separate and unchanged.
+  version: 2,
   timezone: "UTC",
   matchTypes: ["Competitive", "Wingman", "Duel"] as string[],
   // DECISION PENDING: draft-room and organizer-created custom matches are
@@ -21,9 +25,9 @@ export const PLAYER_OF_THE_MONTH_RULES = {
   countedCategories: ["matchmaking", "tournament"] as MatchCategory[],
   // DECISION PENDING: matches whose ELO staff/system voided are not counted.
   countEloVoided: false,
-  // Bans: disqualify when active at any time during the month.
-  // Warnings: disqualify when issued during the month (an old warning without
-  // an end date would otherwise disqualify forever). DECISION PENDING.
+  // Staff bans: disqualify when active at any time during the month.
+  // Staff warnings: disqualify when issued during the month (an old warning
+  // without an end date would otherwise disqualify forever). DECISION PENDING.
   repeatWindowMonths: 12,
   // How many eligible candidates the review lists (plus any ineligible
   // player ranked above the last of them, so nobody is dropped silently).
@@ -251,7 +255,12 @@ export function rankPlayerOfTheMonth(
         const overlapsMonth = created < end && (!until || until > start);
         const issuedInMonth = created >= start && created < end;
         let effect: "disqualifying" | "review" | "info" = "info";
-        if (s.deletedAt && overlapsMonth && (s.type === "ban" || s.type === "warning")) {
+        // Only DEAFCS's own (staff-issued) bans and warnings count. A sanction
+        // without a staff member is the automatic Steam VAC ban (the only
+        // writer of system sanctions, steam-bans.service.ts): information only.
+        if (s.system) {
+          effect = "info";
+        } else if (s.deletedAt && overlapsMonth && (s.type === "ban" || s.type === "warning")) {
           // Removed/revoked later: not applied automatically, staff decide.
           effect = "review";
         } else if (!s.deletedAt && s.type === "ban" && overlapsMonth) {
@@ -276,8 +285,8 @@ export function rankPlayerOfTheMonth(
       vacBanCount: player?.vacBanCount ?? 0,
       gameBanCount: player?.gameBanCount ?? 0,
     };
-    if (vac.banned) disqualifiedBy.push("VAC ban");
-    if (vac.gameBanCount > 0) flags.push(`${vac.gameBanCount} game ban(s) on Steam: check`);
+    // Steam VAC/game bans (other games) never decide the award; the numbers
+    // stay in the evidence (vac) for staff to see.
 
     const previousWins = details.previousWins
       .filter((w) => w.steamId === t.steamId)
