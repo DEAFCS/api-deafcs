@@ -1,7 +1,5 @@
 import { TwitchChannelStatus, TWITCH_COUNTER_STRIKE_GAME_ID, twitchThumbnail } from "./twitch.service";
-import { MAX_LIVE_STREAMERS, TwitchLiveService, VIEWER_ACTIVE_MATCH_STATUSES } from "./twitch-live.service";
-
-const VIEWER = "76561190000000001";
+import { MAX_LIVE_STREAMERS, TwitchLiveService } from "./twitch-live.service";
 
 const status = (channel: string, over: Partial<TwitchChannelStatus> = {}): TwitchChannelStatus => ({
   channel,
@@ -49,22 +47,15 @@ describe("TwitchLiveService", () => {
   let cache: FakeCache;
   let service: TwitchLiveService;
   let players: any[];
-  let inViewerMatch: string[];
 
   beforeEach(() => {
     players = [];
-    inViewerMatch = [];
     postgres = {
-      query: jest.fn(async (sql: string, params?: any[]) => {
+      query: jest.fn(async (sql: string) => {
         if (sql.includes("twitch_channel IS NOT NULL")) {
           // Banned players are filtered by the SQL itself.
           expect(sql).toContain("public.is_banned(p) IS NOT TRUE");
           return players;
-        }
-        if (sql.includes("coach_steam_id")) {
-          expect(params?.[0]).toBe(VIEWER);
-          expect(params?.[1]).toEqual(VIEWER_ACTIVE_MATCH_STATUSES);
-          return inViewerMatch.map((steam_id) => ({ steam_id }));
         }
         throw new Error(`unexpected sql ${sql}`);
       }),
@@ -83,7 +74,7 @@ describe("TwitchLiveService", () => {
       bravo: status("bravo", { viewerCount: 50 }),
       charlie: status("charlie", { viewerCount: 12 }),
     });
-    const result = await service.getLiveStreamers(null);
+    const result = await service.getLiveStreamers();
     expect(result.available).toBe(true);
     expect(result.streams.map((s) => s.playerName)).toEqual(["Bravo", "Charlie", "Alpha"]);
     expect(result.streams[0]).toMatchObject({
@@ -102,19 +93,19 @@ describe("TwitchLiveService", () => {
       off: status("off", { live: false }),
       other: status("other", { gameId: "509658", gameName: "Just Chatting" }),
     });
-    const result = await service.getLiveStreamers(null);
+    const result = await service.getLiveStreamers();
     expect(result.streams.map((s) => s.channel)).toEqual(["live"]);
   });
 
   it("Twitch unavailable: no streams and available=false (section hidden)", async () => {
     players = [linked("1", "A", "a")];
     twitch.getStatuses.mockResolvedValue({ a: status("a", { live: false, available: false }) });
-    const result = await service.getLiveStreamers(null);
+    const result = await service.getLiveStreamers();
     expect(result).toMatchObject({ available: false, streams: [] });
   });
 
   it("no linked players: nothing asked from Twitch", async () => {
-    const result = await service.getLiveStreamers(null);
+    const result = await service.getLiveStreamers();
     expect(result.streams).toEqual([]);
     expect(twitch.getStatuses).not.toHaveBeenCalled();
   });
@@ -122,27 +113,20 @@ describe("TwitchLiveService", () => {
   it("the list is cached: a second request within the fresh window does not ask Twitch again", async () => {
     players = [linked("1", "A", "a")];
     twitch.getStatuses.mockResolvedValue({ a: status("a") });
-    await service.getLiveStreamers(null);
-    await service.getLiveStreamers(null);
+    await service.getLiveStreamers();
+    await service.getLiveStreamers();
     expect(twitch.getStatuses).toHaveBeenCalledTimes(1);
   });
 
-  it("anti-cheat: a viewer does not get streams of players in their own ongoing match", async () => {
-    players = [linked("1", "Opponent", "opp"), linked("2", "Elsewhere", "else")];
-    twitch.getStatuses.mockResolvedValue({ opp: status("opp"), else: status("else") });
-    inViewerMatch = ["1"];
-    const forViewer = await service.getLiveStreamers(VIEWER);
-    expect(forViewer.streams.map((s) => s.channel)).toEqual(["else"]);
-    // Guests and other viewers still see everyone (the shared list is not changed).
-    const forGuest = await service.getLiveStreamers(null);
-    expect(forGuest.streams.map((s) => s.channel).sort()).toEqual(["else", "opp"]);
-  });
-
-  it("a malformed viewer id is treated as a guest (no SQL with it)", async () => {
-    players = [linked("1", "A", "a")];
-    twitch.getStatuses.mockResolvedValue({ a: status("a") });
-    await service.getLiveStreamers("1; DROP TABLE players");
-    expect(postgres.query.mock.calls.some(([sql]) => sql.includes("coach_steam_id"))).toBe(false);
+  it("everyone gets the same list, including players in an ongoing match (no viewer filter)", async () => {
+    // Players manage their own stream delay; the match-page anti-cheat rule
+    // (/twitch/match-streams) is separate and not used here.
+    players = [linked("1", "InAMatch", "opp"), linked("2", "Elsewhere", "else")];
+    twitch.getStatuses.mockResolvedValue({ opp: status("opp", { viewerCount: 3 }), else: status("else", { viewerCount: 1 }) });
+    const result = await service.getLiveStreamers();
+    expect(result.streams.map((s) => s.channel)).toEqual(["opp", "else"]);
+    // Only the linked-players query runs: nothing looks at matches or the viewer.
+    expect(postgres.query.mock.calls.every(([sql]) => sql.includes("twitch_channel IS NOT NULL"))).toBe(true);
   });
 
   it("old cached statuses without the new fields still work (nulls)", async () => {
@@ -152,7 +136,7 @@ describe("TwitchLiveService", () => {
     delete legacy.startedAt;
     delete legacy.thumbnailUrl;
     twitch.getStatuses.mockResolvedValue({ a: legacy });
-    const result = await service.getLiveStreamers(null);
+    const result = await service.getLiveStreamers();
     expect(result.streams[0]).toMatchObject({ viewerCount: null, startedAt: null, thumbnailUrl: null });
   });
 
@@ -161,14 +145,14 @@ describe("TwitchLiveService", () => {
     twitch.getStatuses.mockResolvedValue(
       Object.fromEntries(players.map((p, i) => [p.twitch_channel, status(p.twitch_channel, { viewerCount: i })])),
     );
-    const result = await service.getLiveStreamers(null);
+    const result = await service.getLiveStreamers();
     expect(result.streams).toHaveLength(MAX_LIVE_STREAMERS);
   });
 
   it("the response never contains credentials or tokens", async () => {
     players = [linked("1", "A", "a")];
     twitch.getStatuses.mockResolvedValue({ a: status("a") });
-    const json = JSON.stringify(await service.getLiveStreamers(null));
+    const json = JSON.stringify(await service.getLiveStreamers());
     expect(json).not.toMatch(/token|secret|client/i);
   });
 });

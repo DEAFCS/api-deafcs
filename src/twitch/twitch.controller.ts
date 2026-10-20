@@ -26,7 +26,7 @@ import { TwitchLiveService } from "./twitch-live.service";
 //                                          match the viewer plays/coaches in
 //   GET /twitch/live               public  linked players live in Counter-
 //                                          Strike, most viewers first (shared
-//                                          cache); hides the viewer's own match
+//                                          cache, the same list for everyone)
 @Controller("twitch")
 export class TwitchController {
   constructor(
@@ -69,9 +69,8 @@ export class TwitchController {
   }
 
   @Get("live")
-  public async getLive(@Req() request: Request) {
-    const user = this.viewer(request);
-    return this.live.getLiveStreamers(user?.steam_id ? String(user.steam_id) : null);
+  public async getLive() {
+    return this.live.getLiveStreamers();
   }
 
   @Get("match-streams")
