@@ -1085,7 +1085,9 @@ export class MatchesController {
     });
 
     return (
-      !!server && !server.is_dedicated && server.reserved_by_match_id === matchId
+      !!server &&
+      !server.is_dedicated &&
+      server.reserved_by_match_id === matchId
     );
   }
 
