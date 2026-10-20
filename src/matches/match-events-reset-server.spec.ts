@@ -262,6 +262,65 @@ describe("MatchesController after a tournament reset", () => {
       },
     );
 
+    describe("a Live match moved to another server", () => {
+      const moved = (replacement: Record<string, unknown> | null) => {
+        hasura.query.mockImplementation(
+          async (query: Record<string, unknown>) => {
+            if ("servers_by_pk" in query) {
+              return { servers_by_pk: replacement };
+            }
+            if ("matches_by_pk" in query) {
+              return {
+                matches_by_pk: {
+                  id: MATCH_ID,
+                  options: { prefer_dedicated_server: false },
+                  server: replacement && { id: SERVER_ID, ...replacement },
+                },
+              };
+            }
+            return {};
+          },
+        );
+        return updated(
+          { status: "Live", server_id: OLD_SERVER_ID },
+          { server_id: SERVER_ID },
+        );
+      };
+
+      // rebootOnDemandServer: the old Job is gone, the new one is booting.
+      it("does not stop the new server of a reboot", async () => {
+        await moved({ is_dedicated: false, reserved_by_match_id: MATCH_ID });
+
+        expect(matchAssistant.stopOnDemandServer).not.toHaveBeenCalled();
+        expect(matchAssistant.assignServer).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        [
+          "a dedicated server",
+          { is_dedicated: true, reserved_by_match_id: null },
+        ],
+        [
+          "an on-demand server it does not hold",
+          { is_dedicated: false, reserved_by_match_id: null },
+        ],
+        [
+          "another match's server",
+          { is_dedicated: false, reserved_by_match_id: "another-match" },
+        ],
+        ["a server that is gone", null],
+      ])(
+        "still stops the old server when moved to %s",
+        async (_, replacement) => {
+          await moved(replacement).catch((): void => undefined);
+
+          expect(matchAssistant.stopOnDemandServer).toHaveBeenCalledWith(
+            MATCH_ID,
+          );
+        },
+      );
+    });
+
     it("leaves a Live match on the server it holds", async () => {
       server = {
         id: SERVER_ID,

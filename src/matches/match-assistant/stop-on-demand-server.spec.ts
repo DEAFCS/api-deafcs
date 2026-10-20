@@ -446,6 +446,66 @@ describe("MatchAssistantService on-demand server stop", () => {
       expect(signalledPods()).toEqual([]);
     });
 
+    it("leaves a new server created while it checked the match", async () => {
+      // Reset match goes Live again between the Job read and the check: the
+      // old Job is replaced by a new one (same name) that is still booting.
+      match = { id: MATCH_ID, status: "WaitingForCheckIn" };
+      hasura.query.mockImplementation(
+        async (query: Record<string, unknown>) => {
+          if ("matches" in query) {
+            jobs[M_JOB] = {
+              uid: "uid-new",
+              pods: [
+                { name: `${M_JOB}-new`, phase: "Pending", running: false },
+              ],
+            };
+            return { matches: [match] };
+          }
+          if ("servers" in query) {
+            return { servers };
+          }
+          if ("matches_by_pk" in query) {
+            return { matches_by_pk: match };
+          }
+          return {};
+        },
+      );
+
+      await service.stopEndedMatchServer(MATCH_ID);
+
+      expect(signalledPods()).toEqual([]);
+      expect(deletedJobs()).toEqual([]);
+      expect(stopChecks()).toEqual([]);
+    });
+
+    it("signals only the pods of the Job it pinned", async () => {
+      match = { id: MATCH_ID, status: "Finished" };
+      jobs[M_JOB] = {
+        uid: "uid-m",
+        pods: [
+          { name: `${M_JOB}-old` },
+          // Left over from a replaced Job under the same name.
+          { name: `${M_JOB}-other`, ownerUid: "uid-other" },
+        ],
+      };
+
+      await service.stopEndedMatchServer(MATCH_ID);
+
+      expect(signalledPods()).toEqual([`${M_JOB}-old`]);
+    });
+
+    it("stops nothing when the Jobs cannot be read", async () => {
+      match = { id: MATCH_ID, status: "Finished" };
+      mockBatch.readNamespacedJob.mockRejectedValue(new Error("api down"));
+
+      await expect(service.stopEndedMatchServer(MATCH_ID)).resolves.toBe(
+        undefined,
+      );
+
+      expect(signalledPods()).toEqual([]);
+      expect(deletedJobs()).toEqual([]);
+    });
+
     it("leaves a server being assigned before server_id is written", async () => {
       // assignOnDemandServer reserves the row first, then sets server_id.
       match = { id: MATCH_ID, status: "Veto" };
