@@ -55,7 +55,7 @@ export class MatchAssistantService {
     ["Finished", "Canceled", "Forfeit", "Tie", "Surrendered"];
   // DEAFCS: a match is given a new server when it goes Live (match_events,
   // server_availability), so a match back in one of these after a tournament
-  // reset or a restart, holding no reservation, has no server of its own yet.
+  // reset or a restart, with no reservation, has no server of its own yet.
   private static readonly PRE_SERVER_MATCH_STATUSES: readonly e_match_status_enum[] =
     ["Scheduled", "WaitingForCheckIn", "Veto"];
   private static readonly DRAFT_CANCELLABLE_STATUSES: readonly e_match_status_enum[] =
@@ -1757,8 +1757,9 @@ export class MatchAssistantService {
   }
 
   // DEAFCS: hasMatchEnded, plus a match sent back before Live (tournament reset,
-  // restart) that holds no server. Its old server still stops at the usual
-  // tv_delay time, so GOTV and the demo upload are not cut short.
+  // restart) that has no server reserved. Its old server still stops at the
+  // usual tv_delay time, so GOTV and the demo upload are not cut short. Any
+  // reservation counts: assignOnDemandServer reserves before it writes server_id.
   private async hasMatchEndedOrStartedOver(matchId: string): Promise<boolean> {
     const { matches, servers } = await this.getOnDemandServerJobMatches([
       matchId,
@@ -1775,7 +1776,7 @@ export class MatchAssistantService {
 
     return (
       MatchAssistantService.PRE_SERVER_MATCH_STATUSES.includes(match.status) &&
-      !MatchAssistantService.holdsOnDemandServer(match, servers)
+      !servers.some((server) => server.reserved_by_match_id === match.id)
     );
   }
 

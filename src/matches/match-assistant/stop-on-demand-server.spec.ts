@@ -446,6 +446,16 @@ describe("MatchAssistantService on-demand server stop", () => {
       expect(signalledPods()).toEqual([]);
     });
 
+    it("leaves a server being assigned before server_id is written", async () => {
+      // assignOnDemandServer reserves the row first, then sets server_id.
+      match = { id: MATCH_ID, status: "Veto" };
+      servers = [{ id: SERVER_ID, reserved_by_match_id: MATCH_ID }];
+
+      await service.stopEndedMatchServer(MATCH_ID);
+
+      expect(signalledPods()).toEqual([]);
+    });
+
     it.each(["Live", "WaitingForServer", "PickingPlayers"])(
       "leaves the server of a %s match",
       async (status) => {

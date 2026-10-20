@@ -188,6 +188,56 @@ describe("MatchesController after a tournament reset", () => {
       expect(scheduledMatchesQueue.add).not.toHaveBeenCalled();
     });
 
+    it("keeps the GOTV delay: only the match end's delayed stop is queued", async () => {
+      hasura.query.mockImplementation(
+        async (query: Record<string, unknown>) => {
+          if ("servers_by_pk" in query) {
+            return { servers_by_pk: { is_dedicated: false } };
+          }
+          if ("match_options_by_pk" in query) {
+            return { match_options_by_pk: { tv_delay: 115 } };
+          }
+          return {};
+        },
+      );
+      jest
+        .spyOn(controller as any, "removeDiscordIntegration")
+        .mockResolvedValue(undefined);
+      jest
+        .spyOn(controller as any, "releaseScrimScheduledNotifications")
+        .mockResolvedValue(undefined);
+      (controller as any).matchmaking = {
+        cancelMatchMakingByMatchId: jest.fn(),
+      };
+      (controller as any).matchRelayService = { removeBroadcast: jest.fn() };
+      (controller as any).gameStreamer = { stopLiveIfRunning: jest.fn() };
+      (controller as any).steamBansQueue = {
+        add: jest.fn().mockResolvedValue({}),
+      };
+      (controller as any).clips = { resumeAllPausedBatches: jest.fn() };
+      (controller as any).handleGpuFreed = jest.fn();
+
+      // The match ends on its server...
+      await updated(
+        { status: "Live", server_id: SERVER_ID, match_options_id: "options-1" },
+        { status: "Finished" },
+      );
+      // ...and is reset inside the GOTV delay, after server_id was cleared.
+      await updated(
+        { status: "Finished", server_id: null },
+        { status: "WaitingForCheckIn" },
+      ).catch((): void => undefined);
+
+      expect(
+        scheduledMatchesQueue.add.mock.calls.filter(
+          ([name]) => name === StopOnDemandServer.name,
+        ),
+      ).toEqual([
+        [StopOnDemandServer.name, { matchId: MATCH_ID }, { delay: 115_000 }],
+      ]);
+      expect(matchAssistant.stopOnDemandServer).not.toHaveBeenCalled();
+    });
+
     it("queues no stop of its own for the reset status change", async () => {
       await updated(
         { status: "Finished", server_id: null },
