@@ -180,6 +180,123 @@ describe("Player of the Month (SQL-driven)", () => {
     expect(Number(count)).toBe(0);
   });
 
+  // Approval rechecks the chosen player on current data, inside its
+  // transaction: anything that made them ineligible after the last
+  // calculation refuses the award, and the month stays pending.
+  async function expectRefusedAndPending(winner: string, reason: RegExp) {
+    await expect(service.approve(MONTH, winner, null, admin)).rejects.toThrow(reason);
+    const [{ count }] = await postgres.query<Array<{ count: string }>>(`SELECT count(*) FROM award_occurrences`);
+    expect(Number(count)).toBe(0);
+    expect((await service.getReview(MONTH))!.status).toBe("pending");
+  }
+
+  it("a staff ban covering the month recorded after the calculation refuses the approval", async () => {
+    const [a, b] = await fx.players(2);
+    await finished("Duel", a, b);
+    await finished("Duel", a, b);
+    const review = await service.calculate(MONTH, admin);
+    expect(review.candidates.candidates.find((c) => c.steamId === a)!.eligible).toBe(true);
+    await postgres.query(
+      `INSERT INTO player_sanctions (player_steam_id, type, reason, created_at, sanctioned_by_steam_id)
+       VALUES ($1, 'ban', 'found later', '2026-08-20T00:00:00Z', $2)`,
+      [a, admin],
+    );
+    await expectRefusedAndPending(a, /No longer eligible: ban 2026-08-20/);
+    // The other candidate is unaffected.
+    await expect(service.approve(MONTH, b, null, admin)).resolves.toMatchObject({ status: "approved", winner_steam_id: b });
+  });
+
+  it("a staff warning issued in the month recorded after the calculation refuses the approval", async () => {
+    const [a, b] = await fx.players(2);
+    await finished("Duel", a, b);
+    await service.calculate(MONTH, admin);
+    await postgres.query(
+      `INSERT INTO player_sanctions (player_steam_id, type, reason, created_at, sanctioned_by_steam_id)
+       VALUES ($1, 'warning', 'late report', '2026-08-28T00:00:00Z', $2)`,
+      [a, admin],
+    );
+    await expectRefusedAndPending(a, /No longer eligible: warning 2026-08-28/);
+  });
+
+  it("a win of an earlier month approved after the calculation refuses the approval (12-month rule)", async () => {
+    const [a, b] = await fx.players(2);
+    await finished("Duel", a, b, "2026-07-10T12:00:00Z");
+    await finished("Duel", a, b);
+    await finished("Duel", a, b);
+    await service.calculate(MONTH, admin); // a eligible for August
+    await service.calculate("2026-07", admin);
+    await service.approve("2026-07", a, null, admin); // then wins July
+    await expect(service.approve(MONTH, a, null, admin)).rejects.toThrow(/No longer eligible: won 2026-07 \(12-month rule\)/);
+    expect((await service.getReview(MONTH))!.status).toBe("pending");
+  });
+
+  it("matches that stopped counting after the calculation refuse the approval", async () => {
+    const [a, b] = await fx.players(2);
+    const m = await finished("Duel", a, b);
+    await service.calculate(MONTH, admin);
+    await postgres.query(`UPDATE matches SET elo_voided = true WHERE id = $1`, [m]);
+    await expectRefusedAndPending(a, /No longer eligible: no counted match in the month/);
+  });
+
+  it("a Steam VAC ban recorded after the calculation does not block the award", async () => {
+    const [a, b] = await fx.players(2);
+    await finished("Duel", a, b);
+    await finished("Duel", a, b);
+    await service.calculate(MONTH, admin);
+    await postgres.query(
+      `INSERT INTO player_sanctions (player_steam_id, type, sanctioned_by_steam_id, reason, created_at)
+       VALUES ($1, 'ban', NULL, 'Auto: Steam VAC ban', '2026-08-25T00:00:00Z')`,
+      [a],
+    );
+    await expect(service.approve(MONTH, a, null, admin)).resolves.toMatchObject({ status: "approved", winner_steam_id: a });
+  });
+
+  it("race: a ban being written while the approval runs is seen; the approval waits for it and refuses", async () => {
+    const [a, b] = await fx.players(2);
+    await finished("Duel", a, b);
+    await finished("Duel", a, b);
+    await service.calculate(MONTH, admin);
+
+    let approval: Promise<unknown> | undefined;
+    let settled = false;
+    await postgres.transaction(async (client) => {
+      // A moderator's sanction, inserted but not yet committed.
+      await client.query(
+        `INSERT INTO player_sanctions (player_steam_id, type, reason, created_at, sanctioned_by_steam_id)
+         VALUES ($1, 'ban', 'in flight', '2026-08-30T00:00:00Z', $2)`,
+        [a, admin],
+      );
+      approval = service.approve(MONTH, a, null, admin);
+      approval.then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      // Blocked on the player's row lock until the sanction commits.
+      expect(settled).toBe(false);
+    });
+    await expect(approval).rejects.toThrow(/No longer eligible: ban 2026-08-30/);
+    const [{ count }] = await postgres.query<Array<{ count: string }>>(`SELECT count(*) FROM award_occurrences`);
+    expect(Number(count)).toBe(0);
+  });
+
+  it("race: an approval that commits first is not undone by a sanction written during it", async () => {
+    const [a, b] = await fx.players(2);
+    await finished("Duel", a, b);
+    await service.calculate(MONTH, admin);
+    // The approval holds the player's lock; a sanction insert waits for it.
+    const approval = service.approve(MONTH, a, null, admin);
+    const sanction = postgres.query(
+      `INSERT INTO player_sanctions (player_steam_id, type, reason, created_at, sanctioned_by_steam_id)
+       VALUES ($1, 'warning', 'after', now(), $2)`,
+      [a, admin],
+    );
+    await expect(approval).resolves.toMatchObject({ status: "approved", winner_steam_id: a });
+    await sanction;
+    const [{ count }] = await postgres.query<Array<{ count: string }>>(`SELECT count(*) FROM award_occurrences`);
+    expect(Number(count)).toBe(1);
+  });
+
   it("reject needs a reason; a rejected month can be recalculated back to pending", async () => {
     const [a, b] = await fx.players(2);
     await finished("Duel", a, b);

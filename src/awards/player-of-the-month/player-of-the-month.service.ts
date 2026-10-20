@@ -1,8 +1,10 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
+import { PoolClient } from "pg";
 import { PostgresService } from "../../postgres/postgres.service";
 import {
   CandidateSnapshot,
   categoryOf,
+  evaluateCandidate,
   MonthMatch,
   monthRange,
   PLAYER_OF_THE_MONTH_RULES,
@@ -35,6 +37,9 @@ export type ReviewView = {
 
 export const occurrenceKey = (month: string) => `${PLAYER_OF_THE_MONTH_SYSTEM_KEY}:${month}`;
 
+// Rows of a query on the pool or on one transaction connection.
+type Query = <T>(sql: string, params?: unknown[]) => Promise<T>;
+
 // Staff review of Player of the Month. Nothing here awards anyone on its
 // own: calculate() only stores the ranked candidates with their evidence;
 // approve() is the one place an award is created, by an administrator, for a
@@ -56,8 +61,28 @@ export class PlayerOfTheMonthService {
   }
 
   public async calculateSnapshot(month: string): Promise<CandidateSnapshot> {
-    const { start, end, key } = monthRange(month);
-    const rows = await this.postgres.query<
+    const { key } = monthRange(month);
+    const query = this.poolQuery();
+    const matches = await this.loadMatches(key, query);
+    const ids = playersToCheck(key, matches, PLAYERS_TO_CHECK);
+    if (!ids.length) {
+      return rankPlayerOfTheMonth(key, matches, { players: [], sanctions: [], previousWins: [] });
+    }
+    return rankPlayerOfTheMonth(key, matches, await this.loadDetails(key, ids, query));
+  }
+
+  private poolQuery(): Query {
+    return <T>(sql: string, params: unknown[] = []) => this.postgres.query<T>(sql, params as any);
+  }
+
+  private static clientQuery(client: PoolClient): Query {
+    return async <T>(sql: string, params: unknown[] = []) => (await client.query(sql, params)).rows as T;
+  }
+
+  // The month's finished matches with their category and lineups.
+  private async loadMatches(month: string, query: Query): Promise<MonthMatch[]> {
+    const { start, end } = monthRange(month);
+    const rows = await query<
       Array<{
         id: string;
         type: string;
@@ -99,7 +124,7 @@ export class PlayerOfTheMonthService {
       [start.toISOString(), end.toISOString(), PLAYER_OF_THE_MONTH_RULES.matchTypes],
     );
 
-    const matches: MonthMatch[] = rows.map((r) => ({
+    return rows.map((r) => ({
       id: r.id,
       type: r.type,
       category: categoryOf({ isTournament: r.is_tournament, isDraft: r.is_draft, hasOrganizer: r.has_organizer }),
@@ -110,54 +135,53 @@ export class PlayerOfTheMonthService {
       lineup2: r.lineup_2 ?? [],
       withStats: r.with_stats ?? [],
     }));
+  }
 
-    const ids = playersToCheck(key, matches, PLAYERS_TO_CHECK);
-    if (!ids.length) {
-      return rankPlayerOfTheMonth(key, matches, { players: [], sanctions: [], previousWins: [] });
-    }
-
+  // Players, staff/system sanctions overlapping the month and earlier
+  // Player of the Month wins for `ids`. Sequential: `query` may be a single
+  // transaction connection.
+  private async loadDetails(month: string, ids: string[], query: Query) {
+    const { start, end } = monthRange(month);
     const repeatFrom = new Date(
       Date.UTC(start.getUTCFullYear(), start.getUTCMonth() - PLAYER_OF_THE_MONTH_RULES.repeatWindowMonths, 1),
     );
-    const [players, sanctions, wins] = await Promise.all([
-      this.postgres.query<
-        Array<{ steam_id: string; name: string; avatar_url: string | null; country: string | null; vac_banned: boolean | null; vac_ban_count: number | null; game_ban_count: number | null }>
-      >(
-        `SELECT steam_id::text AS steam_id, name, avatar_url, country,
-                vac_banned, vac_ban_count, game_ban_count
-           FROM public.players WHERE steam_id = ANY($1::bigint[])`,
-        [ids],
-      ),
-      // Every sanction overlapping the month, removed ones included (they are
-      // shown for review, never applied silently).
-      this.postgres.query<
-        Array<{ steam_id: string; type: string; created_at: Date; remove_sanction_date: Date | null; deleted_at: Date | null; reason: string | null; system: boolean }>
-      >(
-        `SELECT player_steam_id::text AS steam_id, type, created_at, remove_sanction_date,
-                deleted_at, reason, sanctioned_by_steam_id IS NULL AS system
-           FROM public.player_sanctions
-          WHERE player_steam_id = ANY($1::bigint[])
-            AND created_at < $3::timestamptz
-            AND (remove_sanction_date IS NULL OR remove_sanction_date > $2::timestamptz)
-          ORDER BY created_at`,
-        [ids, start.toISOString(), end.toISOString()],
-      ),
-      this.postgres.query<Array<{ steam_id: string; effective_at: Date }>>(
-        `SELECT r.player_steam_id::text AS steam_id, o.effective_at
-           FROM public.award_recipients r
-           JOIN public.award_occurrences o ON o.id = r.occurrence_id
-           JOIN public.awards a ON a.id = o.award_id
-          WHERE a.system_key = $4
-            AND r.revoked_at IS NULL
-            AND r.player_steam_id = ANY($1::bigint[])
-            AND o.effective_at >= $2::timestamptz
-            AND o.effective_at < $3::timestamptz`,
-        [ids, repeatFrom.toISOString(), start.toISOString(), PLAYER_OF_THE_MONTH_SYSTEM_KEY],
-      ),
-    ]);
+    const players = await query<
+      Array<{ steam_id: string; name: string; avatar_url: string | null; country: string | null; vac_banned: boolean | null; vac_ban_count: number | null; game_ban_count: number | null }>
+    >(
+      `SELECT steam_id::text AS steam_id, name, avatar_url, country,
+              vac_banned, vac_ban_count, game_ban_count
+         FROM public.players WHERE steam_id = ANY($1::bigint[])`,
+      [ids],
+    );
+    // Every sanction overlapping the month, removed ones included (they are
+    // shown for review, never applied silently).
+    const sanctions = await query<
+      Array<{ steam_id: string; type: string; created_at: Date; remove_sanction_date: Date | null; deleted_at: Date | null; reason: string | null; system: boolean }>
+    >(
+      `SELECT player_steam_id::text AS steam_id, type, created_at, remove_sanction_date,
+              deleted_at, reason, sanctioned_by_steam_id IS NULL AS system
+         FROM public.player_sanctions
+        WHERE player_steam_id = ANY($1::bigint[])
+          AND created_at < $3::timestamptz
+          AND (remove_sanction_date IS NULL OR remove_sanction_date > $2::timestamptz)
+        ORDER BY created_at`,
+      [ids, start.toISOString(), end.toISOString()],
+    );
+    const wins = await query<Array<{ steam_id: string; effective_at: Date }>>(
+      `SELECT r.player_steam_id::text AS steam_id, o.effective_at
+         FROM public.award_recipients r
+         JOIN public.award_occurrences o ON o.id = r.occurrence_id
+         JOIN public.awards a ON a.id = o.award_id
+        WHERE a.system_key = $4
+          AND r.revoked_at IS NULL
+          AND r.player_steam_id = ANY($1::bigint[])
+          AND o.effective_at >= $2::timestamptz
+          AND o.effective_at < $3::timestamptz`,
+      [ids, repeatFrom.toISOString(), start.toISOString(), PLAYER_OF_THE_MONTH_SYSTEM_KEY],
+    );
 
     const iso = (d: Date | string | null) => (d ? new Date(d).toISOString() : null);
-    return rankPlayerOfTheMonth(key, matches, {
+    return {
       players: players.map<PlayerRow>((p) => ({
         steamId: p.steam_id,
         name: p.name,
@@ -180,7 +204,7 @@ export class PlayerOfTheMonthService {
         steamId: w.steam_id,
         month: new Date(w.effective_at).toISOString().slice(0, 7),
       })),
-    });
+    };
   }
 
   // Store (or refresh) the month's candidates. Idempotent: the same data
@@ -247,6 +271,14 @@ export class PlayerOfTheMonthService {
   // Award the month to a candidate of the stored snapshot. The award is an
   // ordinary manual occurrence (revocable by staff, permanent history);
   // calculation_key makes a second award for the same month impossible.
+  //
+  // The snapshot can be old by the time staff approve, so the chosen player
+  // is rechecked inside the transaction on current data (matches, staff
+  // sanctions, earlier wins) and refused if no longer eligible. The player's
+  // row is locked first: inserting a sanction (or an award recipient) takes
+  // a key-share lock on that row, so a sanction written concurrently either
+  // commits before the recheck reads (and is seen) or waits until the award
+  // is committed (and was issued after the decision).
   public async approve(month: string, playerSteamId: string, note: string | null, actorSteamId: string): Promise<ReviewView> {
     const { start, key } = this.assertReviewableMonth(month);
     if (!/^\d{1,20}$/.test(playerSteamId ?? "")) throw new BadRequestException("Invalid player");
@@ -264,6 +296,23 @@ export class PlayerOfTheMonthService {
       if (!candidate) throw new BadRequestException("Not a candidate of this month's review");
       if (!candidate.eligible) {
         throw new BadRequestException(`Not eligible: ${candidate.disqualifiedBy.join(", ")}`);
+      }
+
+      const locked = await client.query(`SELECT 1 FROM public.players WHERE steam_id = $1::bigint FOR UPDATE`, [
+        playerSteamId,
+      ]);
+      if (!locked.rows[0]) throw new BadRequestException("Player not found");
+      const query = PlayerOfTheMonthService.clientQuery(client);
+      const current = evaluateCandidate(
+        key,
+        await this.loadMatches(key, query),
+        await this.loadDetails(key, [playerSteamId], query),
+        playerSteamId,
+      );
+      if (!current?.eligible) {
+        throw new BadRequestException(
+          `No longer eligible: ${current?.disqualifiedBy.join(", ") || "no counted match in the month"}. Recalculate the month.`,
+        );
       }
 
       const award = await client.query<{ id: string }>(
@@ -304,6 +353,8 @@ export class PlayerOfTheMonthService {
             occurrenceId: occurrence.rows[0].id,
             recommended: row.candidates.recommendedSteamId === playerSteamId,
             eligibleMatches: candidate.eligibleMatches,
+            // As rechecked at approval time.
+            current: { eligibleMatches: current.eligibleMatches, roundsPlayed: current.roundsPlayed, flags: current.flags },
             flags: candidate.flags,
             note,
           }),

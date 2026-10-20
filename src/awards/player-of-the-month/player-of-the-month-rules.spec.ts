@@ -1,5 +1,6 @@
 import {
   categoryOf,
+  evaluateCandidate,
   MonthMatch,
   monthRange,
   PLAYER_OF_THE_MONTH_RULES,
@@ -215,12 +216,49 @@ describe("Player of the Month rules", () => {
     expect(a.flags.length).toBeGreaterThanOrEqual(3);
   });
 
-  it("equal match counts are marked as a tie for staff", () => {
-    const matches = [...many(3, [["A"], ["X"]], { rounds: 30 }), ...many(3, [["B"], ["Y"]], { rounds: 20 })];
+  it("equal match counts are decided by total rounds played (v3), not a tie", () => {
+    // A and B both play 3 matches, each against a different opponent.
+    const matches = [1, 2, 3].flatMap((i) => [
+      match([["A"], [`X${i}`]], { rounds: 20 }),
+      match([["B"], [`Y${i}`]], { rounds: 30 }),
+    ]);
     const snap = rankPlayerOfTheMonth("2026-10", matches, { ...none, players: [] });
-    const [first] = snap.candidates;
-    expect(first.steamId).toBe("A"); // more rounds: listed first (proposed tie-break)
-    expect(first.tiedWithNext).toBe(true);
+    const [first, second] = snap.candidates;
+    expect(first).toMatchObject({ steamId: "B", eligibleMatches: 3, roundsPlayed: 90, tiedWithNext: false });
+    expect(second).toMatchObject({ steamId: "A", eligibleMatches: 3, roundsPlayed: 60 });
+    expect(snap.recommendedSteamId).toBe("B");
+  });
+
+  it("only equal matches AND equal rounds remain a tie for staff", () => {
+    const matches = [...many(3, [["A"], ["X"]], { rounds: 20 }), ...many(3, [["B"], ["Y"]], { rounds: 20 })];
+    const snap = rankPlayerOfTheMonth("2026-10", matches, { ...none, players: [] });
+    expect(snap.candidates[0].tiedWithNext).toBe(true);
+    // A disqualified player in between does not hide the tie of the eligible ones.
+    const withBan = rankPlayerOfTheMonth("2026-10", matches, {
+      ...none,
+      players: [],
+      sanctions: [sanction("B", { type: "ban", createdAt: "2026-10-02T00:00:00Z" })],
+    });
+    const eligible = withBan.candidates.filter((c) => c.eligible);
+    expect(eligible[0].tiedWithNext).toBe(true);
+  });
+
+  it("evaluateCandidate checks one player wherever they rank", () => {
+    // Twelve players with more matches than C: C is beyond the review list.
+    const top = Array.from({ length: 12 }, (_, i) => many(5, [[`T${i}`], [`U${i}`]])).flat();
+    const matches = [...top, ...many(2, [["C"], ["D"]])];
+    const snap = rankPlayerOfTheMonth("2026-10", matches, { ...none, players: [] });
+    expect(snap.candidates.find((c) => c.steamId === "C")).toBeUndefined();
+    const c = evaluateCandidate("2026-10", matches, { ...none, players: [player("C")] }, "C")!;
+    expect(c).toMatchObject({ steamId: "C", eligibleMatches: 2, eligible: true });
+    const banned = evaluateCandidate(
+      "2026-10",
+      matches,
+      { ...none, players: [player("C")], sanctions: [sanction("C", { type: "ban", createdAt: "2026-10-03T00:00:00Z" })] },
+      "C",
+    )!;
+    expect(banned.eligible).toBe(false);
+    expect(evaluateCandidate("2026-10", matches, none, "nobody")).toBeNull();
   });
 
   it("is deterministic (same input, same snapshot) and records the rules version", () => {

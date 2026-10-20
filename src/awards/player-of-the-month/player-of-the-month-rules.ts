@@ -7,8 +7,8 @@
 // the calendar month (UTC). The calculation only ranks and explains; staff
 // review the evidence and approve (or reject) before anything is awarded.
 //
-// Every policy below that TricoN has not decided yet is a named setting, so a
-// decision changes one value (and bumps `version`) instead of the code.
+// Each policy is a named setting, so a change is one value (and a new
+// `version`, stored with every snapshot) instead of new code.
 
 export type MatchCategory = "matchmaking" | "tournament" | "draft" | "custom";
 
@@ -17,17 +17,21 @@ export const PLAYER_OF_THE_MONTH_RULES = {
   // disqualify; Steam VAC/game bans (and the automatic Steam VAC ban
   // sanction) are shown for information only. Matchmaking eligibility and
   // blacklist enforcement are separate and unchanged.
-  version: 2,
+  // v3 (TricoN, 2026-10-21): equal match counts are decided by total rounds
+  // played; only equal matches AND rounds remain a tie for staff. Draft
+  // Room, custom and ELO-voided matches stay excluded. Staff approval stays
+  // mandatory, with eligibility rechecked inside the approval.
+  version: 3,
   timezone: "UTC",
   matchTypes: ["Competitive", "Wingman", "Duel"] as string[],
-  // DECISION PENDING: draft-room and organizer-created custom matches are
-  // shown to staff but not counted (easy to arrange between friends).
+  // Draft-room and organizer-created custom matches are shown to staff but
+  // not counted (easy to arrange between friends).
   countedCategories: ["matchmaking", "tournament"] as MatchCategory[],
-  // DECISION PENDING: matches whose ELO staff/system voided are not counted.
+  // Matches whose ELO staff/system voided are not counted.
   countEloVoided: false,
   // Staff bans: disqualify when active at any time during the month.
   // Staff warnings: disqualify when issued during the month (an old warning
-  // without an end date would otherwise disqualify forever). DECISION PENDING.
+  // without an end date would otherwise disqualify forever).
   repeatWindowMonths: 12,
   // How many eligible candidates the review lists (plus any ineligible
   // player ranked above the last of them, so nobody is dropped silently).
@@ -340,12 +344,13 @@ export function rankPlayerOfTheMonth(
     });
   }
 
-  // Equal eligible match counts are a tie for staff to settle; rounds played
-  // only orders the list (proposed tie-break, DECISION PENDING).
+  // The ranking (tally) is matches, then total rounds played. Only equal
+  // matches AND equal rounds are left as a tie for staff to settle.
   const eligibleList = candidates.filter((c) => c.eligible);
   for (let i = 0; i < eligibleList.length - 1; i++) {
-    if (eligibleList[i].eligibleMatches === eligibleList[i + 1].eligibleMatches) {
-      eligibleList[i].tiedWithNext = true;
+    const [a, b] = [eligibleList[i], eligibleList[i + 1]];
+    if (a.eligibleMatches === b.eligibleMatches && a.roundsPlayed === b.roundsPlayed) {
+      a.tiedWithNext = true;
     }
   }
 
@@ -356,4 +361,22 @@ export function rankPlayerOfTheMonth(
     recommendedSteamId: eligibleList[0]?.steamId ?? null,
     candidates,
   };
+}
+
+// One player's evidence under the same rules, wherever they rank (the review
+// list is cut after `eligibleCandidatesShown`). Used by the approval to
+// recheck the chosen winner on current data. `details` must cover this
+// player; null when they have no counted match in the month.
+export function evaluateCandidate(
+  month: string,
+  matches: MonthMatch[],
+  details: { players: PlayerRow[]; sanctions: SanctionRow[]; previousWins: PreviousWin[] },
+  steamId: string,
+  rules: PlayerOfTheMonthRules = PLAYER_OF_THE_MONTH_RULES,
+): CandidateEvidence | null {
+  const all = rankPlayerOfTheMonth(month, matches, details, {
+    ...rules,
+    eligibleCandidatesShown: Number.MAX_SAFE_INTEGER,
+  });
+  return all.candidates.find((c) => c.steamId === steamId) ?? null;
 }
