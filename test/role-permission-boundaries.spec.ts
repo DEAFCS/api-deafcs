@@ -251,6 +251,11 @@ describe("role permission boundaries (direct Hasura requests)", () => {
     }
 
     const admin = await fx.player();
+    // The players trigger checks the caller's current role, not the session.
+    await db.postgres.query(
+      "UPDATE players SET role = 'administrator' WHERE steam_id = $1",
+      [admin],
+    );
     const target = await fx.player(undefined, { acceptTerms: false });
     const elevated = await graphql(
       "administrator",

@@ -894,8 +894,12 @@ export class ChatService {
       }
       case ChatLobbyType.Team:
         return this.canAccessTeamChat(id, user.steam_id);
-      case ChatLobbyType.Global:
-        return isRoleAbove(user.role, "verified_user");
+      case ChatLobbyType.Global: {
+        // Read fresh like Organizer: Verified can be removed while a socket
+        // or session opened before it is still in use.
+        const current = await this.getCurrentUser(String(user.steam_id));
+        return !!current && isRoleAbove(current.role, "verified_user");
+      }
       case ChatLobbyType.Direct:
         return this.directRequests.canView(id, user);
       case ChatLobbyType.Announcement:
@@ -1360,7 +1364,9 @@ export class ChatService {
       // joined (removed from the roster, role removed), so it is re-read from
       // the database on every send, not only when joining.
       if (
-        (type === ChatLobbyType.Team || type === ChatLobbyType.Organizer) &&
+        (type === ChatLobbyType.Team ||
+          type === ChatLobbyType.Organizer ||
+          type === ChatLobbyType.Global) &&
         !(await this.hasLobbyPermission(type, id, player))
       ) {
         await this.removeUserData(type, id, player.steam_id);
@@ -4120,6 +4126,34 @@ export class ChatService {
       );
     }
 
+    // Global has no roster either: a player who lost Verified stops receiving
+    // it at the next delivery. A failed lookup drops nobody.
+    let globalAllowed: Set<string> | undefined;
+    if (type === ChatLobbyType.Global && users.length) {
+      try {
+        const { players } = await this.hasuraService.query({
+          players: {
+            __args: {
+              where: {
+                steam_id: { _in: users.map(({ steamId }) => String(steamId)) },
+              },
+            },
+            steam_id: true,
+            role: true,
+          },
+        });
+        globalAllowed = new Set(
+          (players ?? [])
+            .filter((player) => isRoleAbove(player.role, "verified_user"))
+            .map((player) => String(player.steam_id)),
+        );
+      } catch (error) {
+        this.logger.warn(
+          `[chat] unable to re-check Global recipients: ${(error as Error)?.message ?? error}`,
+        );
+      }
+    }
+
     const staffLost = await this.staffViewersWhoLostAccess(
       type,
       id,
@@ -4143,6 +4177,7 @@ export class ChatService {
         (type === ChatLobbyType.Team &&
           !(await this.canAccessTeamChat(id, String(steamId)))) ||
         (organizerAllowed && !organizerAllowed.has(String(steamId))) ||
+        (globalAllowed && !globalAllowed.has(String(steamId))) ||
         staffLost.has(String(steamId))
       ) {
         await this.removeUserData(type, id, steamId);

@@ -11,6 +11,7 @@ import { RedisManagerService } from "./redis/redis-manager/redis-manager.service
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "./configs/types/AppConfig";
 import { HasuraService } from "./hasura/hasura.service";
+import { registerBodyParsers } from "./body-parsers";
 
 /**
  * Increase the max listeners, based on load we may need to increase this
@@ -40,8 +41,7 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   app.disable("x-powered-by");
 
-  app.useBodyParser("json", { limit: "50mb" });
-  app.useBodyParser("urlencoded", { limit: "50mb", extended: true });
+  registerBodyParsers(app);
 
   if (process.env.RUN_MIGRATIONS || process.env.DEV) {
     const hasura = app.get(HasuraService);

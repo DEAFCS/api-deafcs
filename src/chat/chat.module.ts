@@ -2,10 +2,9 @@ import {
   MiddlewareConsumer,
   Module,
   NestModule,
-  RequestMethod,
   forwardRef,
 } from "@nestjs/common";
-import { raw } from "express";
+import { configureAttachmentUpload } from "./chat-attachment-upload";
 import { ChatService } from "./chat.service";
 import { ChatGateway } from "./chat.gateway";
 import { HasuraModule } from "src/hasura/hasura.module";
@@ -54,16 +53,8 @@ import { getQueuesProcessors } from "../utilities/QueueProcessors";
   controllers: [ChatController, ChatVideoController],
 })
 export class ChatModule implements NestModule {
-  // The attachment upload route takes the file as a raw binary body (see
-  // ChatController.uploadAttachment) rather than JSON or multipart/form-data,
-  // so it needs its own body parser instead of the app-wide json/urlencoded
-  // ones from main.ts -- those only apply to their own content types and
-  // leave this route's stream untouched. `type: () => true` matches
-  // regardless of the client's Content-Type (already re-validated against
-  // the image/video allow-list in the controller itself).
+  // The raw attachment upload: see configureAttachmentUpload.
   public configure(consumer: MiddlewareConsumer) {
-    consumer
-      .apply(raw({ type: () => true, limit: "210mb" }))
-      .forRoutes({ path: "chat/attachment", method: RequestMethod.POST });
+    configureAttachmentUpload(consumer);
   }
 }
