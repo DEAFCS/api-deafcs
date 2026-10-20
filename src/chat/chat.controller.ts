@@ -27,9 +27,11 @@ import { S3Service } from "../s3/s3.service";
 import { User } from "../auth/types/User";
 import { GiphyService } from "../giphy/giphy.service";
 
-const MAX_ATTACHMENT_BYTES = 200 * 1024 * 1024;
-const ALLOWED_ATTACHMENT_TYPE =
-  /^(image\/(png|jpeg|webp|gif)|video\/(mp4|webm|quicktime))$/;
+import {
+  ALLOWED_ATTACHMENT_TYPE,
+  MAX_ATTACHMENT_BYTES,
+} from "./chat-attachment-upload";
+
 const EXTENSION_BY_MIMETYPE: Record<string, string> = {
   "image/png": "png",
   "image/jpeg": "jpg",

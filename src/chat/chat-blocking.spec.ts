@@ -130,6 +130,8 @@ describe("ChatService block enforcement", () => {
   describe("Shared room live message redaction", () => {
     it("redacts the sender's message only for a recipient who blocked them, via to()'s redactForRecipient", async () => {
       redis.hget.mockResolvedValue(JSON.stringify({ user: playerA }));
+      // Global re-reads the sender's role before accepting the message.
+      hasura.query.mockResolvedValueOnce({ players_by_pk: playerA });
       const toSpy = jest.spyOn(service, "to").mockResolvedValue(undefined);
       jest
         .spyOn(service as any, "notifyLobbyMembers")

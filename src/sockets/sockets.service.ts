@@ -11,18 +11,33 @@ import { ConfigService } from "@nestjs/config";
 import { FiveStackWebSocketClient } from "./types/FiveStackWebSocketClient";
 import { MatchmakeService } from "src/matchmaking/matchmake.service";
 import { MatchmakingLobbyService } from "src/matchmaking/matchmaking-lobby.service";
-import { Inject, Injectable, Logger } from "@nestjs/common";
+import {
+  Inject,
+  Injectable,
+  Logger,
+  OnApplicationShutdown,
+  OnModuleInit,
+} from "@nestjs/common";
 import { ClientProxy } from "@nestjs/microservices";
 import { DemoSessionWatcherService } from "src/matches/game-streamer/demo-session-watcher.service";
 import { HasuraService } from "src/hasura/hasura.service";
 
 @Injectable()
-export class SocketsService {
+export class SocketsService implements OnModuleInit, OnApplicationShutdown {
   private redis: Redis;
   private appConfig: AppConfig;
   private nodeId: string = process.env.POD_NAME;
 
   private clients: Map<string, FiveStackWebSocketClient> = new Map();
+
+  // From 5stackgg/api ba90c28 (its PRESENCE_TTL_SECONDS and pod tick). DEAFCS
+  // keeps its own 20s presence keys, so only the silent-socket cutoff is
+  // taken. The role is refreshed on each ping, so a socket that stops pinging
+  // must not keep the role it had.
+  private static readonly SILENT_SOCKET_SECONDS = 150;
+  private static readonly SILENT_SOCKET_CHECK_MS = 10 * 1000;
+
+  private silentSocketTimer: NodeJS.Timeout;
 
   // steam id -> ids of this node's open sockets for that player. Targeted
   // messages (ready check, DMs, ...) are delivered from this, not from the
@@ -92,6 +107,31 @@ export class SocketsService {
     });
   }
 
+  public onModuleInit() {
+    this.silentSocketTimer = setInterval(
+      () => this.closeSilentSockets(),
+      SocketsService.SILENT_SOCKET_CHECK_MS,
+    );
+    this.silentSocketTimer.unref?.();
+  }
+
+  public onApplicationShutdown() {
+    clearInterval(this.silentSocketTimer);
+  }
+
+  // The server never pings /ws/web itself, so a socket whose peer vanished
+  // without a close would otherwise stay open, and keep its player online
+  // and its role, for good.
+  public closeSilentSockets() {
+    const silentSince =
+      Date.now() - SocketsService.SILENT_SOCKET_SECONDS * 1000;
+    for (const client of Array.from(this.clients.values())) {
+      if (client.lastSeenAt < silentSince) {
+        client.terminate();
+      }
+    }
+  }
+
   public static GET_PLAYER_KEY(steamId: string) {
     return `players:${steamId}`;
   }
@@ -143,6 +183,7 @@ export class SocketsService {
         client.sessionId = request.session.id;
         client.node = this.nodeId;
         client.peerNodes = new Set();
+        client.lastSeenAt = Date.now();
 
         this.clients.set(client.id, client);
         this.indexClient(client.user.steam_id, client.id);
@@ -201,6 +242,8 @@ export class SocketsService {
   // DEAFCS: public and called from the gateway's ping (upstream calls it from
   // its heartbeat(), which DEAFCS does not have).
   public async refreshRole(client: FiveStackWebSocketClient) {
+    client.lastSeenAt = Date.now();
+
     let role: FiveStackWebSocketClient["user"]["role"] | undefined;
     try {
       role = await this.hasura.getPlayerRole(client.user.steam_id);
