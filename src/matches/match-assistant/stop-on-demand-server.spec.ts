@@ -377,6 +377,7 @@ describe("MatchAssistantService on-demand server stop", () => {
 
     it("leaves the server of a match that was started again", async () => {
       match = { id: MATCH_ID, status: "Live", server_id: SERVER_ID };
+      servers = [{ id: SERVER_ID, reserved_by_match_id: MATCH_ID }];
 
       await service.stopEndedMatchServer(MATCH_ID);
 
@@ -399,6 +400,87 @@ describe("MatchAssistantService on-demand server stop", () => {
       await service.stopEndedMatchServer(MATCH_ID);
 
       expect(signalledPods()).toEqual([`${M_JOB}-djp95`]);
+    });
+
+    // A tournament reset, or a restart (Canceled -> WaitingForCheckIn with
+    // server_id NULL in one transaction), sends the match back before Live.
+    it.each(["WaitingForCheckIn", "Scheduled", "Veto"])(
+      "stops the old server of a match sent back to %s",
+      async (status) => {
+        match = { id: MATCH_ID, status };
+
+        await service.stopEndedMatchServer(MATCH_ID);
+
+        expect(signalledPods()).toEqual([`${M_JOB}-djp95`]);
+      },
+    );
+
+    it("stops the old server when a stale server_id is another match's now", async () => {
+      match = {
+        id: MATCH_ID,
+        status: "WaitingForCheckIn",
+        server_id: SERVER_ID,
+      };
+      servers = [{ id: SERVER_ID, reserved_by_match_id: "another-match" }];
+
+      await service.stopEndedMatchServer(MATCH_ID);
+
+      expect(signalledPods()).toEqual([`${M_JOB}-djp95`]);
+      // Only this match's Job, and no write to the other match's server.
+      expect(mockCore.listNamespacedPod.mock.calls).toEqual([
+        [{ namespace: "test", labelSelector: `job-name=${M_JOB}` }],
+      ]);
+      expect(hasura.mutation).not.toHaveBeenCalled();
+    });
+
+    it("leaves a server the match was given again before Live", async () => {
+      match = {
+        id: MATCH_ID,
+        status: "WaitingForCheckIn",
+        server_id: SERVER_ID,
+      };
+      servers = [{ id: SERVER_ID, reserved_by_match_id: MATCH_ID }];
+
+      await service.stopEndedMatchServer(MATCH_ID);
+
+      expect(signalledPods()).toEqual([]);
+    });
+
+    it.each(["Live", "WaitingForServer", "PickingPlayers"])(
+      "leaves the server of a %s match",
+      async (status) => {
+        match = { id: MATCH_ID, status };
+
+        await service.stopEndedMatchServer(MATCH_ID);
+
+        expect(signalledPods()).toEqual([]);
+        expect(mockCore.listNamespacedPod).not.toHaveBeenCalled();
+      },
+    );
+
+    it("handles repeated reset and replay by the server each stop finds", async () => {
+      // Finished, reset: the stop queued at the end stops the old server.
+      match = { id: MATCH_ID, status: "WaitingForCheckIn" };
+      await service.stopEndedMatchServer(MATCH_ID);
+      expect(signalledPods()).toEqual([`${M_JOB}-djp95`]);
+
+      // Live again on a new Job under the same name: a late stop leaves it.
+      jobs[M_JOB] = { uid: "uid-m2", pods: [{ name: `${M_JOB}-k2v7q` }] };
+      match = { id: MATCH_ID, status: "Live", server_id: SERVER_ID };
+      servers = [{ id: SERVER_ID, reserved_by_match_id: MATCH_ID }];
+      await service.stopEndedMatchServer(MATCH_ID);
+      expect(signalledPods()).toEqual([`${M_JOB}-djp95`]);
+
+      // Finished and reset again: the new server is stopped in turn.
+      match = { id: MATCH_ID, status: "WaitingForCheckIn" };
+      servers = [];
+      await service.stopEndedMatchServer(MATCH_ID);
+      expect(signalledPods()).toEqual([`${M_JOB}-djp95`, `${M_JOB}-k2v7q`]);
+      expect(stopChecks().at(-1)[1]).toEqual({
+        matchId: MATCH_ID,
+        jobName: M_JOB,
+        jobUid: "uid-m2",
+      });
     });
   });
 

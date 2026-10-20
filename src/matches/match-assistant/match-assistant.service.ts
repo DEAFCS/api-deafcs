@@ -53,6 +53,11 @@ export class MatchAssistantService {
     ];
   private static readonly TERMINAL_MATCH_STATUSES: readonly e_match_status_enum[] =
     ["Finished", "Canceled", "Forfeit", "Tie", "Surrendered"];
+  // DEAFCS: a match is given a new server when it goes Live (match_events,
+  // server_availability), so a match back in one of these after a tournament
+  // reset or a restart, holding no reservation, has no server of its own yet.
+  private static readonly PRE_SERVER_MATCH_STATUSES: readonly e_match_status_enum[] =
+    ["Scheduled", "WaitingForCheckIn", "Veto"];
   private static readonly DRAFT_CANCELLABLE_STATUSES: readonly e_match_status_enum[] =
     [
       "Scheduled",
@@ -1723,7 +1728,7 @@ export class MatchAssistantService {
 
   // The queued stop can run after a restart, when the Job under this name is the new server's.
   public async stopEndedMatchServer(matchId: string) {
-    if (!(await this.hasMatchEnded(matchId))) {
+    if (!(await this.hasMatchEndedOrStartedOver(matchId))) {
       this.logger.log(
         `[${matchId}] match was started again, leaving its server running`,
       );
@@ -1748,6 +1753,29 @@ export class MatchAssistantService {
       MatchAssistantService.TERMINAL_MATCH_STATUSES.includes(
         matches_by_pk.status,
       )
+    );
+  }
+
+  // DEAFCS: hasMatchEnded, plus a match sent back before Live (tournament reset,
+  // restart) that holds no server. Its old server still stops at the usual
+  // tv_delay time, so GOTV and the demo upload are not cut short.
+  private async hasMatchEndedOrStartedOver(matchId: string): Promise<boolean> {
+    const { matches, servers } = await this.getOnDemandServerJobMatches([
+      matchId,
+    ]);
+
+    const match = matches.at(0);
+
+    if (
+      !match ||
+      MatchAssistantService.TERMINAL_MATCH_STATUSES.includes(match.status)
+    ) {
+      return true;
+    }
+
+    return (
+      MatchAssistantService.PRE_SERVER_MATCH_STATUSES.includes(match.status) &&
+      !MatchAssistantService.holdsOnDemandServer(match, servers)
     );
   }
 

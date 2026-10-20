@@ -2362,6 +2362,19 @@ export class MatchesController {
       ],
     );
 
+    // DEAFCS: the match starts over, so the server it finished on is no longer
+    // its server (its reservation was released when it finished). Normally the
+    // match end already cleared server_id; this covers a reset that got there
+    // first. Going Live again assigns a fresh server (match_events), and
+    // match_events stops the old one when server_id changes.
+    await this.postgres.query(
+      `UPDATE matches SET server_id = NULL
+        WHERE id = $1::uuid
+          AND server_id IS NOT NULL
+          AND status IN ('Scheduled', 'WaitingForCheckIn')`,
+      [match_id],
+    );
+
     return {
       success: true,
     };
