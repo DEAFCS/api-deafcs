@@ -90,6 +90,9 @@ export class MatchAssistantService {
   // DEAFCS: the match-end stop runs at draining_check_at and its stop check
   // two minutes later (plus retries); still running after this, it was lost.
   private static readonly DRAINING_SERVER_RESTOP_AFTER_MS = 5 * 60 * 1000;
+  // DEAFCS: well past the 30 second termination grace a pod deleted with no
+  // grace period may still be given on its node.
+  private static readonly DRAINING_SERVER_GONE_CONFIRM_MS = 2 * 60 * 1000;
   private static readonly MATCH_SERVER_JOB_SELECTOR =
     "app=game-server,role=match";
   private static readonly MATCH_SERVER_JOB_NAME =
@@ -2135,13 +2138,10 @@ export class MatchAssistantService {
     );
 
     for (const server of draining) {
-      let drained: boolean;
+      let state: "held" | "exited" | "gone";
 
       try {
-        drained = await this.isOnDemandServerDrained(
-          server.match_id,
-          server.id,
-        );
+        state = await this.onDemandServerDrainState(server.match_id, server.id);
       } catch (error) {
         const key = `on-demand-server:draining-check-failed:${server.id}`;
 
@@ -2154,7 +2154,30 @@ export class MatchAssistantService {
         continue;
       }
 
-      if (drained) {
+      // A pod deleted with no grace period leaves the API at once while its
+      // container may still be stopping on the node, so "gone" has to hold
+      // for a while before the ports count as free.
+      const goneSinceKey = `on-demand-server:draining-gone-since:${server.id}:${server.match_id}`;
+
+      if (state === "gone") {
+        const since = await this.cache.get(goneSinceKey);
+
+        if (typeof since !== "number") {
+          await this.cache.put(goneSinceKey, Date.now(), 30 * 60);
+          continue;
+        }
+
+        if (
+          Date.now() - since <
+          MatchAssistantService.DRAINING_SERVER_GONE_CONFIRM_MS
+        ) {
+          continue;
+        }
+      } else {
+        await this.cache.forget(goneSinceKey);
+      }
+
+      if (state !== "held") {
         this.logger.log(
           `[${server.match_id}] on demand server ${server.id} is free again`,
         );
@@ -2202,27 +2225,32 @@ export class MatchAssistantService {
     }
   }
 
-  // No pod and no unfinished Job of the match may still hold this server's
-  // node and ports. Throws when Kubernetes cannot be read.
-  private async isOnDemandServerDrained(
+  // held: an unfinished Job or a pod that is not over (pending, running,
+  // unknown, terminating) of the match was booted on this server. exited: no
+  // such thing, and the match's Job booted on it is still there and finished,
+  // so its pods really stopped. gone: nothing of the match is left on it, which
+  // proves nothing about a pod that was deleted with no grace period.
+  // Throws when Kubernetes cannot be read.
+  private async onDemandServerDrainState(
     matchId: string,
     serverId: string,
-  ): Promise<boolean> {
+  ): Promise<"held" | "exited" | "gone"> {
     const kc = new KubeConfig();
     kc.loadFromDefault();
 
     const core = kc.makeApiClient(CoreV1Api);
     const batch = kc.makeApiClient(BatchV1Api);
 
+    let exited = false;
+
     for (const jobName of await this.getMatchServerJobIds(matchId)) {
       const job = await this.readOnDemandServerJob(batch, jobName);
+      const jobOnServer =
+        !!job &&
+        MatchAssistantService.runsOnServer(job.spec?.template?.spec, serverId);
 
-      if (
-        job &&
-        !MatchAssistantService.isJobFinished(job) &&
-        MatchAssistantService.runsOnServer(job.spec?.template?.spec, serverId)
-      ) {
-        return false;
+      if (jobOnServer && !MatchAssistantService.isJobFinished(job)) {
+        return "held";
       }
 
       const { items: pods } = await core.listNamespacedPod({
@@ -2237,11 +2265,13 @@ export class MatchAssistantService {
             MatchAssistantService.runsOnServer(pod.spec, serverId),
         )
       ) {
-        return false;
+        return "held";
       }
+
+      exited ||= jobOnServer;
     }
 
-    return true;
+    return exited ? "exited" : "gone";
   }
 
   // By the SERVER_ID the server was booted with; without one it could be any.

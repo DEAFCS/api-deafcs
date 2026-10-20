@@ -93,6 +93,16 @@ describe("MatchAssistantService — draining on-demand servers", () => {
 
   const sweep = () => service.reconcileDrainingOnDemandServers();
 
+  // Sweeps a minute apart, as the repeat job runs them.
+  const sweepFor = async (minutes: number) => {
+    for (let minute = 0; minute <= minutes; minute++) {
+      if (minute > 0) {
+        now += MINUTE;
+      }
+      await sweep();
+    }
+  };
+
   beforeEach(() => {
     readNamespacedJob.mockReset();
     listNamespacedPod.mockReset();
@@ -136,6 +146,11 @@ describe("MatchAssistantService — draining on-demand servers", () => {
 
     store = new Map();
     const cache = {
+      get: jest.fn(async (key: string) => store.get(key)),
+      forget: jest.fn(async (...keys: Array<string>) => {
+        keys.forEach((key) => store.delete(key));
+        return true;
+      }),
       has: jest.fn(async (key: string) => store.has(key)),
       put: jest.fn(async (key: string, value: unknown) => {
         store.set(key, value);
@@ -221,10 +236,44 @@ describe("MatchAssistantService — draining on-demand servers", () => {
       expect(params).toEqual([SERVER_ID, MATCH_ID]);
     });
 
-    it("frees a server when the Job and its pods are gone", async () => {
+    it("frees a server whose Job and pods are gone only after two minutes", async () => {
+      // Nothing proves a pod deleted with no grace period has stopped.
+      await sweepFor(1);
+      expect(releases()).toHaveLength(0);
+
+      now += MINUTE;
+      await sweep();
+      expect(releases()).toHaveLength(1);
+    });
+
+    it("waits again when the server is seen in use in between", async () => {
+      await sweep();
+      now += MINUTE;
+      jobs.set(JOB_NAME, job());
+      await sweep();
+      jobs.delete(JOB_NAME);
+      await sweepFor(1);
+
+      expect(releases()).toHaveLength(0);
+
+      await sweepFor(1);
+      expect(releases()).toHaveLength(1);
+    });
+
+    it("does not free a server right after its ignoring pod was force deleted", async () => {
+      // The stop check deleted the Job, then its pods with no grace period.
+      jobs.set(JOB_NAME, job());
+      pods = [pod("Running")];
       await sweep();
 
-      expect(releases()).toHaveLength(1);
+      jobs.delete(JOB_NAME);
+      pods = [];
+      now += MINUTE;
+      await sweep();
+      now += MINUTE;
+      await sweep();
+
+      expect(releases()).toHaveLength(0);
     });
 
     it("frees a server whose old pod failed and whose Job gave up", async () => {
@@ -270,8 +319,11 @@ describe("MatchAssistantService — draining on-demand servers", () => {
       jobs.set(JOB_NAME, job({ serverId: OTHER_SERVER_ID }));
       pods = [pod("Running", { serverId: OTHER_SERVER_ID }), pod("Succeeded")];
 
-      await sweep();
-
+      // The old Job (and its pods) were removed when the match was given its
+      // new server, so nothing proves the old pod stopped: wait it out.
+      await sweepFor(1);
+      expect(releases()).toHaveLength(0);
+      await sweepFor(1);
       expect(releases()).toHaveLength(1);
     });
 
@@ -297,6 +349,9 @@ describe("MatchAssistantService — draining on-demand servers", () => {
         `u-${MATCH_ID}`,
         JOB_NAME,
       ]);
+      expect(releases()).toHaveLength(0);
+
+      await sweepFor(2);
       expect(releases()).toHaveLength(1);
     });
 
@@ -327,6 +382,14 @@ describe("MatchAssistantService — draining on-demand servers", () => {
         expect(logger.warn.mock.calls[0][0]).toMatch(
           /keeping it out of rotation/,
         );
+      });
+
+      it("the cache cannot be read", async () => {
+        (service as any).cache.get.mockRejectedValue(new Error("redis down"));
+
+        await expect(sweepFor(3)).rejects.toThrow("redis down");
+
+        expect(releases()).toHaveLength(0);
       });
 
       it("however long it has been draining", async () => {
@@ -464,6 +527,36 @@ describe("MatchesController.server_availability — draining servers", () => {
 
     expect(controller.matchAssistant.assignServer).toHaveBeenCalledWith(
       "waiting-match",
+    );
+  });
+
+  it("counts only servers that do not drain when a node comes online", async () => {
+    controller.hasura.query = jest.fn(async (request: any) =>
+      request.game_server_nodes_by_pk
+        ? {
+            game_server_nodes_by_pk: {
+              gpu: false,
+              servers_aggregate: { aggregate: { count: 1 } },
+            },
+          }
+        : { matches: [{ id: "waiting-match" }] },
+    );
+
+    await controller.node_server_availability({
+      op: "UPDATE",
+      new: { id: "node-1", enabled: true, status: "Online", region: REGION },
+      old: { status: "Online" },
+    });
+
+    const [request] = controller.hasura.query.mock.calls[0];
+    expect(
+      request.game_server_nodes_by_pk.servers_aggregate.__args.where,
+    ).toEqual({
+      reserved_by_match_id: { _is_null: true },
+      draining_match_id: { _is_null: true },
+    });
+    expect(controller.hasura.query.mock.calls[1][0].matches.__args.limit).toBe(
+      1,
     );
   });
 });

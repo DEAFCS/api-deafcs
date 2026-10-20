@@ -24,6 +24,7 @@ import {
   match_map_demos_set_input,
   matches_set_input,
   servers_set_input,
+  servers_bool_exp,
   game_server_nodes_set_input,
   match_lineup_players_set_input,
   e_notification_types_enum,
@@ -2812,6 +2813,10 @@ export class MatchesController {
               reserved_by_match_id: {
                 _is_null: true,
               },
+              // DEAFCS: a draining server is not free (MatchAssistantService.notDraining).
+              ...({
+                draining_match_id: { _is_null: true },
+              } as unknown as servers_bool_exp),
             },
           },
           aggregate: {

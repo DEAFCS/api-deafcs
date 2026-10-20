@@ -43,6 +43,9 @@ describe("on-demand servers drain after their match (SQL-driven)", () => {
   let controller: MatchesController;
   // Pods of the match's Job, by the server they were booted on.
   let runningOn: Array<string>;
+  // The match's m- Job once its pods are over: finished, still there.
+  let exitedOn: string | null;
+  let store: Map<string, unknown>;
 
   const REGION = "TestA";
   const NODE = "drain-node-1";
@@ -64,8 +67,16 @@ describe("on-demand servers drain after their match (SQL-driven)", () => {
       { log: jest.fn(), warn: jest.fn(), error: jest.fn() } as any,
       {} as any,
       {
-        has: jest.fn(async () => false),
-        put: jest.fn(async () => true),
+        get: jest.fn(async (key: string) => store.get(key)),
+        has: jest.fn(async (key: string) => store.has(key)),
+        put: jest.fn(async (key: string, value: unknown) => {
+          store.set(key, value);
+          return true;
+        }),
+        forget: jest.fn(async (...keys: Array<string>) => {
+          keys.forEach((key) => store.delete(key));
+          return true;
+        }),
       } as any,
       {
         get: jest.fn((key: string) =>
@@ -102,7 +113,27 @@ describe("on-demand servers drain after their match (SQL-driven)", () => {
 
   beforeEach(async () => {
     runningOn = [];
-    readNamespacedJob.mockReset().mockRejectedValue({ code: 404 });
+    exitedOn = null;
+    store = new Map();
+    readNamespacedJob.mockReset().mockImplementation(async ({ name }) => {
+      const serverId = runningOn.at(0) ?? exitedOn;
+      if (!name.startsWith("m-") || !serverId) {
+        throw { code: 404 };
+      }
+      return {
+        metadata: { name },
+        spec: {
+          template: {
+            spec: {
+              containers: [{ env: [{ name: "SERVER_ID", value: serverId }] }],
+            },
+          },
+        },
+        status: runningOn.length
+          ? { active: 1 }
+          : { conditions: [{ type: "Complete", status: "True" }] },
+      };
+    });
     listNamespacedPod.mockReset().mockImplementation(async () => ({
       items: runningOn.map((serverId) => ({
         spec: {
@@ -247,6 +278,21 @@ describe("on-demand servers drain after their match (SQL-driven)", () => {
     await service.reconcileDrainingOnDemandServers();
   };
 
+  // The old pod exited after its stop signal: its Job is there and finished.
+  const podExited = (serverId: string) => {
+    runningOn = [];
+    exitedOn = serverId;
+  };
+
+  // Two minutes pass since a sweep first saw nothing of the match left.
+  const waitOutGone = () => {
+    for (const [key, since] of store) {
+      if (key.includes("draining-gone-since") && typeof since === "number") {
+        store.set(key, since - 3 * 60 * 1000);
+      }
+    }
+  };
+
   it("a finished match's server drains until its pod is gone", async () => {
     const serverId = await onDemandServer();
     const matchId = await liveMatchOn(serverId);
@@ -273,8 +319,8 @@ describe("on-demand servers drain after their match (SQL-driven)", () => {
     await sweepWhenDue();
     expect(await assignable()).toEqual([]);
 
-    // Pod gone: free again.
-    runningOn = [];
+    // Pod exited: free again.
+    podExited(serverId);
     await sweepWhenDue();
     expect(await serverRow(serverId)).toEqual({
       reserved_by_match_id: null,
@@ -328,13 +374,17 @@ describe("on-demand servers drain after their match (SQL-driven)", () => {
     expect(row.draining_match_id).toBe(matchId);
     expect(row.check_in_s).toBeLessThanOrEqual(0);
 
-    // Both Job names of a deleted match are checked.
-    runningOn = [];
+    // Both Job names of a deleted match are checked. Nothing is left of it,
+    // which only counts once it has stayed that way for two minutes.
     await service.reconcileDrainingOnDemandServers();
     expect(readNamespacedJob.mock.calls.map(([r]) => r.name)).toEqual([
       `u-${matchId}`,
       `m-${matchId}`,
     ]);
+    expect((await serverRow(serverId)).draining_match_id).toBe(matchId);
+
+    waitOutGone();
+    await service.reconcileDrainingOnDemandServers();
     expect((await serverRow(serverId)).draining_match_id).toBeNull();
   });
 
@@ -378,7 +428,7 @@ describe("on-demand servers drain after their match (SQL-driven)", () => {
     expect(await assignable()).toEqual([]);
 
     // Its old pod stopped (Canceled is stopped at once): free again.
-    runningOn = [];
+    podExited(serverId);
     await service.reconcileDrainingOnDemandServers();
     expect(await assignable()).toEqual([serverId]);
   });
@@ -408,7 +458,7 @@ describe("on-demand servers drain after their match (SQL-driven)", () => {
     const serverId = await onDemandServer();
     const matchId = await liveMatchOn(serverId);
     await end(matchId);
-    runningOn = [];
+    podExited(serverId);
     await sweepWhenDue();
     const otherMatchId = await liveMatchOn(serverId);
 
@@ -473,8 +523,13 @@ describe("on-demand servers drain after their match (SQL-driven)", () => {
       await assign(final.match_id, second);
       runningOn = [second];
 
+      // The old Job and its pods were deleted with no grace period when the
+      // new server was assigned: free only once that has had time to finish.
       await sweepWhenDue();
+      expect((await serverRow(first)).draining_match_id).toBe(final.match_id);
 
+      waitOutGone();
+      await sweepWhenDue();
       expect((await serverRow(first)).draining_match_id).toBeNull();
       expect((await serverRow(second)).reserved_by_match_id).toBe(
         final.match_id,
