@@ -8,6 +8,7 @@ import {
   Exec,
   V1Job,
   V1Pod,
+  V1PodSpec,
 } from "@kubernetes/client-node";
 import { RconService } from "../../rcon/rcon.service";
 import { User } from "../../auth/types/User";
@@ -86,6 +87,9 @@ export class MatchAssistantService {
   private static readonly ORPHANED_JOB_ENDED_GRACE_MS = 10 * 60 * 1000;
   // DEAFCS: a bad read must not empty the cluster in one sweep; the rest wait a minute.
   private static readonly ORPHANED_JOB_MAX_REMOVALS_PER_SWEEP = 3;
+  // DEAFCS: the match-end stop runs at draining_check_at and its stop check
+  // two minutes later (plus retries); still running after this, it was lost.
+  private static readonly DRAINING_SERVER_RESTOP_AFTER_MS = 5 * 60 * 1000;
   private static readonly MATCH_SERVER_JOB_SELECTOR =
     "app=game-server,role=match";
   private static readonly MATCH_SERVER_JOB_NAME =
@@ -277,6 +281,7 @@ export class MatchAssistantService {
               _is_null: true,
             },
             ...MatchAssistantService.pendingDemoUploadExclusion(),
+            ...MatchAssistantService.notDraining(),
             game_server_node: {
               _and: [
                 {
@@ -742,6 +747,17 @@ export class MatchAssistantService {
     };
   }
 
+  // DEAFCS: pendingDemoUploadExclusion goes through matches.server_id, which
+  // match_events clears as soon as a match ends, so it never sees an on-demand
+  // server whose old pod is still running. tau_matches / tbd_matches mark such
+  // a server draining; it stays out until reconcileDrainingOnDemandServers
+  // confirms the pod is gone. (draining_match_id is newer than the generated client.)
+  private static notDraining(): servers_bool_exp {
+    return {
+      draining_match_id: { _is_null: true },
+    } as unknown as servers_bool_exp;
+  }
+
   private async assignDedicatedServer(
     matchId: string,
     region: string,
@@ -969,6 +985,7 @@ export class MatchAssistantService {
                   _is_null: true,
                 },
                 ...MatchAssistantService.pendingDemoUploadExclusion(),
+                ...MatchAssistantService.notDraining(),
                 game_server_node: {
                   _and: [
                     {
@@ -2098,6 +2115,142 @@ export class MatchAssistantService {
     await this.cache.put(key, true, 24 * 60 * 60);
 
     this.logger.warn(message);
+  }
+
+  // DEAFCS: a draining server (see notDraining) is handed out again only once
+  // Kubernetes shows no pod or unfinished Job of its last match on it. A failed
+  // check keeps it draining: neither a timeout nor an unreachable cluster makes
+  // a busy server reusable. Still in use well after its stop time means the
+  // match-end stop was lost, so that stop is queued again (with its own checks:
+  // a match that was started again keeps its server).
+  public async reconcileDrainingOnDemandServers(): Promise<void> {
+    const draining = await this.postgres.query<
+      Array<{ id: string; match_id: string; check_at: Date | null }>
+    >(
+      `SELECT id::text AS id, draining_match_id::text AS match_id,
+              draining_check_at AS check_at
+         FROM public.servers
+        WHERE draining_match_id IS NOT NULL
+          AND (draining_check_at IS NULL OR draining_check_at <= now())`,
+    );
+
+    for (const server of draining) {
+      let drained: boolean;
+
+      try {
+        drained = await this.isOnDemandServerDrained(
+          server.match_id,
+          server.id,
+        );
+      } catch (error) {
+        const key = `on-demand-server:draining-check-failed:${server.id}`;
+
+        if (!(await this.cache.has(key))) {
+          await this.cache.put(key, true, 10 * 60);
+          this.logger.warn(
+            `[${server.match_id}] unable to check draining on demand server ${server.id}, keeping it out of rotation: ${error?.message}`,
+          );
+        }
+        continue;
+      }
+
+      if (drained) {
+        this.logger.log(
+          `[${server.match_id}] on demand server ${server.id} is free again`,
+        );
+
+        await this.postgres.query(
+          `UPDATE public.servers
+              SET draining_match_id = NULL, draining_check_at = NULL
+            WHERE id = $1::uuid
+              AND draining_match_id = $2::uuid`,
+          [server.id, server.match_id],
+        );
+        continue;
+      }
+
+      const checkAt = server.check_at ? new Date(server.check_at).getTime() : 0;
+
+      if (
+        Date.now() - checkAt <
+        MatchAssistantService.DRAINING_SERVER_RESTOP_AFTER_MS
+      ) {
+        continue;
+      }
+
+      const key = `on-demand-server:draining-restop:${server.match_id}`;
+
+      if (await this.cache.has(key)) {
+        continue;
+      }
+
+      await this.cache.put(
+        key,
+        true,
+        MatchAssistantService.DRAINING_SERVER_RESTOP_AFTER_MS / 1000,
+      );
+
+      this.logger.warn(
+        `[${server.match_id}] on demand server ${server.id} is still in use after its stop time, stopping it again`,
+      );
+
+      await this.scheduledMatchesQueue.add(
+        MatchJobs.StopOnDemandServer,
+        { matchId: server.match_id },
+        { removeOnComplete: true, removeOnFail: true },
+      );
+    }
+  }
+
+  // No pod and no unfinished Job of the match may still hold this server's
+  // node and ports. Throws when Kubernetes cannot be read.
+  private async isOnDemandServerDrained(
+    matchId: string,
+    serverId: string,
+  ): Promise<boolean> {
+    const kc = new KubeConfig();
+    kc.loadFromDefault();
+
+    const core = kc.makeApiClient(CoreV1Api);
+    const batch = kc.makeApiClient(BatchV1Api);
+
+    for (const jobName of await this.getMatchServerJobIds(matchId)) {
+      const job = await this.readOnDemandServerJob(batch, jobName);
+
+      if (
+        job &&
+        !MatchAssistantService.isJobFinished(job) &&
+        MatchAssistantService.runsOnServer(job.spec?.template?.spec, serverId)
+      ) {
+        return false;
+      }
+
+      const { items: pods } = await core.listNamespacedPod({
+        namespace: this.namespace,
+        labelSelector: `job-name=${jobName}`,
+      });
+
+      if (
+        pods.some(
+          (pod) =>
+            !["Succeeded", "Failed"].includes(pod.status?.phase) &&
+            MatchAssistantService.runsOnServer(pod.spec, serverId),
+        )
+      ) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  // By the SERVER_ID the server was booted with; without one it could be any.
+  private static runsOnServer(spec: V1PodSpec | undefined, serverId: string) {
+    const env = spec?.containers
+      ?.at(0)
+      ?.env?.find(({ name }) => name === "SERVER_ID");
+
+    return !env?.value || env.value === serverId;
   }
 
   private async releaseOnDemandServer(

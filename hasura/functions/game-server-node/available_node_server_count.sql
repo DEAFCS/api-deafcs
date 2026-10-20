@@ -7,6 +7,7 @@ AS $$
     FROM servers s
     WHERE s.game_server_node_id = game_server_node.id
       AND s.reserved_by_match_id IS NULL
+      AND s.draining_match_id IS NULL
       AND s.enabled = true
       AND s.type = 'Ranked';
 $$;

@@ -2733,10 +2733,19 @@ export class MatchesController {
 
   @HasuraEvent()
   public async server_availability(data: HasuraEventData<servers_set_input>) {
+    // DEAFCS: a draining server is not free yet; the waiting match is tried
+    // again when the drain clears, by which time the old pod has disconnected.
+    // (draining_match_id is newer than the generated client.)
+    type Draining = { draining_match_id?: string | null };
+    const draining = !!(data.new as Draining).draining_match_id;
+    const drained =
+      !!(data.old as Draining | undefined)?.draining_match_id && !draining;
+
     if (
       data.new.enabled === false ||
-      data.new.connected === false ||
-      data.new.reserved_by_match_id !== null
+      (data.new.connected === false && !drained) ||
+      data.new.reserved_by_match_id !== null ||
+      draining
     ) {
       return;
     }
