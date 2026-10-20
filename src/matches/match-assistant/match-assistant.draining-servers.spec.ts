@@ -1,5 +1,6 @@
 const readNamespacedJob = jest.fn();
 const listNamespacedPod = jest.fn();
+const readNode = jest.fn();
 
 jest.mock("@kubernetes/client-node", () => ({
   BatchV1Api: class BatchV1Api {
@@ -7,6 +8,7 @@ jest.mock("@kubernetes/client-node", () => ({
   },
   CoreV1Api: class CoreV1Api {
     listNamespacedPod = listNamespacedPod;
+    readNode = readNode;
   },
   KubeConfig: class KubeConfig {
     loadFromDefault() {}
@@ -30,6 +32,7 @@ describe("MatchAssistantService — draining on-demand servers", () => {
   const SERVER_ID = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
   const OTHER_SERVER_ID = "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e";
   const JOB_NAME = `m-${MATCH_ID}`;
+  const NODE_ID = "kernelhost";
 
   let service: MatchAssistantService;
   let hasura: { query: jest.Mock; mutation: jest.Mock };
@@ -42,6 +45,8 @@ describe("MatchAssistantService — draining on-demand servers", () => {
   let draining: Array<{ id: string; match_id: string; check_at: Date }>;
   let jobs: Map<string, unknown>;
   let pods: Array<unknown>;
+  // The server's node's Ready condition; null when the node is not there.
+  let nodeReady: string | null;
 
   const spec = (serverId: string | null = SERVER_ID) => ({
     containers: [
@@ -77,7 +82,12 @@ describe("MatchAssistantService — draining on-demand servers", () => {
 
   const drainingServer = (checkAt = NOW - MINUTE) => {
     draining = [
-      { id: SERVER_ID, match_id: MATCH_ID, check_at: new Date(checkAt) },
+      {
+        id: SERVER_ID,
+        match_id: MATCH_ID,
+        check_at: new Date(checkAt),
+        node_id: NODE_ID,
+      },
     ];
   };
 
@@ -106,6 +116,16 @@ describe("MatchAssistantService — draining on-demand servers", () => {
   beforeEach(() => {
     readNamespacedJob.mockReset();
     listNamespacedPod.mockReset();
+    readNode.mockReset();
+    nodeReady = "True";
+    readNode.mockImplementation(async ({ name }) => {
+      if (name !== NODE_ID || nodeReady === null) {
+        throw { code: 404 };
+      }
+      return {
+        status: { conditions: [{ type: "Ready", status: nodeReady }] },
+      };
+    });
 
     now = NOW;
     jest.spyOn(Date, "now").mockImplementation(() => now);
@@ -399,6 +419,74 @@ describe("MatchAssistantService — draining on-demand servers", () => {
         await sweep();
 
         expect(releases()).toHaveLength(0);
+      });
+    });
+
+    describe("the server's node", () => {
+      it.each([
+        ["not ready", "False"],
+        ["unreachable", "Unknown"],
+        ["gone from the cluster", null],
+      ])(
+        "keeps a server whose pods vanished while its node is %s",
+        async (_, ready) => {
+          nodeReady = ready;
+
+          await sweepFor(30);
+
+          expect(releases()).toHaveLength(0);
+          expect(restops()).toHaveLength(0);
+          expect(
+            logger.warn.mock.calls.filter(([m]) => /is not ready/.test(m)),
+          ).toHaveLength(1); // rate limited (10 min key; the mock cache never expires)
+        },
+      );
+
+      it("waits the full two minutes again once the node is back", async () => {
+        await sweep();
+        now += MINUTE;
+        nodeReady = "Unknown";
+        await sweepFor(5);
+        nodeReady = "True";
+        now += MINUTE;
+        await sweepFor(1);
+
+        expect(releases()).toHaveLength(0);
+
+        now += MINUTE;
+        await sweep();
+        expect(releases()).toHaveLength(1);
+      });
+
+      it("keeps a server whose node cannot be read", async () => {
+        readNode.mockRejectedValue({ code: 500 });
+
+        await sweepFor(5);
+
+        expect(releases()).toHaveLength(0);
+        expect(logger.warn.mock.calls[0][0]).toMatch(
+          /keeping it out of rotation/,
+        );
+      });
+
+      it("keeps a server with no node", async () => {
+        drainingServer();
+        draining[0] = { ...draining[0], node_id: null as any };
+
+        await sweepFor(5);
+
+        expect(releases()).toHaveLength(0);
+        expect(readNode).not.toHaveBeenCalled();
+      });
+
+      it("does not need the node when the Job shows its pods exited", async () => {
+        nodeReady = "Unknown";
+        jobs.set(JOB_NAME, job({ finished: true }));
+        pods = [pod("Succeeded")];
+
+        await sweep();
+
+        expect(releases()).toHaveLength(1);
       });
     });
 

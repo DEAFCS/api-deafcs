@@ -2128,20 +2128,29 @@ export class MatchAssistantService {
   // a match that was started again keeps its server).
   public async reconcileDrainingOnDemandServers(): Promise<void> {
     const draining = await this.postgres.query<
-      Array<{ id: string; match_id: string; check_at: Date | null }>
+      Array<{
+        id: string;
+        match_id: string;
+        check_at: Date | null;
+        node_id: string | null;
+      }>
     >(
       `SELECT id::text AS id, draining_match_id::text AS match_id,
-              draining_check_at AS check_at
+              draining_check_at AS check_at, game_server_node_id AS node_id
          FROM public.servers
         WHERE draining_match_id IS NOT NULL
           AND (draining_check_at IS NULL OR draining_check_at <= now())`,
     );
 
     for (const server of draining) {
-      let state: "held" | "exited" | "gone";
+      let state: "held" | "exited" | "gone" | "unconfirmed";
 
       try {
-        state = await this.onDemandServerDrainState(server.match_id, server.id);
+        state = await this.onDemandServerDrainState(
+          server.match_id,
+          server.id,
+          server.node_id,
+        );
       } catch (error) {
         const key = `on-demand-server:draining-check-failed:${server.id}`;
 
@@ -2155,9 +2164,23 @@ export class MatchAssistantService {
       }
 
       // A pod deleted with no grace period leaves the API at once while its
-      // container may still be stopping on the node, so "gone" has to hold
-      // for a while before the ports count as free.
+      // container may still be stopping on the node, so "gone" has to hold,
+      // with the node's kubelet reporting, before the ports count as free.
       const goneSinceKey = `on-demand-server:draining-gone-since:${server.id}:${server.match_id}`;
+
+      if (state === "unconfirmed") {
+        await this.cache.forget(goneSinceKey);
+
+        const key = `on-demand-server:draining-node-not-ready:${server.id}`;
+
+        if (!(await this.cache.has(key))) {
+          await this.cache.put(key, true, 10 * 60);
+          this.logger.warn(
+            `[${server.match_id}] node ${server.node_id} of draining on demand server ${server.id} is not ready, keeping it out of rotation`,
+          );
+        }
+        continue;
+      }
 
       if (state === "gone") {
         const since = await this.cache.get(goneSinceKey);
@@ -2230,11 +2253,15 @@ export class MatchAssistantService {
   // such thing, and the match's Job booted on it is still there and finished,
   // so its pods really stopped. gone: nothing of the match is left on it, which
   // proves nothing about a pod that was deleted with no grace period.
+  // unconfirmed: gone, but the server's node is not Ready (or not there): a pod
+  // force deleted while its node is unreachable may still be running on it,
+  // and nothing can stop it until the kubelet is back.
   // Throws when Kubernetes cannot be read.
   private async onDemandServerDrainState(
     matchId: string,
     serverId: string,
-  ): Promise<"held" | "exited" | "gone"> {
+    nodeId: string | null,
+  ): Promise<"held" | "exited" | "gone" | "unconfirmed"> {
     const kc = new KubeConfig();
     kc.loadFromDefault();
 
@@ -2271,7 +2298,31 @@ export class MatchAssistantService {
       exited ||= jobOnServer;
     }
 
-    return exited ? "exited" : "gone";
+    if (exited) {
+      return "exited";
+    }
+
+    return nodeId && (await this.isNodeReady(core, nodeId))
+      ? "gone"
+      : "unconfirmed";
+  }
+
+  // The kubelet is reporting: it kills the containers of pods removed from
+  // the API. A node that is gone from the cluster cannot be confirmed.
+  private async isNodeReady(core: CoreV1Api, nodeId: string) {
+    try {
+      const node = await core.readNode({ name: nodeId });
+
+      return (node.status?.conditions ?? []).some(
+        (condition) =>
+          condition.type === "Ready" && condition.status === "True",
+      );
+    } catch (error) {
+      if (MatchAssistantService.isNotFound(error)) {
+        return false;
+      }
+      throw error;
+    }
   }
 
   // By the SERVER_ID the server was booted with; without one it could be any.

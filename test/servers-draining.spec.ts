@@ -1,5 +1,8 @@
 const readNamespacedJob = jest.fn();
 const listNamespacedPod = jest.fn();
+const readNode = jest.fn(async () => ({
+  status: { conditions: [{ type: "Ready", status: "True" }] },
+}));
 
 jest.mock("@kubernetes/client-node", () => ({
   BatchV1Api: class BatchV1Api {
@@ -7,6 +10,7 @@ jest.mock("@kubernetes/client-node", () => ({
   },
   CoreV1Api: class CoreV1Api {
     listNamespacedPod = listNamespacedPod;
+    readNode = readNode;
   },
   KubeConfig: class KubeConfig {
     loadFromDefault() {}
