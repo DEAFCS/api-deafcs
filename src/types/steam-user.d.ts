@@ -10,10 +10,17 @@ declare module "steam-user" {
     password?: string;
     refreshToken?: string;
     twoFactorCode?: string;
+    // Sent as obfuscated_private_ip; two sessions of one account from the same
+    // public IP with the same id replace each other. Defaults to 0.
+    logonID?: number | string;
   }
 
   class SteamUser extends EventEmitter {
-    constructor(options?: { enablePicsCache?: boolean; autoRelogin?: boolean });
+    constructor(options?: {
+      enablePicsCache?: boolean;
+      autoRelogin?: boolean;
+      dataDirectory?: string | null;
+    });
     steamID?: SteamID | null;
     // Map of friend steamid64 -> EFriendRelationship.
     myFriends: Record<string, number>;
