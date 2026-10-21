@@ -174,4 +174,63 @@ describe("MatchRecoveryController", () => {
     expect(recovery.restartMatchMap).toHaveBeenCalledWith("match-1", user);
     expect(recovery.setMatchPaused).toHaveBeenCalledWith("match-1", true, user);
   });
+
+  // Ported from 5Stack API 9f4c954 (#686); DEAFCS passes the user on.
+  describe("veto recovery", () => {
+    const vetoSetup = (organizer: boolean) => {
+      const recovery = {
+        rewindMapVeto: jest.fn(async () => ({ success: true })),
+        extendVetoClock: jest.fn(async () => ({ success: true })),
+      };
+      return {
+        controller: new MatchRecoveryController(
+          { isOrganizer: jest.fn(async () => organizer) } as never,
+          recovery as never,
+        ),
+        recovery,
+      };
+    };
+
+    it("keeps Undo, Fix a Mis-pick, Redo and Give 30s More to organizers", async () => {
+      const { controller, recovery } = vetoSetup(false);
+
+      await expect(
+        controller.rewindMapVeto({ match_id: "match-1", step: 3, user }),
+      ).rejects.toThrow("you are not a match organizer");
+      await expect(
+        controller.extendVetoClock({ match_id: "match-1", seconds: 30, user }),
+      ).rejects.toThrow("you are not a match organizer");
+
+      expect(recovery.rewindMapVeto).not.toHaveBeenCalled();
+      expect(recovery.extendVetoClock).not.toHaveBeenCalled();
+    });
+
+    it("hands organizers' requests to the service", async () => {
+      const { controller, recovery } = vetoSetup(true);
+
+      await controller.rewindMapVeto({
+        match_id: "match-1",
+        step: 3,
+        expected_picks: 5,
+        user,
+      });
+      await controller.extendVetoClock({
+        match_id: "match-1",
+        seconds: 30,
+        user,
+      });
+
+      expect(recovery.rewindMapVeto).toHaveBeenCalledWith(
+        "match-1",
+        3,
+        5,
+        user,
+      );
+      expect(recovery.extendVetoClock).toHaveBeenCalledWith(
+        "match-1",
+        30,
+        user,
+      );
+    });
+  });
 });
