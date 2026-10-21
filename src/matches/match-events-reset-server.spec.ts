@@ -238,6 +238,31 @@ describe("MatchesController after a tournament reset", () => {
       expect(matchAssistant.stopOnDemandServer).not.toHaveBeenCalled();
     });
 
+    // DEAFCS Restart Match: one event, Live on its server -> WaitingForCheckIn
+    // without one. The old server stops; nothing of a match end runs (the
+    // matchmaking, Discord, stream and ELO stubs here would throw if it did).
+    it("stops the old server once and runs no match end for a Restart Match", async () => {
+      await expect(
+        updated(
+          { status: "Live", server_id: OLD_SERVER_ID },
+          { status: "WaitingForCheckIn", server_id: null },
+        ),
+      ).resolves.toBeUndefined();
+
+      expect(matchAssistant.stopOnDemandServer).toHaveBeenCalledTimes(1);
+      expect(matchAssistant.stopOnDemandServer).toHaveBeenCalledWith(MATCH_ID);
+      expect(matchAssistant.assignServer).not.toHaveBeenCalled();
+      expect(scheduledMatchesQueue.add).not.toHaveBeenCalled();
+      expect(
+        hasura.mutation.mock.calls.some(
+          ([mutation]) => "update_matches_by_pk" in mutation,
+        ),
+      ).toBe(false);
+      expect(
+        (controller as any).tournamentVoice.createMatchVoiceChannels,
+      ).toHaveBeenCalledWith(MATCH_ID);
+    });
+
     it("queues no stop of its own for the reset status change", async () => {
       await updated(
         { status: "Finished", server_id: null },

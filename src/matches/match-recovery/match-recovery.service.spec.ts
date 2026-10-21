@@ -168,6 +168,7 @@ const setup = (
     benchedSub?: boolean;
     affiliated?: boolean;
     liveMaps?: Array<{ id: string }>;
+    lockedStatus?: string;
     restoreResponse?: string | undefined;
     serverResponse?: string | undefined;
   } = {},
@@ -202,6 +203,17 @@ const setup = (
           if (sql.includes("SELECT id FROM match_maps")) {
             return { rows: options.liveMaps ?? [] };
           }
+          if (sql.includes("FOR UPDATE")) {
+            const match = options.match ?? matchRow();
+            return {
+              rows: [
+                {
+                  status: options.lockedStatus ?? match.status,
+                  server_id: match.server_id,
+                },
+              ],
+            };
+          }
           return { rows: [] };
         },
       }),
@@ -223,14 +235,19 @@ const setup = (
     ),
   };
 
+  const gameStreamer = {
+    stopLiveIfRunning: jest.fn(async (): Promise<void> => undefined),
+  };
+
   const logger = { log: jest.fn(), warn: jest.fn() };
   const service = new MatchRecoveryService(
     logger as never,
     postgres as never,
     matchAssistant as never,
+    gameStreamer as never,
   );
 
-  return { service, postgres, matchAssistant, logger };
+  return { service, postgres, matchAssistant, gameStreamer, logger };
 };
 
 describe("MatchRecoveryService", () => {
@@ -688,44 +705,53 @@ describe("MatchRecoveryService", () => {
   });
 
   describe("restartMatch", () => {
-    it("cancels a live match, puts the map in progress back to the start, then reopens check-in", async () => {
-      const { service, postgres, matchAssistant } = setup({
-        liveMaps: [{ id: MAP_ID }],
-      });
+    // DEAFCS: no Canceled step (see restartMatch).
+    it("puts the map in progress back to the start, drains the server, then reopens check-in", async () => {
+      const { service, postgres, matchAssistant, gameStreamer, logger } = setup(
+        { liveMaps: [{ id: MAP_ID }] },
+      );
 
-      await service.restartMatch("match-1");
+      await service.restartMatch("match-1", VIEWER);
 
       expect(postgres.statements).toEqual([
-        "UPDATE matches SET status = 'Canceled' WHERE id = $1",
+        "SELECT status, server_id::text AS server_id FROM matches WHERE id = $1 FOR UPDATE",
         "SELECT id FROM match_maps WHERE match_id = $1 AND status = ANY($2)",
         "SELECT reset_match_map_to_round($1, 0)",
         "UPDATE match_maps SET status = 'Scheduled', started_at = NULL WHERE id = ANY($1)",
+        expect.stringMatching(
+          /^UPDATE servers SET reserved_by_match_id = NULL, draining_match_id = .* WHERE id = \$2 AND reserved_by_match_id = \$1$/,
+        ),
         "UPDATE matches SET status = 'WaitingForCheckIn', server_id = NULL, cancels_at = NULL WHERE id = $1",
       ]);
+      expect(
+        postgres.statements.some((sql) => sql.includes("'Canceled'")),
+      ).toBe(false);
       expect(matchAssistant.refreshServerMatch).toHaveBeenCalledWith(
         "server-1",
       );
+      expect(gameStreamer.stopLiveIfRunning).toHaveBeenCalledWith("match-1");
+      expect(logger.log).toHaveBeenCalledWith(
+        `[match-1] restarted the match from check-in (by ${VIEWER.steam_id}, ${VIEWER.role})`,
+      );
     });
 
-    it("reopens a canceled match without touching maps nobody is playing", async () => {
-      const { service, postgres, matchAssistant } = setup({
-        match: matchRow({ status: "Canceled", server_id: null }),
+    it("still restarts when the livestream can't be stopped", async () => {
+      const { service, gameStreamer, logger } = setup();
+      gameStreamer.stopLiveIfRunning.mockRejectedValue(new Error("down"));
+
+      await expect(service.restartMatch("match-1", VIEWER)).resolves.toEqual({
+        success: true,
       });
-
-      await service.restartMatch("match-1");
-
-      expect(postgres.statements).toEqual([
-        "SELECT id FROM match_maps WHERE match_id = $1 AND status = ANY($2)",
-        "UPDATE matches SET status = 'WaitingForCheckIn', server_id = NULL, cancels_at = NULL WHERE id = $1",
-      ]);
-      expect(matchAssistant.refreshServerMatch).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalled();
     });
 
     it.each([
       [matchRow({ status: "Finished" }), "a Finished match can't be restarted"],
+      [matchRow({ status: "Canceled" }), "a Canceled match can't be restarted"],
+      [matchRow({ status: "Veto" }), "a Veto match can't be restarted"],
       [
-        matchRow({ status: "Canceled", winning_lineup_id: LINEUP_1 }),
-        "this match already has a result",
+        matchRow({ status: "WaitingForCheckIn" }),
+        "a WaitingForCheckIn match can't be restarted",
       ],
       [
         matchRow({ source: "faceit" }),
@@ -734,8 +760,22 @@ describe("MatchRecoveryService", () => {
     ])("refuses %#", async (match, message) => {
       const { service, postgres } = setup({ match });
 
-      await expect(service.restartMatch("match-1")).rejects.toThrow(message);
+      await expect(service.restartMatch("match-1", VIEWER)).rejects.toThrow(
+        message,
+      );
       expect(postgres.transaction).not.toHaveBeenCalled();
+    });
+
+    it("changes nothing when the match ended while it was being restarted", async () => {
+      const { service, postgres, matchAssistant } = setup({
+        lockedStatus: "Finished",
+      });
+
+      await expect(service.restartMatch("match-1", VIEWER)).rejects.toThrow(
+        "a Finished match can't be restarted",
+      );
+      expect(postgres.statements).toHaveLength(1);
+      expect(matchAssistant.refreshServerMatch).not.toHaveBeenCalled();
     });
   });
 
