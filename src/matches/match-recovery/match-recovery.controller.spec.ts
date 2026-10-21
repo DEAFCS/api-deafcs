@@ -44,10 +44,13 @@ describe("MatchRecoveryController", () => {
     expect(recovery.restartMatchMap).not.toHaveBeenCalled();
   });
 
-  // DEAFCS: Restart Match is not a registered action, so even a request that
-  // reaches the API's action endpoint directly never gets to the service.
-  it("keeps Restart Match out of the action endpoint", async () => {
-    const { controller, recovery } = setup(true);
+  // A request posted straight to the API's action endpoint, without Hasura's
+  // role and type checks in front of it. The endpoint keeps the first
+  // controller it resolves for each action, so these tests share one.
+  describe("direct requests to the action endpoint", () => {
+    const shared = setup(true);
+    const organizer = (shared.controller as any).matchAssistant
+      .isOrganizer as jest.Mock;
     const hasura = new HasuraController(
       { error: jest.fn() } as never,
       {} as never,
@@ -59,30 +62,82 @@ describe("MatchRecoveryController", () => {
             controllers: new Map([
               [
                 MatchRecoveryController,
-                { name: "MatchRecoveryController", instance: controller },
+                {
+                  name: "MatchRecoveryController",
+                  instance: shared.controller,
+                },
               ],
             ]),
           },
         ],
       ]) as never,
     );
-    const call = (name: string) => {
+
+    const call = async (name: string, input: Record<string, unknown> = {}) => {
       const response = { json: jest.fn(), status: jest.fn() };
       response.status.mockReturnValue(response);
-      return hasura.actions(
+      await hasura.actions(
         {
           user,
-          body: { action: { name }, input: { match_id: "match-1" } },
+          body: { action: { name }, input: { match_id: "match-1", ...input } },
         } as never,
         response as never,
       );
+      return response;
     };
 
-    await call("restartMatchMap");
-    expect(recovery.restartMatchMap).toHaveBeenCalledWith("match-1", user);
+    beforeEach(() => {
+      jest.clearAllMocks();
+      organizer.mockResolvedValue(true);
+    });
 
-    await expect(call("restartMatch")).rejects.toThrow();
-    expect(recovery.restartMatch).not.toHaveBeenCalled();
+    it("refuses someone who isn't the match's organizer", async () => {
+      organizer.mockResolvedValue(false);
+
+      for (const name of [
+        "getMatchRestoreRounds",
+        "restoreMatchRound",
+        "restartMatchMap",
+      ]) {
+        const response = await call(name, { round: 4 });
+        expect(response.status).toHaveBeenCalledWith(400);
+        expect(response.json).toHaveBeenCalledWith({
+          message: "you are not a match organizer",
+        });
+      }
+
+      expect(shared.recovery.getRestoreRounds).not.toHaveBeenCalled();
+      expect(shared.recovery.restoreRound).not.toHaveBeenCalled();
+      expect(shared.recovery.restartMatchMap).not.toHaveBeenCalled();
+    });
+
+    // DEAFCS: raw RCON is administrator-only (fc108eb1). An organizer gets the
+    // predefined requests and nothing that carries a command of its own.
+    it("gives an organizer no way to send a command of their own", async () => {
+      await call("restoreMatchRound", { round: 4, command: "rcon_password x" });
+      expect(shared.recovery.restoreRound).toHaveBeenCalledWith(
+        "match-1",
+        4,
+        user,
+      );
+
+      for (const name of ["rcon", "sendRcon", "rconCommand", "command"]) {
+        await expect(call(name, { command: "status" })).rejects.toThrow();
+      }
+    });
+
+    // DEAFCS: Restart Match is not a registered action, so even a request
+    // that reaches the endpoint directly never gets to the service.
+    it("keeps Restart Match out of it", async () => {
+      await call("restartMatchMap");
+      expect(shared.recovery.restartMatchMap).toHaveBeenCalledWith(
+        "match-1",
+        user,
+      );
+
+      await expect(call("restartMatch")).rejects.toThrow();
+      expect(shared.recovery.restartMatch).not.toHaveBeenCalled();
+    });
   });
 
   it("hands organizers' requests to the service", async () => {

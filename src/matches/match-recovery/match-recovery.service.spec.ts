@@ -561,6 +561,64 @@ describe("MatchRecoveryService", () => {
     });
   });
 
+  // DEAFCS: organizers reach the server only through these predefined
+  // commands (raw RCON is administrator-only, fc108eb1), and nothing about
+  // the server itself comes back to them.
+  describe("server access for organizers", () => {
+    it.each(["13; rcon_password x", "13\nquit", "13", 13.5, -1])(
+      "sends nothing for a round of %p",
+      async (round) => {
+        const { service, matchAssistant } = setup();
+
+        await expect(
+          service.restoreRound("match-1", round as number, VIEWER),
+        ).rejects.toThrow();
+        expect(matchAssistant.requestRoundRestore).not.toHaveBeenCalled();
+      },
+    );
+
+    it("lists the rounds without anything about the server", async () => {
+      const { service } = setup();
+
+      const json = JSON.stringify(
+        await service.getRestoreRounds("match-1", VIEWER),
+      );
+
+      expect(json).not.toContain("server-1");
+      expect(json).not.toMatch(/host|port|password|rcon|connect /i);
+      expect(json).not.toMatch(/\b\d{1,3}(\.\d{1,3}){3}\b/);
+    });
+
+    it("hands back only the server's refusal, never the rest of its reply", async () => {
+      const { service } = setup({
+        restoreResponse:
+          "connect 203.0.113.7:27015\nrestore_round refused: the server has no backup of round 13\nhostname deafcs",
+      });
+
+      await expect(service.restoreRound("match-1", 13, VIEWER)).rejects.toThrow(
+        /^the server has no backup of round 13$/,
+      );
+
+      const { service: accepted } = setup({
+        restoreResponse: "connect 203.0.113.7:27015",
+      });
+      await expect(
+        accepted.restoreRound("match-1", 13, VIEWER),
+      ).resolves.toEqual({ success: true });
+    });
+
+    it("hands back only Restart Map's refusal", async () => {
+      const { service } = setup({
+        serverResponse:
+          "udp/ip 203.0.113.7:27015\nmatch_state refused: the map is already over",
+      });
+
+      await expect(service.restartMatchMap("match-1", VIEWER)).rejects.toThrow(
+        /^the map is already over$/,
+      );
+    });
+  });
+
   describe("restartMatch", () => {
     it("cancels a live match, puts the map in progress back to the start, then reopens check-in", async () => {
       const { service, postgres, matchAssistant } = setup({
