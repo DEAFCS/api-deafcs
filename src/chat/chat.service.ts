@@ -171,6 +171,11 @@ export class ChatService {
 
   private expiresIn = 60 * 60 * 24;
 
+  // What a relayed line is cut to in game. The game shows far less than a full
+  // website message, and 2000 characters of multibyte text can outgrow an rcon
+  // packet. (Upstream dd17775e, #435.)
+  public static readonly RCON_MESSAGE_MAX_LENGTH = 240;
+
   // Upstream d2d7f616: shared across rooms and API instances.
   public static readonly MESSAGE_RATE_LIMIT = 5;
   private static readonly MESSAGE_RATE_WINDOW_MS = 3_000;
@@ -4238,6 +4243,55 @@ export class ChatService {
     }
   }
 
+  // The message is inlined into an rcon command inside quotes, so a quote ends
+  // the argument and a newline ends the command: either one turns the rest of
+  // what a player typed into console input. Chat in game is one line anyway.
+  // SwiftlyS2's tokenizer also reads U+200B as a quote, which would split the
+  // line into tokens the plugin never shows. (Upstream 495616ca #410,
+  // 452c20c8 #460.)
+  private static oneRconArgument(message: string) {
+    return (
+      message
+        .replace(/[\r\n]+/g, " ")
+        .replace(/["\u200b]/g, "")
+        // eslint-disable-next-line no-control-regex
+        .replace(/[\x00-\x1f]/g, "")
+        .trim()
+    );
+  }
+
+  private static readonly GRAPHEMES = new Intl.Segmenter(undefined, {
+    granularity: "grapheme",
+  });
+
+  // Counted in code points, which bounds the bytes an rcon packet has to carry
+  // whatever the script. Cut only between graphemes, so a flag or a joined
+  // emoji at the boundary is dropped whole rather than left in pieces.
+  // (Upstream dd17775e, #435.)
+  private static clampForGame(message: string) {
+    const limit = ChatService.RCON_MESSAGE_MAX_LENGTH;
+
+    if (Array.from(message).length <= limit) {
+      return message;
+    }
+
+    let clamped = "";
+    let length = 0;
+
+    for (const { segment } of ChatService.GRAPHEMES.segment(message)) {
+      const size = Array.from(segment).length;
+
+      if (length + size > limit - 1) {
+        break;
+      }
+
+      clamped += segment;
+      length += size;
+    }
+
+    return `${clamped.trimEnd()}…`;
+  }
+
   public async sendChatToServer(matchId: string, message: string) {
     try {
       const { matches_by_pk } = await this.hasuraService.query({
@@ -4273,7 +4327,11 @@ export class ChatService {
           ? "css_web_chat"
           : "sw_web_chat";
 
-      return await rcon.send(`${command} "${message}"`);
+      // DEAFCS: no trailing organizer flag (upstream #460); the DEAFCS plugin
+      // still reads the "[organizer]" prefix from the message itself.
+      return await rcon.send(
+        `${command} "${ChatService.clampForGame(ChatService.oneRconArgument(message))}"`,
+      );
     } catch (error) {
       this.logger.warn(
         `[${matchId}] unable to send match to server`,
