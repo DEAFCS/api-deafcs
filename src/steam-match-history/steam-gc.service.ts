@@ -14,6 +14,12 @@ const REFRESH_TOKEN_CACHE_KEY = "steam-gc:refresh-token";
 const REQUEST_TIMEOUT_MS = 30_000;
 const GC_READY_TIMEOUT_MS = 30_000;
 const IDLE_LOGOFF_MS = 5 * 60_000;
+// DEAFCS: the GC bot account can also be a Steam Presence (friends) account,
+// and both sessions log in from this API. Steam ends the older of two
+// sessions of one account from the same public IP with the same logonID
+// (LogonSessionReplaced). Presence uses steam-user's default of 0, so the GC
+// session uses its own, non-zero id.
+export const STEAM_GC_LOGON_ID = 0x5347_4301;
 
 export type ResolvedMatch = {
   demoUrl: string;
@@ -167,12 +173,13 @@ export class SteamGcService
     const refreshToken = await this.cache.get(REFRESH_TOKEN_CACHE_KEY);
     if (refreshToken && typeof refreshToken === "string") {
       this.logger.log("steam-gc logging in with stored refresh token");
-      client.logOn({ refreshToken });
+      client.logOn({ refreshToken, logonID: STEAM_GC_LOGON_ID });
     } else {
       this.logger.log("steam-gc logging in with STEAM_USER credentials");
       client.logOn({
         accountName: this.config.get<string>("steam.steamUser"),
         password: this.config.get<string>("steam.steamPassword"),
+        logonID: STEAM_GC_LOGON_ID,
       });
     }
   }
