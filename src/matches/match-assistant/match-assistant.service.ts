@@ -168,6 +168,28 @@ export class MatchAssistantService {
     return await this.command(matchId, "match_state Warmup");
   }
 
+  // DEAFCS: the plugin's own pause and resume commands, nothing else.
+  public async setServerPaused(matchId: string, paused: boolean) {
+    const [server] = await this.postgres.query<
+      Array<{ plugin_runtime: string | null }>
+    >(
+      `SELECT s.plugin_runtime
+         FROM matches m
+         JOIN servers s ON s.id = m.server_id
+        WHERE m.id = $1`,
+      [matchId],
+    );
+    const runtime =
+      server?.plugin_runtime ||
+      (await this.pluginRuntimeService.getPluginRuntime());
+    const prefix = runtime === "counterstrikesharp" ? "css" : "sw";
+
+    return await this.command(
+      matchId,
+      `${prefix}_${paused ? "pause" : "resume"}`,
+    );
+  }
+
   public async requestRoundRestore(matchId: string, round: number) {
     return await this.command(matchId, `restore_round ${round}`);
   }

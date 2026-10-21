@@ -40,6 +40,22 @@ export class MatchRecoveryController {
     return await this.recovery.restartMatchMap(data.match_id, data.user);
   }
 
+  // DEAFCS: Pause and Resume for organizers without the RCON console.
+  @HasuraAction()
+  public async setMatchPaused(data: {
+    match_id: string;
+    paused: boolean;
+    user: User;
+  }) {
+    await this.requireOrganizer(data.match_id, data.user);
+
+    return await this.recovery.setMatchPaused(
+      data.match_id,
+      data.paused === true,
+      data.user,
+    );
+  }
+
   // DEAFCS: Restart Match stays switched off until its replacement-server test
   // passes. It is neither in the Hasura metadata nor registered as an action,
   // so a direct POST to /hasura/actions can't reach it either. Upstream has
