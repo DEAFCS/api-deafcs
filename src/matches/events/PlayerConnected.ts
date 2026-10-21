@@ -32,6 +32,21 @@ export default class PlayerConnected extends MatchEventProcessor<{
         __typename: true,
       },
     });
+    // Marks them as present. Cleared again on disconnect, so this always means
+    // "in the server right now": what Restore Round's connected-players check
+    // (MatchRecoveryService) reads.
+    // Upstream 5stackgg/api 9dbc5c78 (#388) sets it the same way through
+    // Hasura; DEAFCS's generated client predates the column, so plain SQL
+    // as for connected_at.
+    await this.postgres.query(
+      `UPDATE public.match_lineup_players mlp
+          SET is_connected = true
+         FROM public.matches m
+        WHERE (mlp.match_lineup_id = m.lineup_1_id OR mlp.match_lineup_id = m.lineup_2_id)
+          AND m.id = $1
+          AND mlp.steam_id = $2`,
+      [this.matchId, this.data.steam_id],
+    );
     await this.chat.joinLobbyViaGame(this.matchId, this.data.steam_id);
 
     await this.postgres.query(
