@@ -21,6 +21,21 @@ const IDLE_LOGOFF_MS = 5 * 60_000;
 // session uses its own, non-zero id.
 export const STEAM_GC_LOGON_ID = 0x5347_4301;
 
+// DEAFCS: the steamid64 a Steam refresh token was issued for (its JWT `sub`),
+// read without verifying the signature. Only used to make sure the GC logs in
+// as STEAM_GC_STEAMID64 and never as another account (e.g. the livestream
+// account in STEAM_USER).
+export const refreshTokenSteamId = (token: string): string | null => {
+  try {
+    const payload = JSON.parse(
+      Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"),
+    ) as { sub?: unknown };
+    return typeof payload?.sub === "string" ? payload.sub : null;
+  } catch {
+    return null;
+  }
+};
+
 export type ResolvedMatch = {
   demoUrl: string;
   mapName: string | null;
@@ -45,11 +60,15 @@ export class SteamGcService
     private readonly cache: CacheService,
   ) {}
 
+  // DEAFCS: the GC only runs as its own account (STEAM_GC_STEAMID64). Upstream
+  // uses STEAM_USER, which in DEAFCS is the livestream (DEAFCS Streamer)
+  // account, so the GC never reads STEAM_USER / STEAM_PASSWORD.
   public isAvailable(): boolean {
-    return (
-      !!this.config.get<string>("steam.steamUser") &&
-      !!this.config.get<string>("steam.steamPassword")
-    );
+    return !!this.gcSteamId();
+  }
+
+  private gcSteamId(): string | undefined {
+    return this.config.get<string>("steam.steamGcSteamId64") || undefined;
   }
 
   public isReady(): boolean {
@@ -58,9 +77,7 @@ export class SteamGcService
 
   onApplicationBootstrap(): void {
     if (!this.isAvailable()) {
-      this.logger.warn(
-        "steam-gc disabled: STEAM_USER / STEAM_PASSWORD not configured",
-      );
+      this.logger.warn("steam-gc disabled: STEAM_GC_STEAMID64 not configured");
     }
   }
 
@@ -96,14 +113,34 @@ export class SteamGcService
     });
 
     client.on("refreshToken", async (token: string) => {
+      if (refreshTokenSteamId(token) !== this.gcSteamId()) {
+        this.logger.error(
+          "steam-gc received a refresh token for another account, not storing it",
+        );
+        return;
+      }
       this.logger.log("steam-gc received refresh token, persisting to redis");
       await this.cache.put(REFRESH_TOKEN_CACHE_KEY, token);
     });
 
     client.on("loggedOn", () => {
-      this.logger.log(
-        `steam-gc logged on as ${client.steamID?.getSteamID64()}`,
-      );
+      const steamId = client.steamID?.getSteamID64();
+      if (steamId !== this.gcSteamId()) {
+        this.logger.error(
+          `steam-gc logged on as ${steamId}, expected STEAM_GC_STEAMID64 ${this.gcSteamId()}; logging off`,
+        );
+        if (!settled) {
+          settled = true;
+          rejectReady(
+            new SteamGcConnectionError("logged on as the wrong steam account"),
+          );
+        }
+        if (this.client === client) {
+          this.teardown();
+        }
+        return;
+      }
+      this.logger.log(`steam-gc logged on as ${steamId}`);
       client.setPersona(SteamUser.EPersonaState.Online);
       client.gamesPlayed([CS2_APP_ID]);
     });
@@ -147,7 +184,14 @@ export class SteamGcService
     this.client = client;
     this.cs = cs;
 
-    await this.logOn(client);
+    try {
+      await this.logOn(client);
+    } catch (error) {
+      if (this.client === client) {
+        this.teardown();
+      }
+      throw error;
+    }
 
     const timer = setTimeout(() => {
       if (settled) {
@@ -170,18 +214,32 @@ export class SteamGcService
   }
 
   private async logOn(client: SteamUser): Promise<void> {
+    const steamId = this.gcSteamId();
+    if (!steamId) {
+      throw new SteamGcConnectionError("STEAM_GC_STEAMID64 not configured");
+    }
+
     const refreshToken = await this.cache.get(REFRESH_TOKEN_CACHE_KEY);
     if (refreshToken && typeof refreshToken === "string") {
-      this.logger.log("steam-gc logging in with stored refresh token");
-      client.logOn({ refreshToken, logonID: STEAM_GC_LOGON_ID });
-    } else {
-      this.logger.log("steam-gc logging in with STEAM_USER credentials");
-      client.logOn({
-        accountName: this.config.get<string>("steam.steamUser"),
-        password: this.config.get<string>("steam.steamPassword"),
-        logonID: STEAM_GC_LOGON_ID,
-      });
+      if (refreshTokenSteamId(refreshToken) === steamId) {
+        this.logger.log("steam-gc logging in with stored refresh token");
+        client.logOn({ refreshToken, logonID: STEAM_GC_LOGON_ID });
+        return;
+      }
+      this.logger.warn(
+        "steam-gc stored refresh token is not for STEAM_GC_STEAMID64, ignoring it",
+      );
     }
+
+    const accountName = this.config.get<string>("steam.steamGcUser");
+    const password = this.config.get<string>("steam.steamGcPassword");
+    if (!accountName || !password) {
+      throw new SteamGcConnectionError(
+        "no stored refresh token for STEAM_GC_STEAMID64 and STEAM_GC_USER / STEAM_GC_PASSWORD not configured",
+      );
+    }
+    this.logger.log("steam-gc logging in with STEAM_GC_USER credentials");
+    client.logOn({ accountName, password, logonID: STEAM_GC_LOGON_ID });
   }
 
   private teardown(): void {
