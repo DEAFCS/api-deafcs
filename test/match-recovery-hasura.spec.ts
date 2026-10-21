@@ -679,6 +679,274 @@ describe("match recovery (Hasura actions and permissions)", () => {
     expect(errors?.[0].message).toBe("a round restore is already in progress");
   });
 
+  const organizerControls = (steam: string, role: string, id = matchId) =>
+    graphql(
+      `
+        query ($id: uuid!) {
+          matches_by_pk(id: $id) {
+            is_organizer
+            can_cancel
+            can_assign_server
+          }
+        }
+      `,
+      role,
+      steam,
+      { id },
+    );
+
+  // User A: the global match_organizer role on a match they neither created
+  // nor play in. User B: the match's creator (matchOwner, a plain user).
+  describe("User A, a match_organizer on someone else's match", () => {
+    it("is neither the creator nor a player", async () => {
+      const [row] = await postgres.query<
+        Array<{ creator: string; plays: boolean }>
+      >(
+        `SELECT m.organizer_steam_id::text AS creator,
+                EXISTS (SELECT 1 FROM match_lineup_players mlp
+                         WHERE mlp.match_lineup_id IN (m.lineup_1_id, m.lineup_2_id)
+                           AND mlp.steam_id = $2) AS plays
+           FROM matches m WHERE m.id = $1`,
+        [matchId, people.match_organizer],
+      );
+      expect(row).toEqual({ creator: people.matchOwner, plays: false });
+      expect(await roleOf(people.match_organizer)).toBe("match_organizer");
+      expect(await roleOf(people.matchOwner)).toBe("user");
+    });
+
+    it("gets the same organizer controls as User B, the creator", async () => {
+      const a = await organizerControls(
+        people.match_organizer,
+        "match_organizer",
+      );
+      const b = await organizerControls(people.matchOwner, "user");
+      expect(a.errors).toBeUndefined();
+      expect(b.errors).toBeUndefined();
+      expect(a.data!.matches_by_pk).toEqual({
+        is_organizer: true,
+        can_cancel: true,
+        can_assign_server: true,
+      });
+      expect(a.data!.matches_by_pk).toEqual(b.data!.matches_by_pk);
+
+      const outsider = await organizerControls(
+        people.tournament_organizer,
+        "tournament_organizer",
+      );
+      expect(outsider.data!.matches_by_pk).toEqual({
+        is_organizer: false,
+        can_cancel: false,
+        can_assign_server: false,
+      });
+    });
+
+    it("opens the Rounds tab with every player's economy", async () => {
+      const { data, errors } = await restoreRounds(
+        people.match_organizer,
+        "match_organizer",
+      );
+      expect(errors).toBeUndefined();
+      expect(data!.getMatchRestoreRounds).toMatchObject({
+        restorable: true,
+        blocked_reason: null,
+        economy_hidden: false,
+      });
+    });
+
+    it("restores a round", async () => {
+      const { data, errors } = await restore(
+        people.match_organizer,
+        "match_organizer",
+        2,
+      );
+      expect(errors).toBeUndefined();
+      expect(data!.restoreMatchRound).toEqual({ success: true });
+      expect(rcon).toEqual(["restore_round 2"]);
+    });
+
+    it("pauses and resumes", async () => {
+      expect(
+        (await pause(people.match_organizer, "match_organizer", true)).errors,
+      ).toBeUndefined();
+      await postgres.query(
+        "UPDATE match_maps SET status = 'Paused' WHERE id = $1",
+        [mapId],
+      );
+      try {
+        expect(
+          (await pause(people.match_organizer, "match_organizer", false))
+            .errors,
+        ).toBeUndefined();
+      } finally {
+        await postgres.query(
+          "UPDATE match_maps SET status = 'Live' WHERE id = $1",
+          [mapId],
+        );
+      }
+      expect(rcon).toEqual(["pause", "resume"]);
+    });
+
+    it("gets no admin-only server action, RCON password or Restart Match", async () => {
+      const names = await fields("match_organizer");
+      for (const adminOnly of [
+        "restartMatch",
+        "restartService",
+        "readServerFile",
+      ]) {
+        expect(names).not.toContain(adminOnly);
+      }
+
+      const { errors } = await graphql(
+        `
+          {
+            servers {
+              rcon_password
+            }
+          }
+        `,
+        "match_organizer",
+        people.match_organizer,
+      );
+      expect(errors?.[0].message).toMatch(/rcon_password/);
+    });
+
+    it("restarts the map", async () => {
+      const { data, errors } = await restartMap(
+        people.match_organizer,
+        "match_organizer",
+      );
+      expect(errors).toBeUndefined();
+      expect(data!.restartMatchMap).toEqual({ success: true });
+      expect(rcon).toEqual(["match_state Warmup"]);
+    });
+  });
+
+  // DEAFCS (19dfbbf3): a tournament_organizer organizes only its own
+  // tournaments' matches (as owner or co-organizer).
+  describe("a tournament_organizer", () => {
+    let tournamentMatchId: string;
+    let tournamentLineupId: string;
+    let coOrganizer: string;
+
+    beforeAll(async () => {
+      const match = await fx.match({ type: "Duel" });
+      tournamentMatchId = match.id;
+      tournamentLineupId = match.lineup_1_id;
+      await postgres.query(
+        `INSERT INTO match_maps (match_id, map_id, "order", status, lineup_1_side, lineup_2_side)
+         SELECT $1, id, 1, 'Live', 'CT', 'TERRORIST' FROM maps ORDER BY name LIMIT 1`,
+        [tournamentMatchId],
+      );
+      await postgres.query("UPDATE matches SET status = 'Live' WHERE id = $1", [
+        tournamentMatchId,
+      ]);
+
+      const [tournament] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO tournaments (name, start, organizer_steam_id, match_options_id, status)
+         VALUES ($1, now() + interval '1 day', $2, $3, 'Setup') RETURNING id`,
+        [fx.nextName("cup"), people.tournament_organizer, match.options_id],
+      );
+      const [stage] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO tournament_stages (tournament_id, type, "order", min_teams, max_teams)
+         VALUES ($1, 'SingleElimination', 1, 4, 8) RETURNING id`,
+        [tournament.id],
+      );
+      await postgres.query(
+        `INSERT INTO tournament_brackets (tournament_stage_id, match_id, round)
+         VALUES ($1, $2, 1)`,
+        [stage.id, tournamentMatchId],
+      );
+
+      coOrganizer = await fx.player("co-organizer");
+      await postgres.query(
+        "UPDATE players SET role = 'tournament_organizer' WHERE steam_id = $1",
+        [coOrganizer],
+      );
+      await postgres.query(
+        "INSERT INTO tournament_organizers (tournament_id, steam_id) VALUES ($1, $2)",
+        [tournament.id, coOrganizer],
+      );
+    });
+
+    const pauseMatch = (steam: string, role: string, id: string) =>
+      graphql(
+        `
+          mutation ($id: uuid!) {
+            setMatchPaused(match_id: $id, paused: true) {
+              success
+            }
+          }
+        `,
+        role,
+        steam,
+        { id },
+      );
+
+    it("organizes its own tournament's match, and only that one", async () => {
+      for (const steam of [people.tournament_organizer, coOrganizer]) {
+        const own = await organizerControls(
+          steam,
+          "tournament_organizer",
+          tournamentMatchId,
+        );
+        expect(own.data!.matches_by_pk.is_organizer).toBe(true);
+
+        const other = await organizerControls(steam, "tournament_organizer");
+        expect(other.data!.matches_by_pk.is_organizer).toBe(false);
+      }
+
+      // The global match_organizer role covers tournament matches too.
+      const matchOrganizer = await organizerControls(
+        people.match_organizer,
+        "match_organizer",
+        tournamentMatchId,
+      );
+      expect(matchOrganizer.data!.matches_by_pk.is_organizer).toBe(true);
+    });
+
+    it("pauses its own tournament's match but not another match", async () => {
+      const own = await pauseMatch(
+        people.tournament_organizer,
+        "tournament_organizer",
+        tournamentMatchId,
+      );
+      expect(own.errors).toBeUndefined();
+      expect(rcon).toEqual(["pause"]);
+
+      rcon.length = 0;
+      const other = await pauseMatch(
+        people.tournament_organizer,
+        "tournament_organizer",
+        matchId,
+      );
+      expect(other.errors?.[0].message).toBe("you are not a match organizer");
+      expect(rcon).toEqual([]);
+    });
+
+    it("can't use the controls while playing in its own tournament's match", async () => {
+      await postgres.query(
+        `INSERT INTO match_lineup_players (match_lineup_id, steam_id) VALUES ($1, $2)`,
+        [tournamentLineupId, people.tournament_organizer],
+      );
+      try {
+        const { errors } = await pauseMatch(
+          people.tournament_organizer,
+          "tournament_organizer",
+          tournamentMatchId,
+        );
+        expect(errors?.[0].message).toBe(
+          "organizers on one of the teams can't pause or resume the match",
+        );
+        expect(rcon).toEqual([]);
+      } finally {
+        await postgres.query(
+          "DELETE FROM match_lineup_players WHERE match_lineup_id = $1 AND steam_id = $2",
+          [tournamentLineupId, people.tournament_organizer],
+        );
+      }
+    });
+  });
+
   it("restarts the map from warmup and keeps its rounds restorable", async () => {
     const { data, errors } = await graphql(
       `
