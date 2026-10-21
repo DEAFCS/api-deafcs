@@ -1115,7 +1115,9 @@ describe("match recovery (Hasura actions and permissions)", () => {
     });
 
     it("hides it from guests", async () => {
-      expect(await fields("guest")).not.toContain("rewindMapVeto");
+      const guest = await fields("guest");
+      expect(guest).not.toContain("rewindMapVeto");
+      expect(guest).not.toContain("resetCaptainPick");
     });
 
     it.each(ROLES)(
@@ -1123,6 +1125,7 @@ describe("match recovery (Hasura actions and permissions)", () => {
       async (role) => {
         const names = await fields(role);
         expect(names).toContain("rewindMapVeto");
+        expect(names).toContain("resetCaptainPick");
         expect(names).not.toContain("extendVetoClock");
       },
     );

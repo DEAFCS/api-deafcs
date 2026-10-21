@@ -743,6 +743,13 @@ type Mutation {
 }
 
 type Mutation {
+  resetCaptainPick(
+    match_id: uuid!
+    expected_picks: Int
+  ): SuccessOutput
+}
+
+type Mutation {
   resumeClipRenderBatch(
     match_map_id: uuid!
   ): SuccessOutput
