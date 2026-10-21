@@ -33,9 +33,6 @@ describe("MatchRecoveryController", () => {
       controller.restoreMatchRound({ match_id: "match-1", round: 4, user }),
     ).rejects.toThrow("you are not a match organizer");
     await expect(
-      controller.restartMatch({ match_id: "match-1", user }),
-    ).rejects.toThrow("you are not a match organizer");
-    await expect(
       controller.restartMatchMap({ match_id: "match-1", user }),
     ).rejects.toThrow("you are not a match organizer");
     await expect(
@@ -44,9 +41,36 @@ describe("MatchRecoveryController", () => {
 
     expect(recovery.getRestoreRounds).not.toHaveBeenCalled();
     expect(recovery.restoreRound).not.toHaveBeenCalled();
-    expect(recovery.restartMatch).not.toHaveBeenCalled();
     expect(recovery.restartMatchMap).not.toHaveBeenCalled();
     expect(recovery.setMatchPaused).not.toHaveBeenCalled();
+  });
+
+  // DEAFCS: administrators only for now, organizer or not.
+  it.each(["user", "moderator", "match_organizer", "tournament_organizer"])(
+    "keeps Restart Match from a %s who organizes the match",
+    async (role) => {
+      const { controller, recovery } = setup(true);
+
+      await expect(
+        controller.restartMatch({
+          match_id: "match-1",
+          user: { steam_id: "76561198000000001", role } as never,
+        }),
+      ).rejects.toThrow("only administrators can restart a match");
+      expect(recovery.restartMatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("hands an administrator's Restart Match to the service", async () => {
+    const { controller, recovery } = setup(false);
+    const admin = {
+      steam_id: "76561198000000002",
+      role: "administrator",
+    } as never;
+
+    await controller.restartMatch({ match_id: "match-1", user: admin });
+
+    expect(recovery.restartMatch).toHaveBeenCalledWith("match-1", admin);
   });
 
   // A request posted straight to the API's action endpoint, without Hasura's
@@ -141,16 +165,14 @@ describe("MatchRecoveryController", () => {
       }
     });
 
-    // DEAFCS: Restart Match is not a registered action, so even a request
-    // that reaches the endpoint directly never gets to the service.
-    it("keeps Restart Match out of it", async () => {
-      await call("restartMatchMap");
-      expect(shared.recovery.restartMatchMap).toHaveBeenCalledWith(
-        "match-1",
-        user,
-      );
-
-      await expect(call("restartMatch")).rejects.toThrow();
+    // DEAFCS: a request that reaches the endpoint directly still needs an
+    // administrator, even from the match's organizer.
+    it("keeps Restart Match to administrators", async () => {
+      const response = await call("restartMatch");
+      expect(response.status).toHaveBeenCalledWith(400);
+      expect(response.json).toHaveBeenCalledWith({
+        message: "only administrators can restart a match",
+      });
       expect(shared.recovery.restartMatch).not.toHaveBeenCalled();
     });
   });
@@ -160,7 +182,6 @@ describe("MatchRecoveryController", () => {
 
     await controller.getMatchRestoreRounds({ match_id: "match-1", user });
     await controller.restoreMatchRound({ match_id: "match-1", round: 4, user });
-    await controller.restartMatch({ match_id: "match-1", user });
     await controller.restartMatchMap({ match_id: "match-1", user });
     await controller.setMatchPaused({
       match_id: "match-1",
@@ -170,7 +191,6 @@ describe("MatchRecoveryController", () => {
 
     expect(recovery.getRestoreRounds).toHaveBeenCalledWith("match-1", user);
     expect(recovery.restoreRound).toHaveBeenCalledWith("match-1", 4, user);
-    expect(recovery.restartMatch).toHaveBeenCalledWith("match-1");
     expect(recovery.restartMatchMap).toHaveBeenCalledWith("match-1", user);
     expect(recovery.setMatchPaused).toHaveBeenCalledWith("match-1", true, user);
   });

@@ -139,6 +139,7 @@ describe("match recovery (Hasura actions and permissions)", () => {
         { log: jest.fn(), warn: jest.fn() } as never,
         postgres,
         matchAssistant as never,
+        { stopLiveIfRunning: async (): Promise<void> => undefined } as never,
       ),
     );
 
@@ -379,8 +380,13 @@ describe("match recovery (Hasura actions and permissions)", () => {
     );
   });
 
-  it.each([...ROLES, "guest"])(
-    "keeps Restart Match switched off for %s",
+  // DEAFCS: Restart Match is administrators only for now.
+  it("shows Restart Match to administrators", async () => {
+    expect(await fields("administrator")).toContain("restartMatch");
+  });
+
+  it.each([...ROLES.filter((role) => role !== "administrator"), "guest"])(
+    "keeps Restart Match from %s",
     async (role) => {
       expect(await fields(role)).not.toContain("restartMatch");
     },
@@ -1121,5 +1127,97 @@ describe("match recovery (Hasura actions and permissions)", () => {
       expect(errors).toBeUndefined();
       expect(data!.match_map_rounds).toEqual([{ round: 1 }, { round: 2 }]);
     }
+  });
+
+  describe("Restart Match", () => {
+    const restart = (id: string, steam: string, role: string) =>
+      graphql(
+        `
+          mutation ($id: uuid!) {
+            restartMatch(match_id: $id) {
+              success
+            }
+          }
+        `,
+        role,
+        steam,
+        { id },
+      );
+
+    const vetoedBestOf3 = async () => {
+      const match = await fx.match({ type: "Duel", bestOf: 3, mapVeto: true });
+      const maps = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO match_maps (match_id, map_id, "order", status, lineup_1_side, lineup_2_side)
+         SELECT $1, p.map_id, row_number() OVER (ORDER BY p.map_id),
+                CASE row_number() OVER (ORDER BY p.map_id) WHEN 1 THEN 'Finished' WHEN 2 THEN 'Live' ELSE 'Scheduled' END,
+                'CT', 'TERRORIST'
+           FROM (SELECT map_id FROM _map_pool
+                  WHERE map_pool_id = (SELECT map_pool_id FROM match_options WHERE id = $2)
+                  ORDER BY map_id LIMIT 3) p
+         RETURNING id`,
+        [match.id, match.options_id],
+      );
+      await postgres.query(
+        "UPDATE matches SET status = 'Live', organizer_steam_id = $2 WHERE id = $1",
+        [match.id, people.matchOwner],
+      );
+      const [finished] = await postgres.query<Array<{ id: string }>>(
+        "SELECT id FROM match_maps WHERE match_id = $1 AND status = 'Finished'",
+        [match.id],
+      );
+      await postgres.query(
+        `INSERT INTO match_map_demos (match_id, match_map_id, file, size)
+         VALUES ($1, $2, 'map1.dem', 1)`,
+        [match.id, finished.id],
+      );
+      return { id: match.id, maps: maps.length };
+    };
+
+    it.each([
+      "matchOwner",
+      "match_organizer",
+      "tournament_organizer",
+      "moderator",
+    ])("refuses a %s, and the match stays Live", async (who) => {
+      const match = await vetoedBestOf3();
+      const role = who === "matchOwner" ? "user" : who;
+
+      const { data, errors } = await restart(match.id, people[who], role);
+
+      expect(data?.restartMatch).toBeUndefined();
+      expect(errors?.[0].message).toMatch(/restartMatch/);
+      const [row] = await postgres.query<Array<{ status: string }>>(
+        "SELECT status FROM matches WHERE id = $1",
+        [match.id],
+      );
+      expect(row.status).toBe("Live");
+    });
+
+    it("lets an administrator restart a vetoed best of 3 with a demo", async () => {
+      const match = await vetoedBestOf3();
+
+      const { data, errors } = await restart(
+        match.id,
+        people.administrator,
+        "administrator",
+      );
+
+      expect(errors).toBeUndefined();
+      expect(data!.restartMatch).toEqual({ success: true });
+      const [row] = await postgres.query<
+        Array<{ status: string; maps: Array<string>; demos: number }>
+      >(
+        `SELECT m.status,
+                (SELECT array_agg(status ORDER BY "order") FROM match_maps WHERE match_id = m.id) AS maps,
+                (SELECT count(*)::int FROM match_map_demos WHERE match_id = m.id) AS demos
+           FROM matches m WHERE m.id = $1`,
+        [match.id],
+      );
+      expect(row).toEqual({
+        status: "WaitingForCheckIn",
+        maps: ["Finished", "Scheduled", "Scheduled"],
+        demos: 1,
+      });
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { Controller } from "@nestjs/common";
 import { HasuraAction } from "src/hasura/hasura.controller";
 import { User } from "src/auth/types/User";
+import { isRoleAbove } from "src/utilities/isRoleAbove";
 import { MatchAssistantService } from "../match-assistant/match-assistant.service";
 import { MatchRecoveryService } from "./match-recovery.service";
 
@@ -56,14 +57,16 @@ export class MatchRecoveryController {
     );
   }
 
-  // DEAFCS: Restart Match stays switched off until its replacement-server test
-  // passes. It is neither in the Hasura metadata nor registered as an action,
-  // so a direct POST to /hasura/actions can't reach it either. Upstream has
-  // @HasuraAction() here; add it back together with the metadata action.
+  // DEAFCS: administrators only for now (the metadata action too); upstream
+  // lets every match organizer restart. Organizers keep Restore Round,
+  // Restart Map and Pause/Resume.
+  @HasuraAction()
   public async restartMatch(data: { match_id: string; user: User }) {
-    await this.requireOrganizer(data.match_id, data.user);
+    if (!isRoleAbove(data.user?.role, "administrator")) {
+      throw Error("only administrators can restart a match");
+    }
 
-    return await this.recovery.restartMatch(data.match_id);
+    return await this.recovery.restartMatch(data.match_id, data.user);
   }
 
   private async requireOrganizer(matchId: string, user: User) {
