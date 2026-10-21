@@ -41,6 +41,38 @@ export class MatchRecoveryController {
     return await this.recovery.restartMatchMap(data.match_id, data.user);
   }
 
+  @HasuraAction()
+  public async rewindMapVeto(data: {
+    match_id: string;
+    step: number;
+    expected_picks?: number;
+    user: User;
+  }) {
+    await this.requireOrganizer(data.match_id, data.user);
+
+    return await this.recovery.rewindMapVeto(
+      data.match_id,
+      data.step,
+      data.expected_picks,
+      data.user,
+    );
+  }
+
+  @HasuraAction()
+  public async extendVetoClock(data: {
+    match_id: string;
+    seconds: number;
+    user: User;
+  }) {
+    await this.requireOrganizer(data.match_id, data.user);
+
+    return await this.recovery.extendVetoClock(
+      data.match_id,
+      data.seconds,
+      data.user,
+    );
+  }
+
   // DEAFCS: Pause and Resume for organizers without the RCON console.
   @HasuraAction()
   public async setMatchPaused(data: {

@@ -966,4 +966,105 @@ describe("MatchRecoveryService", () => {
       expect(resets(postgres)).toEqual([]);
     });
   });
+
+  // Ported from 5Stack API 9f4c954 (#686); DEAFCS passes the viewer.
+  describe("rewindMapVeto", () => {
+    const withReleasedServer = (
+      postgres: ReturnType<typeof setup>["postgres"],
+      serverId: string | null,
+    ) => {
+      const query = postgres.query.getMockImplementation()!;
+      postgres.query.mockImplementation((async (sql: string) =>
+        sql.includes("rewind_map_veto")
+          ? [{ server_id: serverId }]
+          : query(sql)) as never);
+    };
+
+    it("tells the released server to drop the old maps", async () => {
+      const { service, postgres, matchAssistant } = setup();
+      withReleasedServer(postgres, "server-1");
+
+      await service.rewindMapVeto("match-1", 5, 9, VIEWER);
+
+      expect(postgres.query).toHaveBeenCalledWith(
+        expect.stringContaining("rewind_map_veto($1, $2, $3)"),
+        ["match-1", 5, 9],
+      );
+      expect(matchAssistant.refreshServerMatch).toHaveBeenCalledWith(
+        "server-1",
+      );
+    });
+
+    it("leaves servers alone while the veto is still running", async () => {
+      const { service, postgres, matchAssistant } = setup();
+      withReleasedServer(postgres, null);
+
+      await service.rewindMapVeto("match-1", 2, undefined, VIEWER);
+
+      expect(postgres.query).toHaveBeenCalledWith(
+        expect.stringContaining("rewind_map_veto($1, $2, $3)"),
+        ["match-1", 2, null],
+      );
+      expect(matchAssistant.refreshServerMatch).not.toHaveBeenCalled();
+    });
+
+    it("logs who rewound it", async () => {
+      const { service, postgres, logger } = setup();
+      withReleasedServer(postgres, null);
+
+      await service.rewindMapVeto("match-1", 3, 4, VIEWER);
+
+      expect(logger.log).toHaveBeenCalledWith(
+        `[match-1] organizer rewound the veto to step 3 (by ${VIEWER.steam_id}, user)`,
+      );
+    });
+  });
+
+  describe("extendVetoClock", () => {
+    it("adds the time and logs who did", async () => {
+      const { service, postgres, logger } = setup();
+
+      await service.extendVetoClock("match-1", 30, VIEWER);
+
+      expect(postgres.query).toHaveBeenCalledWith(
+        "SELECT extend_veto_clock($1, $2)",
+        ["match-1", 30],
+      );
+      expect(logger.log).toHaveBeenCalledWith(
+        `[match-1] organizer added 30s to the veto clock (by ${VIEWER.steam_id}, user)`,
+      );
+    });
+  });
+
+  // DEAFCS: an organizer on one of the teams can't take back the other team's
+  // ban or give their own team time, unless they are staff.
+  describe("veto controls for organizers on one of the teams", () => {
+    const vetoCalls = (postgres: ReturnType<typeof setup>["postgres"]) =>
+      postgres.query.mock.calls.filter(([sql]) =>
+        /rewind_map_veto|extend_veto_clock/.test(sql),
+      );
+
+    it("refuses a player who organizes their own match", async () => {
+      const { service, postgres, matchAssistant } = setup({ affiliated: true });
+
+      await expect(
+        service.rewindMapVeto("match-1", 1, 3, VIEWER),
+      ).rejects.toThrow("organizers on one of the teams can't change the veto");
+      await expect(
+        service.extendVetoClock("match-1", 30, VIEWER),
+      ).rejects.toThrow("organizers on one of the teams can't change the veto");
+
+      expect(vetoCalls(postgres)).toEqual([]);
+      expect(matchAssistant.refreshServerMatch).not.toHaveBeenCalled();
+    });
+
+    it("lets a match organizer on one of the teams", async () => {
+      const { service, postgres } = setup({ affiliated: true });
+      const viewer = { ...VIEWER, role: "match_organizer" } as const;
+
+      await service.extendVetoClock("match-1", 30, viewer);
+
+      expect(vetoCalls(postgres)).toHaveLength(1);
+    });
+  });
 });

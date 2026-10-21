@@ -441,6 +441,69 @@ export class MatchRecoveryService {
     return { success: true };
   }
 
+  // A veto rewound after a server was booted releases it; a dedicated server
+  // keeps running, so it is told to reload and drop the old maps.
+  public async rewindMapVeto(
+    matchId: string,
+    step: number,
+    expectedPicks: number | undefined,
+    viewer: RecoveryViewer,
+  ) {
+    await this.requireVetoControl(matchId, viewer);
+
+    const [{ server_id }] = await this.postgres.query<
+      Array<{ server_id: string | null }>
+    >("SELECT rewind_map_veto($1, $2, $3)::text AS server_id", [
+      matchId,
+      step,
+      expectedPicks ?? null,
+    ]);
+
+    if (server_id) {
+      await this.matchAssistant.refreshServerMatch(server_id);
+    }
+
+    this.logger.log(
+      `[${matchId}] organizer rewound the veto to step ${step} ${this.actor(viewer)}`,
+    );
+
+    return { success: true };
+  }
+
+  public async extendVetoClock(
+    matchId: string,
+    seconds: number,
+    viewer: RecoveryViewer,
+  ) {
+    await this.requireVetoControl(matchId, viewer);
+
+    await this.postgres.query("SELECT extend_veto_clock($1, $2)", [
+      matchId,
+      seconds,
+    ]);
+
+    this.logger.log(
+      `[${matchId}] organizer added ${seconds}s to the veto clock ${this.actor(viewer)}`,
+    );
+
+    return { success: true };
+  }
+
+  // DEAFCS: the same rule as the map controls. An organizer on one of the
+  // teams would be taking back the other team's ban or giving their own team
+  // time, so only match organizers, tournament organizers and administrators
+  // may.
+  private async requireVetoControl(matchId: string, viewer: RecoveryViewer) {
+    const match = await this.getMatch(matchId);
+
+    if (
+      (await this.isTeamAffiliated(match, viewer.steam_id)) &&
+      !isRoleAbove(viewer.role, "match_organizer")
+    ) {
+      throw Error("organizers on one of the teams can't change the veto");
+    }
+  }
+
   // DEAFCS: Pause and Resume as a predefined action, so organizers never need
   // the RCON console. The plugin takes a console pause as an admin pause.
   public async setMatchPaused(
