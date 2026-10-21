@@ -2699,3 +2699,42 @@ type UtilityRemineOutput {
   throws: Int!
   done: Boolean!
 }
+
+# Player of the Month staff review (administrators only; the API checks the
+# role on every call). candidates / rules / events are the stored snapshot
+# and audit trail as JSON.
+type PlayerOfTheMonthReview {
+  month: String!
+  status: String!
+  rules_version: Int!
+  rules: jsonb!
+  candidates: jsonb!
+  calculated_at: String!
+  calculated_by_steam_id: String
+  winner_steam_id: String
+  occurrence_id: uuid
+  decided_by_steam_id: String
+  decided_at: String
+  decision_note: String
+  events: jsonb!
+}
+
+type Query {
+  playerOfTheMonthReview(month: String!): PlayerOfTheMonthReview
+}
+
+type Mutation {
+  calculatePlayerOfTheMonth(month: String!): PlayerOfTheMonthReview
+}
+
+type Mutation {
+  approvePlayerOfTheMonth(
+    month: String!
+    player_steam_id: String!
+    note: String
+  ): PlayerOfTheMonthReview
+}
+
+type Mutation {
+  rejectPlayerOfTheMonth(month: String!, note: String!): PlayerOfTheMonthReview
+}
