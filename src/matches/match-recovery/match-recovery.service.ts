@@ -4,6 +4,7 @@ import { MatchAssistantService } from "../match-assistant/match-assistant.servic
 import { GameStreamerService } from "../game-streamer/game-streamer.service";
 import { isRoleAbove } from "src/utilities/isRoleAbove";
 import { e_player_roles_enum } from "generated";
+import { isPreMatchRecoveryStaff } from "./pre-match-recovery-staff";
 
 type KeyValue = string | KeyValues;
 type KeyValues = Array<[string, KeyValue]>;
@@ -443,13 +444,23 @@ export class MatchRecoveryService {
 
   // A veto rewound after a server was booted releases it; a dedicated server
   // keeps running, so it is told to reload and drop the old maps.
+  //
+  // DEAFCS: Reset Veto only, i.e. upstream's Redo the Veto (step 1). Undo the
+  // Last Step and Fix a Mis-pick (later steps) are not offered, and Give 30s
+  // More (extendVetoClock) is not ported.
   public async rewindMapVeto(
     matchId: string,
     step: number,
     expectedPicks: number | undefined,
     viewer: RecoveryViewer,
   ) {
-    await this.requireVetoControl(matchId, viewer);
+    if (!(await isPreMatchRecoveryStaff(this.postgres, matchId, viewer))) {
+      throw Error("only staff can reset the veto");
+    }
+
+    if (step !== 1) {
+      throw Error("only the whole veto can be reset");
+    }
 
     const [{ server_id }] = await this.postgres.query<
       Array<{ server_id: string | null }>
@@ -464,68 +475,10 @@ export class MatchRecoveryService {
     }
 
     this.logger.log(
-      `[${matchId}] organizer rewound the veto to step ${step} ${this.actor(viewer)}`,
+      `[${matchId}] organizer reset the veto ${this.actor(viewer)}`,
     );
 
     return { success: true };
-  }
-
-  public async extendVetoClock(
-    matchId: string,
-    seconds: number,
-    viewer: RecoveryViewer,
-  ) {
-    await this.requireVetoControl(matchId, viewer);
-
-    await this.postgres.query("SELECT extend_veto_clock($1, $2)", [
-      matchId,
-      seconds,
-    ]);
-
-    this.logger.log(
-      `[${matchId}] organizer added ${seconds}s to the veto clock ${this.actor(viewer)}`,
-    );
-
-    return { success: true };
-  }
-
-  // DEAFCS: Veto Recovery is for staff only, also while they play in the
-  // match: administrators and match organizers on every match, tournament
-  // organizers on their own tournaments' matches. A match's owner, someone
-  // listed as a tournament's organizer without the role, and moderators may
-  // not (upstream lets every match organizer, owners included).
-  private async requireVetoControl(matchId: string, viewer: RecoveryViewer) {
-    if (
-      viewer.role === "administrator" ||
-      viewer.role === "match_organizer"
-    ) {
-      return;
-    }
-
-    if (viewer.role === "tournament_organizer") {
-      const [row] = await this.postgres.query<Array<{ own: boolean }>>(
-        `SELECT EXISTS (
-                  SELECT 1
-                    FROM tournament_brackets tb
-                    JOIN tournament_stages ts ON ts.id = tb.tournament_stage_id
-                    JOIN tournaments t ON t.id = ts.tournament_id
-                   WHERE tb.match_id = $1
-                     AND (
-                       t.organizer_steam_id = $2
-                       OR EXISTS (
-                         SELECT 1 FROM tournament_organizers o
-                          WHERE o.tournament_id = t.id AND o.steam_id = $2
-                       )
-                     )
-                ) AS own`,
-        [matchId, viewer.steam_id],
-      );
-      if (row?.own) {
-        return;
-      }
-    }
-
-    throw Error("only staff can change the veto");
   }
 
   // DEAFCS: Pause and Resume as a predefined action, so organizers never need

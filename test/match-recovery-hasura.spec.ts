@@ -1009,11 +1009,12 @@ describe("match recovery (Hasura actions and permissions)", () => {
 
   // DEAFCS: a server's real address (host, port, GOTV port) only for
   // administrators; public servers keep their join links.
-  // Undo Last Step, Fix a Mis-pick, Redo the Veto (rewindMapVeto) and Give 30s
-  // More (extendVetoClock), ported from 5Stack API 9f4c954 (#686). DEAFCS: for
-  // staff only, also while playing: administrators and match organizers on
-  // every match, tournament organizers on their own tournaments' matches.
-  describe("veto recovery", () => {
+  // Reset Veto: upstream's rewindMapVeto (5Stack API 9f4c954, #686) at step 1.
+  // DEAFCS: for staff only, also while playing: administrators and match
+  // organizers on every match, tournament organizers on their own
+  // tournaments' matches. No Undo/Fix a Mis-pick (later steps), no Give 30s
+  // More (extendVetoClock).
+  describe("Reset Veto", () => {
     let plainMatchId: string;
     let cupMatchId: string;
     let cupLineupId: string;
@@ -1041,7 +1042,7 @@ describe("match recovery (Hasura actions and permissions)", () => {
       );
     };
 
-    const rewind = (steam: string, role: string, id: string, step: number) =>
+    const rewind = (steam: string, role: string, id: string, step = 1) =>
       graphql(
         `
           mutation ($id: uuid!, $step: Int!) {
@@ -1055,26 +1056,9 @@ describe("match recovery (Hasura actions and permissions)", () => {
         { id, step },
       );
 
-    const addTime = (steam: string, role: string, id: string) =>
-      graphql(
-        `
-          mutation ($id: uuid!) {
-            extendVetoClock(match_id: $id, seconds: 30) {
-              success
-            }
-          }
-        `,
-        role,
-        steam,
-        { id },
-      );
-
-    // Both actions on a two-ban veto; the first error, or null.
-    const tryBoth = async (steam: string, role: string, id: string) => {
-      const first = await rewind(steam, role, id, 2);
-      const second = await addTime(steam, role, id);
-      return first.errors?.[0].message ?? second.errors?.[0].message ?? null;
-    };
+    // The reset's error, or null.
+    const reset = async (steam: string, role: string, id: string) =>
+      (await rewind(steam, role, id)).errors?.[0].message ?? null;
 
     const vetoMatch = async () => {
       const { poolId } = await fx.mapPool(7);
@@ -1136,40 +1120,52 @@ describe("match recovery (Hasura actions and permissions)", () => {
       }
     });
 
-    it("hides them from guests", async () => {
-      const names = await fields("guest");
-      expect(names).not.toContain("rewindMapVeto");
-      expect(names).not.toContain("extendVetoClock");
+    it("hides it from guests", async () => {
+      expect(await fields("guest")).not.toContain("rewindMapVeto");
     });
 
-    it.each(ROLES)("lets a signed-in %s call them", async (role) => {
-      expect(await fields(role)).toEqual(
-        expect.arrayContaining(["rewindMapVeto", "extendVetoClock"]),
-      );
-    });
+    it.each(ROLES)(
+      "lets a signed-in %s call it, and offers no Give 30s More",
+      async (role) => {
+        const names = await fields(role);
+        expect(names).toContain("rewindMapVeto");
+        expect(names).not.toContain("extendVetoClock");
+      },
+    );
 
     it.each(["administrator", "match_organizer"])(
       "lets a %s on any match",
       async (role) => {
         for (const id of [plainMatchId, cupMatchId]) {
-          expect(await tryBoth(people[role], role, id)).toBeNull();
-          expect(await picks(id)).toBe(1);
+          expect(await reset(people[role], role, id)).toBeNull();
+          expect(await picks(id)).toBe(0);
         }
       },
     );
 
+    it("resets the whole veto only, never a single step", async () => {
+      const { errors } = await rewind(
+        people.administrator,
+        "administrator",
+        plainMatchId,
+        2,
+      );
+      expect(errors?.[0].message).toBe("only the whole veto can be reset");
+      expect(await picks(plainMatchId)).toBe(2);
+    });
+
     it("lets a tournament_organizer on its own tournament's match only", async () => {
       expect(
-        await tryBoth(
+        await reset(
           people.tournament_organizer,
           "tournament_organizer",
           cupMatchId,
         ),
       ).toBeNull();
-      expect(await picks(cupMatchId)).toBe(1);
+      expect(await picks(cupMatchId)).toBe(0);
 
       expect(
-        await tryBoth(
+        await reset(
           people.tournament_organizer,
           "tournament_organizer",
           plainMatchId,
@@ -1179,15 +1175,15 @@ describe("match recovery (Hasura actions and permissions)", () => {
     });
 
     it("refuses the match's owner, who organizes it but is not staff", async () => {
-      expect(await tryBoth(people.matchOwner, "user", plainMatchId)).toBe(
-        "only staff can change the veto",
+      expect(await reset(people.matchOwner, "user", plainMatchId)).toBe(
+        "only staff can reset the veto",
       );
       expect(await picks(plainMatchId)).toBe(2);
     });
 
     it("refuses someone listed as the cup's organizer without the role", async () => {
-      expect(await tryBoth(listedUser, "user", cupMatchId)).toBe(
-        "only staff can change the veto",
+      expect(await reset(listedUser, "user", cupMatchId)).toBe(
+        "only staff can reset the veto",
       );
       expect(await picks(cupMatchId)).toBe(2);
     });
@@ -1195,7 +1191,7 @@ describe("match recovery (Hasura actions and permissions)", () => {
     it.each(["user", "verified_user", "streamer", "moderator"])(
       "refuses a %s",
       async (role) => {
-        expect(await tryBoth(people[role], role, plainMatchId)).toBe(
+        expect(await reset(people[role], role, plainMatchId)).toBe(
           "you are not a match organizer",
         );
         expect(await picks(plainMatchId)).toBe(2);
@@ -1208,8 +1204,8 @@ describe("match recovery (Hasura actions and permissions)", () => {
         [plainMatchId, people.moderator],
       );
       try {
-        expect(await tryBoth(people.moderator, "moderator", plainMatchId)).toBe(
-          "only staff can change the veto",
+        expect(await reset(people.moderator, "moderator", plainMatchId)).toBe(
+          "only staff can reset the veto",
         );
         expect(await picks(plainMatchId)).toBe(2);
       } finally {
@@ -1218,6 +1214,34 @@ describe("match recovery (Hasura actions and permissions)", () => {
           [plainMatchId, people.matchOwner],
         );
       }
+    });
+
+    // DEAFCS: upstream lets every match organizer delete veto picks directly,
+    // which also deletes the picked maps (tbd_match_map_veto_picks) and their
+    // rounds and stats. Only administrators keep that.
+    it("lets no organizer below administrator delete veto picks directly", async () => {
+      for (const [steam, role] of [
+        [people.matchOwner, "user"],
+        [people.moderator, "moderator"],
+        [people.match_organizer, "match_organizer"],
+        [people.tournament_organizer, "tournament_organizer"],
+      ]) {
+        const { data, errors } = await graphql(
+          `
+            mutation ($id: uuid!) {
+              delete_match_map_veto_picks(where: { match_id: { _eq: $id } }) {
+                affected_rows
+              }
+            }
+          `,
+          role,
+          steam,
+          { id: plainMatchId },
+        );
+        expect(data?.delete_match_map_veto_picks).toBeUndefined();
+        expect(errors?.[0].message).toMatch(/not found in type/);
+      }
+      expect(await picks(plainMatchId)).toBe(2);
     });
 
     it("lets staff who play in the match", async () => {
@@ -1243,8 +1267,8 @@ describe("match recovery (Hasura actions and permissions)", () => {
             "UPDATE players SET role = $2 WHERE steam_id = $1",
             [people.teamPlayer, role],
           );
-          expect(await tryBoth(people.teamPlayer, role, id)).toBeNull();
-          expect(await picks(id)).toBe(1);
+          expect(await reset(people.teamPlayer, role, id)).toBeNull();
+          expect(await picks(id)).toBe(0);
         }
       } finally {
         await postgres.query(

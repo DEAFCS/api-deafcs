@@ -73,13 +73,6 @@ delete_permissions:
     permission:
       filter: {}
     comment: ""
-  - role: user
-    permission:
-      filter:
-        match:
-          is_organizer:
-            _eq: true
-    comment: ""
 event_triggers:
   - name: match_veto_pick
     definition:

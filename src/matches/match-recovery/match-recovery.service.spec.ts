@@ -967,8 +967,8 @@ describe("MatchRecoveryService", () => {
     });
   });
 
-  // Ported from 5Stack API 9f4c954 (#686). DEAFCS passes the viewer, and only
-  // staff may (see "who may change the veto" below).
+  // Reset Veto: upstream's rewindMapVeto (5Stack API 9f4c954, #686) at step 1.
+  // DEAFCS passes the viewer, and only staff may (see "who may reset the veto").
   const STAFF = { steam_id: VIEWER.steam_id, role: "match_organizer" } as const;
 
   // The query the service answers with: rewind_map_veto's released server, and
@@ -986,16 +986,19 @@ describe("MatchRecoveryService", () => {
           : query(sql)) as never);
   };
 
-  describe("rewindMapVeto", () => {
+  const vetoCalls = (postgres: ReturnType<typeof setup>["postgres"]) =>
+    postgres.query.mock.calls.filter(([sql]) => /rewind_map_veto/.test(sql));
+
+  describe("rewindMapVeto (Reset Veto)", () => {
     it("tells the released server to drop the old maps", async () => {
       const { service, postgres, matchAssistant } = setup();
       answer(postgres, { serverId: "server-1" });
 
-      await service.rewindMapVeto("match-1", 5, 9, STAFF);
+      await service.rewindMapVeto("match-1", 1, 9, STAFF);
 
       expect(postgres.query).toHaveBeenCalledWith(
         expect.stringContaining("rewind_map_veto($1, $2, $3)"),
-        ["match-1", 5, 9],
+        ["match-1", 1, 9],
       );
       expect(matchAssistant.refreshServerMatch).toHaveBeenCalledWith(
         "server-1",
@@ -1006,61 +1009,55 @@ describe("MatchRecoveryService", () => {
       const { service, postgres, matchAssistant } = setup();
       answer(postgres);
 
-      await service.rewindMapVeto("match-1", 2, undefined, STAFF);
+      await service.rewindMapVeto("match-1", 1, undefined, STAFF);
 
       expect(postgres.query).toHaveBeenCalledWith(
         expect.stringContaining("rewind_map_veto($1, $2, $3)"),
-        ["match-1", 2, null],
+        ["match-1", 1, null],
       );
       expect(matchAssistant.refreshServerMatch).not.toHaveBeenCalled();
     });
 
-    it("logs who rewound it", async () => {
+    it("logs who reset it", async () => {
       const { service, postgres, logger } = setup();
       answer(postgres);
 
-      await service.rewindMapVeto("match-1", 3, 4, STAFF);
+      await service.rewindMapVeto("match-1", 1, 4, STAFF);
 
       expect(logger.log).toHaveBeenCalledWith(
-        `[match-1] organizer rewound the veto to step 3 (by ${VIEWER.steam_id}, match_organizer)`,
+        `[match-1] organizer reset the veto (by ${VIEWER.steam_id}, match_organizer)`,
       );
     });
-  });
 
-  describe("extendVetoClock", () => {
-    it("adds the time and logs who did", async () => {
-      const { service, postgres, logger } = setup();
+    // DEAFCS: Undo the Last Step and Fix a Mis-pick are not offered.
+    it.each([2, 3, 9, 0])("refuses step %s", async (step) => {
+      const { service, postgres, matchAssistant } = setup();
+      answer(postgres);
 
-      await service.extendVetoClock("match-1", 30, STAFF);
+      await expect(
+        service.rewindMapVeto("match-1", step, 9, STAFF),
+      ).rejects.toThrow("only the whole veto can be reset");
+      expect(vetoCalls(postgres)).toEqual([]);
+      expect(matchAssistant.refreshServerMatch).not.toHaveBeenCalled();
+    });
 
-      expect(postgres.query).toHaveBeenCalledWith(
-        "SELECT extend_veto_clock($1, $2)",
-        ["match-1", 30],
-      );
-      expect(logger.log).toHaveBeenCalledWith(
-        `[match-1] organizer added 30s to the veto clock (by ${VIEWER.steam_id}, match_organizer)`,
-      );
+    it("has no Give 30s More", () => {
+      expect((setup().service as any).extendVetoClock).toBeUndefined();
     });
   });
 
   // DEAFCS: administrators and match organizers on every match, tournament
   // organizers on their own tournaments' matches, also while playing in it.
   // Never a match's owner (role user) or a moderator.
-  describe("who may change the veto", () => {
-    const vetoCalls = (postgres: ReturnType<typeof setup>["postgres"]) =>
-      postgres.query.mock.calls.filter(([sql]) =>
-        /rewind_map_veto|extend_veto_clock/.test(sql),
-      );
-
-    const tryBoth = async (role: string, own: boolean) => {
+  describe("who may reset the veto", () => {
+    const tryReset = async (role: string, own: boolean) => {
       const { service, postgres } = setup({ affiliated: true });
       answer(postgres, { own });
       const viewer = { steam_id: VIEWER.steam_id, role } as never;
-      const results = await Promise.allSettled([
+      const [result] = await Promise.allSettled([
         service.rewindMapVeto("match-1", 1, 3, viewer),
-        service.extendVetoClock("match-1", 30, viewer),
       ]);
-      return { results, calls: vetoCalls(postgres).length };
+      return { result, calls: vetoCalls(postgres).length };
     };
 
     it.each([
@@ -1068,12 +1065,9 @@ describe("MatchRecoveryService", () => {
       ["match_organizer", false],
       ["tournament_organizer", true],
     ])("lets a %s, even playing in it", async (role, own) => {
-      const { results, calls } = await tryBoth(role, own);
-      expect(results.map((result) => result.status)).toEqual([
-        "fulfilled",
-        "fulfilled",
-      ]);
-      expect(calls).toBe(2);
+      const { result, calls } = await tryReset(role, own);
+      expect(result.status).toBe("fulfilled");
+      expect(calls).toBe(1);
     });
 
     it.each([
@@ -1083,13 +1077,11 @@ describe("MatchRecoveryService", () => {
       ["verified_user", true],
       ["user", true],
     ])("refuses a %s (own tournament: %s)", async (role, own) => {
-      const { results, calls } = await tryBoth(role, own);
-      for (const result of results) {
-        expect(result.status).toBe("rejected");
-        expect((result as PromiseRejectedResult).reason.message).toBe(
-          "only staff can change the veto",
-        );
-      }
+      const { result, calls } = await tryReset(role, own);
+      expect(result.status).toBe("rejected");
+      expect((result as PromiseRejectedResult).reason.message).toBe(
+        "only staff can reset the veto",
+      );
       expect(calls).toBe(0);
     });
   });
