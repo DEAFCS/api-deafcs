@@ -4222,6 +4222,21 @@ export class ChatService {
       client.id,
     );
 
+    // DEAFCS: closing the match page while still in the game server kept
+    // dropping the player from the lobby, inGame and all, so the scoreboard
+    // showed them offline (red), or online but not in game (orange) once the
+    // site reconnected. They stay listed until the server reports them gone
+    // (leaveLobbyViaGame). Upstream 5stackgg/api has the same gap.
+    if (removed === 1 && count === 0 && userData.inGame) {
+      void this.to(type, id, "joined", {
+        user: {
+          ...userData.user,
+          inGame: userData.inGame,
+        },
+      });
+      return;
+    }
+
     if (removed === 1 && count === 0) {
       await this.removeUserData(type, id, client.user.steam_id);
       void this.to(type, id, "left", {
