@@ -20,6 +20,7 @@ import {
   TERMINAL_STATUSES,
   resolveInClusterApiBase,
 } from "./clips.constants";
+import { removeClipFiles } from "./clip-files";
 const STATUS_HISTORY_CAP = 50;
 const LAST_TICK_FOR_MALFORMED = Number.MAX_SAFE_INTEGER;
 
@@ -1317,6 +1318,7 @@ export class ClipsService {
         id: true,
         user_steam_id: true,
         file: true,
+        thumbnail_url: true,
       },
     });
     if (!row) {
@@ -1326,9 +1328,9 @@ export class ClipsService {
       throw new Error("you can only delete your own clips");
     }
 
-    const ownerSteamId = String(row.user_steam_id ?? userSteamId);
-
-    await this.s3.removePrefix(`clips/${ownerSteamId}/${clipId}`);
+    if (!(await removeClipFiles(this.s3, row))) {
+      throw new Error("unable to remove the clip files, try again");
+    }
 
     await this.hasura.mutation({
       delete_match_clips_by_pk: {
@@ -1345,12 +1347,15 @@ export class ClipsService {
           where: { match_map: { match_id: { _eq: matchId } } },
         },
         id: true,
-        user_steam_id: true,
+        file: true,
+        thumbnail_url: true,
       },
     });
 
     for (const clip of match_clips) {
-      await this.s3.removePrefix(`clips/${clip.user_steam_id}/${clip.id}`);
+      if (!(await removeClipFiles(this.s3, clip))) {
+        throw new Error(`unable to remove the files of clip ${clip.id}`);
+      }
       await this.hasura.mutation({
         delete_match_clips_by_pk: {
           __args: { id: clip.id },

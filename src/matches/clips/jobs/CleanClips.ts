@@ -4,6 +4,7 @@ import { MatchQueues } from "../../enums/MatchQueues";
 import { UseQueue } from "../../../utilities/QueueProcessors";
 import { HasuraService } from "../../../hasura/hasura.service";
 import { S3Service } from "../../../s3/s3.service";
+import { removeClipFiles } from "../clip-files";
 
 const UNSIZED_BACKFILL_LIMIT = 25;
 const DELETE_BATCH_SIZE = 10;
@@ -136,17 +137,26 @@ export class CleanClips extends WorkerHost {
 
     let totalDeleted = 0;
     let totalFreed = 0;
+    // DEAFCS: upstream removed the files with remove(), which logs a failure
+    // and moves on, then deleted the row anyway: a file that stayed was no
+    // longer counted or tracked by anything. Such a clip now keeps its row
+    // (next run retries it), and later pages skip past it so this loop cannot
+    // keep picking the same clip.
+    let kept = 0;
 
     while (this.totalStoredBytes >= this.maxStorageInBytes) {
-      const batch = await this.findOldestEligibleClips();
+      const batch = await this.findOldestEligibleClips(kept);
       if (batch.length === 0) {
         break;
       }
 
       for (const clip of batch) {
-        await this.s3.remove(clip.file);
-        if (clip.thumbnail_url) {
-          await this.s3.remove(clip.thumbnail_url);
+        if (!(await removeClipFiles(this.s3, clip))) {
+          kept++;
+          this.logger.warn(
+            `[clean-clips] kept clip ${clip.id}: its files could not be removed`,
+          );
+          continue;
         }
         await this.hasura.mutation({
           delete_match_clips_by_pk: {
@@ -174,7 +184,7 @@ export class CleanClips extends WorkerHost {
     return totalDeleted;
   }
 
-  private async findOldestEligibleClips(): Promise<
+  private async findOldestEligibleClips(offset: number): Promise<
     Array<{
       id: string;
       size: number;
@@ -190,14 +200,19 @@ export class CleanClips extends WorkerHost {
       match_clips: {
         __args: {
           limit: DELETE_BATCH_SIZE,
+          offset,
           where: {
             created_at: {
               _lt: createdBefore,
             },
           },
+          // DEAFCS: ties broken by id, so the clips kept above stay first.
           order_by: [
             {
               created_at: "asc",
+            },
+            {
+              id: "asc",
             },
           ],
         },
