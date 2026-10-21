@@ -227,6 +227,7 @@ event_triggers:
           - region
           - enabled
           - connected
+          - draining_match_id
     retry_conf:
       interval_sec: 10
       num_retries: 6

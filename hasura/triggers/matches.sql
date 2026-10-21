@@ -240,10 +240,20 @@ BEGIN
     END IF;
 
     -- DEAFCS: runs on every update of an ended match, so only while the server
-    -- is still this match's (see tbu_matches).
+    -- is still this match's (see tbu_matches). An on-demand server's pod runs
+    -- on after the match (GOTV delay, then a graceful stop; at once when
+    -- Canceled), so the same update marks it draining: the API hands it out
+    -- again only once the pod is gone (reconcileDrainingOnDemandServers).
     IF NEW.status IN ('Tie', 'Forfeit', 'Canceled', 'Finished', 'Surrendered') THEN
         select server_id into _server_id from matches where id = NEW.id;
-        UPDATE servers SET reserved_by_match_id = null
+        UPDATE servers SET reserved_by_match_id = null,
+            draining_match_id = CASE WHEN is_dedicated OR type != 'Ranked'
+                THEN draining_match_id ELSE NEW.id END,
+            draining_check_at = CASE WHEN is_dedicated OR type != 'Ranked'
+                THEN draining_check_at
+                ELSE now() + make_interval(secs => CASE WHEN NEW.status = 'Canceled' THEN 0
+                    ELSE COALESCE((SELECT mo.tv_delay FROM match_options mo WHERE mo.id = NEW.match_options_id), 0) END)
+            END
         WHERE id = _server_id
           AND reserved_by_match_id = NEW.id;
     END IF;
@@ -547,6 +557,12 @@ CREATE OR REPLACE FUNCTION public.tbd_matches() RETURNS TRIGGER
     AS $$
 BEGIN
     DELETE FROM public.draft_games WHERE match_id = OLD.id;
+    -- DEAFCS: the delete frees the match's servers (ON DELETE SET NULL) while
+    -- its pod is still being stopped, so they drain like an ended match's.
+    UPDATE public.servers SET draining_match_id = OLD.id, draining_check_at = now()
+     WHERE reserved_by_match_id = OLD.id
+       AND is_dedicated = false
+       AND type = 'Ranked';
     RETURN OLD;
 END;
 $$;
