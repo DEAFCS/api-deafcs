@@ -522,8 +522,20 @@ describe("CaptainPickService", () => {
         expect(lineups[i]).not.toBe(lineups[i - 1]);
       }
       // Best-available picks: A (#2) takes #3 #5 #7 #9, B (#1) takes #4 #6 #8 and the leftover #10.
-      expect(s.draft.lineups[1]).toEqual([steam(2), steam(3), steam(5), steam(7), steam(9)]);
-      expect(s.draft.lineups[2]).toEqual([steam(1), steam(4), steam(6), steam(8), steam(10)]);
+      expect(s.draft.lineups[1]).toEqual([
+        steam(2),
+        steam(3),
+        steam(5),
+        steam(7),
+        steam(9),
+      ]);
+      expect(s.draft.lineups[2]).toEqual([
+        steam(1),
+        steam(4),
+        steam(6),
+        steam(8),
+        steam(10),
+      ]);
       // Captains are still the two highest ELO, the lower one first.
       expect(s.draft.captains[1].steam_id).toBe(steam(2));
       expect(s.draft.captains[2].steam_id).toBe(steam(1));
@@ -657,14 +669,18 @@ describe("CaptainPickService", () => {
       const turns: number[] = [];
       for (let i = 0; i < 7; i++) {
         const before = await state();
-        turns.push(getPickingLineup(before.draft.pickIndex as number) as number);
+        turns.push(
+          getPickingLineup(before.draft.pickIndex as number) as number,
+        );
         expect(service.toPublicState(before).pickingLineup).toBe(turns[i]);
         await timeout();
       }
 
       expect(turns).toEqual([1, 2, 1, 2, 1, 2, 1]);
       const s = await state();
-      expect(s.draft.selections.map((selection) => selection.lineup)).toEqual(turns);
+      expect(s.draft.selections.map((selection) => selection.lineup)).toEqual(
+        turns,
+      );
       expect(s.draft.lineups[2].at(-1)).toBe(steam(10));
     });
 
@@ -1865,21 +1881,51 @@ describe("CaptainPickService", () => {
       const matchId = (await state()).matchId;
       const before = await state();
       const first = await service.getSpectatorProgress(matchId);
-      expect(first).toMatchObject({ matchId, active: true, completed: false,
-        progress: { captains: { 1: steam(2), 2: steam(1) }, pickingLineup: 1,
-          lineups: { 1: [steam(2)], 2: [steam(1)] }, pickIndex: 0 } });
+      expect(first).toMatchObject({
+        matchId,
+        active: true,
+        completed: false,
+        progress: {
+          captains: { 1: steam(2), 2: steam(1) },
+          pickingLineup: 1,
+          lineups: { 1: [steam(2)], 2: [steam(1)] },
+          pickIndex: 0,
+        },
+      });
       expect(first.progress.available).toHaveLength(8);
-      expect(Object.keys(first).sort()).toEqual(["active", "completed", "matchId", "progress"]);
-      expect(Object.keys(first.progress).sort()).toEqual(
-        ["available", "captains", "deadline", "lineups", "participants", "phase", "pickIndex", "pickOrder",
-          "pickingLineup", "serverNow", "timerSeconds"]);
+      expect(Object.keys(first).sort()).toEqual([
+        "active",
+        "completed",
+        "matchId",
+        "progress",
+      ]);
+      expect(Object.keys(first.progress).sort()).toEqual([
+        "available",
+        "captains",
+        "deadline",
+        "lineups",
+        "participants",
+        "phase",
+        "pickIndex",
+        "pickOrder",
+        "pickingLineup",
+        "serverNow",
+        "timerSeconds",
+      ]);
       // The public clock is the draft's own timer, nothing else.
       const timer = (await state()).timer;
       expect(first.progress.deadline).toBe(timer.deadline);
       expect(first.progress.timerSeconds).toBe(timer.timerSeconds);
       expect(Number.isNaN(Date.parse(first.progress.serverNow))).toBe(false);
-      expect(JSON.stringify(first)).not.toMatch(/confirmation|draftId|startedAt|selections|team1|team2/);
-      expect(Object.keys(first.progress.participants[0]).sort()).toEqual(["avatar_url", "elo", "name", "steam_id"]);
+      expect(JSON.stringify(first)).not.toMatch(
+        /confirmation|draftId|startedAt|selections|team1|team2/,
+      );
+      expect(Object.keys(first.progress.participants[0]).sort()).toEqual([
+        "avatar_url",
+        "elo",
+        "name",
+        "steam_id",
+      ]);
       expect(await state()).toEqual(before); // Observation never alters authoritative state.
       await pickNext(steam(3));
       const team1 = await service.getSpectatorProgress(matchId);
@@ -1893,8 +1939,11 @@ describe("CaptainPickService", () => {
       expect(team2.progress.lineups[2]).toEqual([steam(1), steam(4)]);
       expect(team2.progress.pickIndex).toBe(2);
       expect(team2.progress.available).toHaveLength(6);
-      expect(redis.published.filter((p) => p.channel === "captain-pick-progress").at(-1).message)
-        .toEqual({ matchId });
+      expect(
+        redis.published
+          .filter((p) => p.channel === "captain-pick-progress")
+          .at(-1).message,
+      ).toEqual({ matchId });
     });
 
     it("reports strict alternating turns to spectators, pick after pick", async () => {
@@ -1915,9 +1964,15 @@ describe("CaptainPickService", () => {
       await service.startDraft(CONFIRMATION_ID);
       const matchId = (await state()).matchId;
       await redis.set(getMatchConfirmationKey("wrong"), CONFIRMATION_ID);
-      expect(await service.getSpectatorProgress("wrong")).toEqual(
-        { matchId: "wrong", active: false, completed: false, progress: null });
-      expect((await service.getSpectatorProgress("missing")).progress).toBeNull();
+      expect(await service.getSpectatorProgress("wrong")).toEqual({
+        matchId: "wrong",
+        active: false,
+        completed: false,
+        progress: null,
+      });
+      expect(
+        (await service.getSpectatorProgress("missing")).progress,
+      ).toBeNull();
       await redis.del(getCaptainPickShellKey(CONFIRMATION_ID));
       expect((await service.getSpectatorProgress(matchId)).progress).toBeNull();
     });
@@ -1932,14 +1987,201 @@ describe("CaptainPickService", () => {
       expect(creating.progress.deadline).toBeNull();
       expect(creating.progress.timerSeconds).toBeNull();
       await service.finalize(CONFIRMATION_ID);
-      expect(await service.getSpectatorProgress(matchId)).toEqual(
-        { matchId, active: false, completed: true, progress: null });
+      expect(await service.getSpectatorProgress(matchId)).toEqual({
+        matchId,
+        active: false,
+        completed: true,
+        progress: null,
+      });
       await service.cleanup(CONFIRMATION_ID);
-      expect(await service.getSpectatorProgress(matchId)).toEqual(
-        { matchId, active: false, completed: false, progress: null });
-      expect(redis.published.filter((p) => p.channel === "captain-pick-progress").at(-1).message)
-        .toEqual({ matchId });
+      expect(await service.getSpectatorProgress(matchId)).toEqual({
+        matchId,
+        active: false,
+        completed: false,
+        progress: null,
+      });
+      expect(
+        redis.published
+          .filter((p) => p.channel === "captain-pick-progress")
+          .at(-1).message,
+      ).toEqual({ matchId });
     });
   });
 
+  // DEAFCS: Reset Captain Pick (staff). Who may is CaptainPickRecoveryController's.
+  describe("Reset Captain Pick", () => {
+    const STAFF = { steam_id: steam(99), role: "match_organizer" };
+
+    beforeEach(async () => {
+      await service.startDraft(CONFIRMATION_ID);
+    });
+
+    const matchId = async () => (await state()).matchId as string;
+    const reset = async (expected?: number) =>
+      service.resetDraft(await matchId(), STAFF, expected);
+    const timeoutJobs = () =>
+      queue.byName("CaptainPickTimeout").map((job) => job.opts.jobId);
+
+    it("clears every pick for the same ten players and captains, with a fresh timer", async () => {
+      const before = await state();
+      await pickNext(steam(3));
+      await pickNext(steam(4));
+      await pickNext(steam(5));
+      const shells = matchAssistant.createMatchBasedOnType.mock.calls.length;
+
+      setNow(START + 12_000);
+      await reset(3);
+
+      const after = await state();
+      expect(after.phase).toBe("Drafting");
+      expect(after.matchId).toBe(before.matchId);
+      expect(after.participants).toEqual(before.participants);
+      expect(after.draft).toEqual(before.draft);
+      expect(after.draft.selections).toEqual([]);
+      expect(after.draft.pickIndex).toBe(0);
+      expect(after.pickedAt).toEqual([]);
+      expect(after.timer).toEqual({
+        startedAt: new Date(START + 12_000).toISOString(),
+        timerSeconds: 30,
+        deadline: new Date(START + 42_000).toISOString(),
+      });
+      // No second match: the shell and its fixed id stay.
+      expect(matchAssistant.createMatchBasedOnType.mock.calls.length).toBe(
+        shells,
+      );
+      expect((service as any).logger.log).toHaveBeenCalledWith(
+        `[captain-pick] ${CONFIRMATION_ID} reset for match ${before.matchId}: 3 picks cleared (by ${STAFF.steam_id}, match_organizer)`,
+      );
+    });
+
+    it("schedules the new timer, and an old pick's timeout does nothing", async () => {
+      const first = (await state()).timer!.deadline;
+      await pickNext(steam(3));
+      const second = (await state()).timer!.deadline;
+
+      setNow(START + 5_000);
+      await reset();
+      const fresh = (await state()).timer!.deadline;
+      expect(timeoutJobs()).toContain(
+        getCaptainPickTimeoutJobId(CONFIRMATION_ID, 0, fresh),
+      );
+
+      // Both earlier timeouts fire late: neither picks anyone.
+      setNow(new Date(second).getTime() + 1_000);
+      await service.handleTimeout(CONFIRMATION_ID, 0, first);
+      await service.handleTimeout(CONFIRMATION_ID, 1, second);
+      expect((await state()).draft.selections).toEqual([]);
+
+      // The new one does.
+      setNow(new Date(fresh).getTime());
+      await service.handleTimeout(CONFIRMATION_ID, 0, fresh);
+      expect((await state()).draft.selections).toHaveLength(1);
+    });
+
+    it("refuses a captain's pick made from the screen before the reset", async () => {
+      await pickNext(steam(3));
+      await reset();
+
+      // Captain 2 still sees pick 1 as theirs.
+      await expect(
+        service.pick(CONFIRMATION_ID, steam(1), steam(4), 1),
+      ).rejects.toThrow("That pick has already been made.");
+      expect((await state()).draft.selections).toEqual([]);
+    });
+
+    it("lets only one of two staff resets through", async () => {
+      await pickNext(steam(3));
+      await pickNext(steam(4));
+
+      const results = await Promise.allSettled([reset(2), reset(2)]);
+
+      expect(results.map((result) => result.status).sort()).toEqual([
+        "fulfilled",
+        "rejected",
+      ]);
+      const refused = results.find(
+        (result) => result.status === "rejected",
+      ) as PromiseRejectedResult;
+      expect(refused.reason).toBeInstanceOf(CaptainPickActionError);
+    });
+
+    it("refuses when the draft moved on since staff looked, or nothing was picked", async () => {
+      await expect(reset()).rejects.toThrow("No player has been picked yet.");
+
+      await pickNext(steam(3));
+      await expect(reset(0)).rejects.toThrow(
+        "The Captain Pick has moved on since you looked",
+      );
+      expect((await state()).draft.selections).toHaveLength(1);
+    });
+
+    it("refuses once the teams are locked, and never creates a second match", async () => {
+      await draftToCompletion();
+      const locked = await state();
+      expect(locked.phase).not.toBe("Drafting");
+      const shells = matchAssistant.createMatchBasedOnType.mock.calls.length;
+
+      await expect(reset()).rejects.toThrow(
+        "The teams are already locked, so the Captain Pick can't be reset.",
+      );
+      expect((await state()).draft).toEqual(locked.draft);
+      expect(matchAssistant.createMatchBasedOnType.mock.calls.length).toBe(
+        shells,
+      );
+    });
+
+    it("refuses a match that is not this draft's", async () => {
+      await pickNext(steam(3));
+      await expect(
+        service.resetDraft("22222222-2222-4222-8222-222222222222", STAFF),
+      ).rejects.toThrow("This match has no Captain Pick to reset.");
+      expect((await state()).draft.selections).toHaveLength(1);
+    });
+
+    it("drops a finalize job a racing last pick queued before losing", async () => {
+      await pickNext(steam(3));
+      const finalizeId = `matchmaking.captain-pick-finalize.${CONFIRMATION_ID}`;
+      queue.jobs.set(finalizeId, {
+        name: "CaptainPickFinalize",
+        data: { confirmationId: CONFIRMATION_ID },
+        opts: { jobId: finalizeId },
+      });
+
+      await reset();
+
+      expect(queue.jobs.has(finalizeId)).toBe(false);
+      // The draft still completes and creates its one match.
+      await draftToCompletion();
+      expect(queue.byName("CaptainPickFinalize")).toHaveLength(1);
+    });
+
+    it("updates the captains, the players and the spectators", async () => {
+      await pickNext(steam(3));
+      redis.published = [];
+
+      await reset();
+
+      for (let n = 1; n <= 10; n++) {
+        const [details] = redis.messagesTo(steam(n), "matchmaking:details");
+        expect(details.data.confirmation.captainPick).toMatchObject({
+          phase: "Drafting",
+          pickIndex: 0,
+          picks: [],
+          captains: { 1: steam(2), 2: steam(1) },
+        });
+      }
+      expect(
+        redis.published.filter((p) => p.channel === "captain-pick-progress"),
+      ).toContainEqual({
+        channel: "captain-pick-progress",
+        message: { matchId: await matchId() },
+      });
+      const progress = await service.getSpectatorProgress(await matchId());
+      expect(progress.progress.lineups).toEqual({
+        1: [steam(2)],
+        2: [steam(1)],
+      });
+      expect(progress.progress.available).toHaveLength(8);
+    });
+  });
 });

@@ -491,6 +491,106 @@ export class CaptainPickService {
   }
 
   /**
+   * DEAFCS: Reset Captain Pick, a staff action (who may is the caller's to
+   * check). The same ten players and the same two captains, every pick
+   * cleared, and a fresh timer for the first pick; the match shell and its
+   * fixed id stay.
+   *
+   * Only while the draft is still picking: once the teams lock
+   * (CreatingMatch) the match is being seated and a reset could race its
+   * creation. It is a compare-and-swap like every pick, so a pick or timeout
+   * racing it either lands first (and is cleared) or is refused after it.
+   * Old timeout jobs carry the old deadline and do nothing. A second reset
+   * racing the first finds no picks, or a different pick count than its
+   * caller saw, and is refused.
+   */
+  public async resetDraft(
+    matchId: string,
+    actor: { steam_id: string; role: string },
+    expectedPicks?: number,
+  ): Promise<void> {
+    const confirmationId = await this.redis.get(
+      getMatchConfirmationKey(matchId),
+    );
+    if (!confirmationId) {
+      throw new CaptainPickActionError(
+        "This match has no Captain Pick to reset.",
+      );
+    }
+
+    const { pickSeconds } = await this.settings.getSettings();
+    let cleared = 0;
+
+    const result = await this.transition(confirmationId, (state) => {
+      if (state.matchId !== matchId) {
+        throw new CaptainPickActionError(
+          "This match has no Captain Pick to reset.",
+        );
+      }
+
+      if (state.phase !== "Drafting" || state.draft.pickIndex === null) {
+        throw new CaptainPickActionError(
+          "The teams are already locked, so the Captain Pick can't be reset.",
+        );
+      }
+
+      const picks = state.draft.selections.length;
+      if (expectedPicks !== undefined && expectedPicks !== picks) {
+        throw new CaptainPickActionError(
+          "The Captain Pick has moved on since you looked; check it and try again.",
+        );
+      }
+      if (picks === 0) {
+        throw new CaptainPickActionError("No player has been picked yet.");
+      }
+
+      // The captains and the first pick come from the stored players and
+      // coin flip, so they are the same as when the draft started.
+      const draft = createCaptainPickDraft(
+        state.participants,
+        state.coinFlip ?? undefined,
+      );
+      if (
+        draft.captains[1].steam_id !== state.draft.captains[1].steam_id ||
+        draft.captains[2].steam_id !== state.draft.captains[2].steam_id
+      ) {
+        throw new Error(
+          `captain pick ${confirmationId} would get other captains on reset`,
+        );
+      }
+
+      const now = new Date();
+      const timer = startCaptainPickTimer(now, pickSeconds);
+      cleared = picks;
+
+      return {
+        ...state,
+        draft,
+        pickedAt: [],
+        timer: {
+          startedAt: timer.startedAt.toISOString(),
+          timerSeconds: timer.timerSeconds,
+          deadline: timer.deadline.toISOString(),
+        },
+        updatedAt: now.toISOString(),
+      };
+    });
+
+    // A last pick that lost the race to this reset may have queued match
+    // creation before its commit failed. finalize() does nothing while
+    // Drafting, but its job id is fixed: drop it so the real one can run.
+    await Promise.resolve(
+      this.queue.remove(getCaptainPickFinalizeJobId(confirmationId)),
+    ).catch((): undefined => undefined);
+
+    await this.afterTransition(result);
+
+    this.logger.log(
+      `[captain-pick] ${confirmationId} reset for match ${matchId}: ${cleared} picks cleared (by ${actor.steam_id}, ${actor.role})`,
+    );
+  }
+
+  /**
    * Creates the ordinary Competitive match for locked teams.
    *
    * Write sequence (each numbered step is its own Postgres transaction):
@@ -897,30 +997,61 @@ export class CaptainPickService {
    * carries the server's time so viewers can correct their own clock.
    */
   public async getSpectatorProgress(matchId: string) {
-    const inactive = { matchId, active: false, completed: false, progress: null as null };
+    const inactive = {
+      matchId,
+      active: false,
+      completed: false,
+      progress: null as null,
+    };
     const draftId = await this.redis.get(getMatchConfirmationKey(matchId));
     const state = draftId ? await this.getState(draftId) : null;
-    if (!state || state.matchId !== matchId ||
-      await this.redis.get(getCaptainPickShellKey(draftId)) !== matchId) return inactive;
-    const active = state.phase === "Drafting" || state.phase === "CreatingMatch";
-    if (!active) return { ...inactive, completed: state.phase === "MatchCreated" };
-    const pickingLineup = state.phase === "Drafting" && state.draft.pickIndex !== null
-      ? getPickingLineup(state.draft.pickIndex) : null;
+    if (
+      !state ||
+      state.matchId !== matchId ||
+      (await this.redis.get(getCaptainPickShellKey(draftId))) !== matchId
+    )
+      return inactive;
+    const active =
+      state.phase === "Drafting" || state.phase === "CreatingMatch";
+    if (!active)
+      return { ...inactive, completed: state.phase === "MatchCreated" };
+    const pickingLineup =
+      state.phase === "Drafting" && state.draft.pickIndex !== null
+        ? getPickingLineup(state.draft.pickIndex)
+        : null;
     return {
-      matchId, active, completed: false,
+      matchId,
+      active,
+      completed: false,
       progress: {
         phase: state.phase,
-        captains: { 1: state.draft.captains[1].steam_id, 2: state.draft.captains[2].steam_id },
-        participants: state.participants.map(({ steam_id, name, avatar_url, elo }) =>
-          ({ steam_id, name, avatar_url, elo })),
-        lineups: { 1: [...state.draft.lineups[1]], 2: [...state.draft.lineups[2]] },
+        captains: {
+          1: state.draft.captains[1].steam_id,
+          2: state.draft.captains[2].steam_id,
+        },
+        participants: state.participants.map(
+          ({ steam_id, name, avatar_url, elo }) => ({
+            steam_id,
+            name,
+            avatar_url,
+            elo,
+          }),
+        ),
+        lineups: {
+          1: [...state.draft.lineups[1]],
+          2: [...state.draft.lineups[2]],
+        },
         available: state.draft.available.map(({ steam_id }) => steam_id),
         pickIndex: state.phase === "Drafting" ? state.draft.pickIndex : null,
         pickOrder: getManualPickOrder(),
         pickingLineup,
         serverNow: new Date().toISOString(),
-        deadline: state.phase === "Drafting" ? (state.timer?.deadline ?? null) : null,
-        timerSeconds: state.phase === "Drafting" ? (state.timer?.timerSeconds ?? null) : null,
+        deadline:
+          state.phase === "Drafting" ? (state.timer?.deadline ?? null) : null,
+        timerSeconds:
+          state.phase === "Drafting"
+            ? (state.timer?.timerSeconds ?? null)
+            : null,
       },
     };
   }
@@ -928,9 +1059,13 @@ export class CaptainPickService {
   private async notifySpectators(matchId: string | null) {
     if (!matchId) return;
     // Only an invalidation, not another state store. Each API pod reads Redis.
-    await this.redis.publish("captain-pick-progress", JSON.stringify({ matchId })).catch((error) =>
-      this.logger.warn("captain pick spectator notification failed: " + error.message),
-    );
+    await this.redis
+      .publish("captain-pick-progress", JSON.stringify({ matchId }))
+      .catch((error) =>
+        this.logger.warn(
+          "captain pick spectator notification failed: " + error.message,
+        ),
+      );
   }
 
   /**

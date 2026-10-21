@@ -24,6 +24,8 @@ import { CaptainPickTimeout } from "./jobs/CaptainPickTimeout";
 import { CaptainPickProgressController } from "./captain-pick/captain-pick-progress.controller";
 import { CaptainPickFinalize } from "./jobs/CaptainPickFinalize";
 import { CaptainPickTeamChatCarryOver } from "./jobs/CaptainPickTeamChatCarryOver";
+import { CaptainPickRecoveryController } from "./captain-pick/captain-pick-recovery.controller";
+import { PostgresModule } from "src/postgres/postgres.module";
 
 @Module({
   imports: [
@@ -32,6 +34,7 @@ import { CaptainPickTeamChatCarryOver } from "./jobs/CaptainPickTeamChatCarryOve
     CacheModule,
     TermsModule,
     NotificationsModule,
+    PostgresModule,
     forwardRef(() => ChatModule),
     forwardRef(() => MatchesModule),
     BullModule.registerQueue({
@@ -62,6 +65,10 @@ import { CaptainPickTeamChatCarryOver } from "./jobs/CaptainPickTeamChatCarryOve
     ...getQueuesProcessors("Matchmaking"),
     loggerFactory(),
   ],
-  controllers: [MatchmakingController, CaptainPickProgressController],
+  controllers: [
+    MatchmakingController,
+    CaptainPickProgressController,
+    CaptainPickRecoveryController,
+  ],
 })
 export class MatchMaking {}
