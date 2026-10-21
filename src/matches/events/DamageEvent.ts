@@ -1,5 +1,9 @@
 import MatchEventProcessor from "./abstracts/MatchEventProcessor";
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+
 export default class DamageEvent extends MatchEventProcessor<{
   time: string;
   round: number;
@@ -31,6 +35,13 @@ export default class DamageEvent extends MatchEventProcessor<{
       insert_player_damages_one: {
         __args: {
           object: {
+            // A game server redelivers an event with the same messageId until
+            // it is acked. The messageId is the row id, so a replay hits the
+            // primary key and is skipped instead of storing the damage twice.
+            ...(UUID_RE.test(this.messageId ?? "") &&
+            this.messageId !== NIL_UUID
+              ? { id: this.messageId }
+              : {}),
             time: new Date(this.data.time),
             match_id: this.matchId,
             round: this.data.round,
@@ -49,6 +60,10 @@ export default class DamageEvent extends MatchEventProcessor<{
             armor: this.data.armor,
 
             hitgroup: this.data.hitgroup,
+          },
+          on_conflict: {
+            constraint: "player_damages_pkey",
+            update_columns: [],
           },
         },
         __typename: true,

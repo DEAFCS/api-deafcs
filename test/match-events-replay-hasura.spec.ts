@@ -8,6 +8,7 @@ import KillEvent from "../src/matches/events/KillEvent";
 import FlashEvent from "../src/matches/events/FlashEvent";
 import AssistEvent from "../src/matches/events/AssistEvent";
 import ObjectiveEvent from "../src/matches/events/ObjectiveEvent";
+import DamageEvent from "../src/matches/events/DamageEvent";
 import { Fixtures } from "./utils/fixtures";
 import { bootContainerAndMigrate, SqlTestDb } from "./utils/sql-test-db";
 
@@ -60,10 +61,11 @@ describe("match event replays (TimescaleDB + Hasura)", () => {
 
   const processor = <T>(
     Processor: new (...args: any[]) => {
-      setData(matchId: string, data: T): void;
+      setData(matchId: string, data: T, messageId?: string): void;
       process(): Promise<void>;
     },
     data: T,
+    messageId?: string,
   ) => {
     const instance = new Processor(
       logger,
@@ -74,7 +76,7 @@ describe("match event replays (TimescaleDB + Hasura)", () => {
       postgres,
       {},
     );
-    instance.setData(matchId, data);
+    instance.setData(matchId, data, messageId);
     return instance;
   };
 
@@ -95,6 +97,43 @@ describe("match event replays (TimescaleDB + Hasura)", () => {
     match_map_id: mapId,
     attacker_location_coordinates: "100 200 300",
   });
+
+  // One pellet of a shotgun blast, as the game server sends it.
+  const damage = (time: string) => ({
+    time,
+    round: 6,
+    attacker_steam_id: attacker,
+    attacker_team: "TERRORIST",
+    attacker_location: "Long",
+    attacker_location_coordinates: "1 2 3",
+    weapon: "nova",
+    damage: 12,
+    damage_armor: 0,
+    health: 88,
+    armor: 0,
+    hitgroup: "chest",
+    attacked_steam_id: victim,
+    attacked_team: "CT",
+    attacked_location: "Long",
+    attacked_location_coordinates: "4 5 6",
+    match_map_id: mapId,
+  });
+
+  const damageRows = async (time: string) =>
+    postgres.query<Array<{ id: string; damage: number }>>(
+      `SELECT id, damage FROM player_damages
+        WHERE match_map_id = $1 AND time = $2 ORDER BY id`,
+      [mapId, time],
+    );
+
+  const totalDamage = async () => {
+    const [row] = await postgres.query<Array<{ total: number }>>(
+      `SELECT total_damage::int AS total FROM v_player_damage
+        WHERE player_steam_id = $1`,
+      [attacker],
+    );
+    return row?.total ?? 0;
+  };
 
   beforeAll(async () => {
     db = await bootContainerAndMigrate("MatchEventsReplayTest");
@@ -371,5 +410,114 @@ describe("match event replays (TimescaleDB + Hasura)", () => {
       [mapId, time],
     );
     expect(row.n).toBe(1);
+  });
+
+  it("player_damages is a hypertable keyed on (time, match_map_id, id)", async () => {
+    const [hypertable] = await postgres.query<Array<{ n: number }>>(
+      `SELECT count(*)::int AS n FROM timescaledb_information.hypertables
+        WHERE hypertable_name = 'player_damages'`,
+    );
+    expect(hypertable.n).toBe(1);
+
+    const [pkey] = await postgres.query<Array<{ def: string }>>(
+      `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+        WHERE conname = 'player_damages_pkey'`,
+    );
+    expect(pkey.def).toBe("PRIMARY KEY (\"time\", match_map_id, id)");
+  });
+
+  it("a replayed damage event is stored once, under its messageId", async () => {
+    const time = "2026-10-21T17:07:00.000Z";
+    const messageId = "5f0c2a8e-7b1d-4c3e-9a6f-0d2b4e6f8a10";
+    const before = await totalDamage();
+
+    for (let i = 0; i < 3; i++) {
+      await processor(DamageEvent, damage(time), messageId).process();
+    }
+
+    expect(await damageRows(time)).toEqual([{ id: messageId, damage: 12 }]);
+    expect(await totalDamage()).toBe(before + 12);
+  });
+
+  it("keeps identical damage events that are separate messages (shotgun pellets on one tick)", async () => {
+    const time = "2026-10-21T17:08:00.000Z";
+    const before = await totalDamage();
+
+    await processor(
+      DamageEvent,
+      damage(time),
+      "0b6e3f4a-1c2d-4e5f-8a9b-0c1d2e3f4a01",
+    ).process();
+    await processor(
+      DamageEvent,
+      damage(time),
+      "0b6e3f4a-1c2d-4e5f-8a9b-0c1d2e3f4a02",
+    ).process();
+
+    expect(await damageRows(time)).toHaveLength(2);
+    expect(await totalDamage()).toBe(before + 24);
+  });
+
+  it("without a usable messageId every damage event still gets its own row", async () => {
+    const time = "2026-10-21T17:09:00.000Z";
+
+    await processor(DamageEvent, damage(time)).process();
+    await processor(DamageEvent, damage(time), "not-a-uuid").process();
+    await processor(
+      DamageEvent,
+      damage(time),
+      "00000000-0000-0000-0000-000000000000",
+    ).process();
+    await processor(
+      DamageEvent,
+      damage(time),
+      "00000000-0000-0000-0000-000000000000",
+    ).process();
+
+    const rows = await damageRows(time);
+    expect(rows).toHaveLength(4);
+    expect(rows.map((row) => row.id)).not.toContain(
+      "00000000-0000-0000-0000-000000000000",
+    );
+  });
+
+  it("the gateway acks a damage redelivery after its dedup entry expired and stores it once", async () => {
+    const time = "2026-10-21T17:10:00.000Z";
+    const cache = {
+      has: jest.fn().mockResolvedValue(false),
+      put: jest.fn().mockResolvedValue(undefined),
+    };
+    const moduleRef = {
+      resolve: jest.fn(async (Processor: any) =>
+        processor(Processor, undefined),
+      ),
+    };
+    const gateway = new MatchEventsGateway(
+      logger as never,
+      moduleRef as never,
+      {} as never,
+      cache as never,
+    );
+    const message = {
+      matchId,
+      mapId,
+      messageId: "c7d9e1f3-a5b7-4c9d-8e1f-3a5b7c9d1e2f",
+      data: { event: "damage", data: damage(time) },
+    };
+    const before = await totalDamage();
+    logger.error.mockClear();
+
+    await expect(gateway.handleMatchEvent(message)).resolves.toBe(
+      message.messageId,
+    );
+    await expect(gateway.handleMatchEvent(message)).resolves.toBe(
+      message.messageId,
+    );
+
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(await damageRows(time)).toEqual([
+      { id: message.messageId, damage: 12 },
+    ]);
+    expect(await totalDamage()).toBe(before + 12);
   });
 });

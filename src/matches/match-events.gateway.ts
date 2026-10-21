@@ -131,7 +131,7 @@ export class MatchEventsGateway {
     const processor =
       await this.moduleRef.resolve<MatchEventProcessor<unknown>>(Processor);
 
-    processor.setData(matchId, data);
+    processor.setData(matchId, data, messageId);
 
     try {
       await processor.process();

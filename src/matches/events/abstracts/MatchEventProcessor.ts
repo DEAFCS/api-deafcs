@@ -10,6 +10,7 @@ import { DisconnectBudgetService } from "../../disconnect-budget/disconnect-budg
 export default abstract class MatchEventProcessor<T> {
   protected data: T;
   protected matchId: string;
+  protected messageId?: string;
 
   constructor(
     protected readonly logger: Logger,
@@ -21,9 +22,10 @@ export default abstract class MatchEventProcessor<T> {
     protected readonly disconnectBudget: DisconnectBudgetService,
   ) {}
 
-  public setData(matchId: string, data: T) {
+  public setData(matchId: string, data: T, messageId?: string) {
     this.data = data;
     this.matchId = matchId.trim();
+    this.messageId = messageId;
   }
 
   public abstract process(): Promise<void>;
