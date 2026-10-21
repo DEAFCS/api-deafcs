@@ -519,8 +519,10 @@ describe("match recovery (Hasura actions and permissions)", () => {
       { id: matchId },
     );
 
-  // DEAFCS: an organizer who plays in the match, whatever their role, can't
-  // use the recovery or pause controls on it; only an administrator can.
+  // DEAFCS: match organizers, tournament organizers and administrators keep
+  // the recovery and pause controls on a match they play in, but never get
+  // the economy there. Below match_organizer, a player who organizes their
+  // own match is refused as upstream does.
   describe("an organizer playing in the match", () => {
     const asTeamPlayer = async (role: string, run: () => Promise<void>) => {
       await postgres.query("UPDATE players SET role = $2 WHERE steam_id = $1", [
@@ -545,46 +547,84 @@ describe("match recovery (Hasura actions and permissions)", () => {
       }
     };
 
-    it.each(["moderator", "match_organizer", "tournament_organizer"])(
-      "refuses a %s, without touching the server",
+    it.each(["match_organizer", "tournament_organizer", "administrator"])(
+      "lets a %s restore and pause, with scores but no economy",
       async (role) => {
         await asTeamPlayer(role, async () => {
           const read = await restoreRounds(people.teamPlayer, role);
           expect(read.errors).toBeUndefined();
-          expect(read.data!.getMatchRestoreRounds.blocked_reason).toBe(
-            "team_member",
-          );
+          expect(read.data!.getMatchRestoreRounds).toMatchObject({
+            blocked_reason: null,
+            restorable: true,
+            economy_hidden: true,
+          });
+          const rounds = read.data!.getMatchRestoreRounds.rounds;
+          expect(
+            rounds.map((round: { round: number; lineup_1_score: number }) => [
+              round.round,
+              round.lineup_1_score,
+            ]),
+          ).toEqual([
+            [1, 1],
+            [2, 2],
+            [3, 3],
+          ]);
+          expect(
+            rounds.every(
+              (round: { players: Array<unknown> }) =>
+                round.players.length === 0,
+            ),
+          ).toBe(true);
 
-          expect(
-            (await restore(people.teamPlayer, role, 2)).errors?.[0].message,
-          ).toBe(
-            "organizers on one of the teams can't restore rounds; players can still call the in-game vote",
+          expect((await restore(people.teamPlayer, role, 2)).errors).toBe(
+            undefined,
           );
-          expect(
-            (await restartMap(people.teamPlayer, role)).errors?.[0].message,
-          ).toBe("organizers on one of the teams can't restart the map");
-          expect(
-            (await pause(people.teamPlayer, role, true)).errors?.[0].message,
-          ).toBe(
-            "organizers on one of the teams can't pause or resume the match",
+          expect((await pause(people.teamPlayer, role, true)).errors).toBe(
+            undefined,
           );
-          expect(rcon).toEqual([]);
+          expect(rcon).toEqual(["restore_round 2", "pause"]);
         });
       },
     );
 
-    it("still lets an administrator", async () => {
-      await asTeamPlayer("administrator", async () => {
-        const read = await restoreRounds(people.teamPlayer, "administrator");
-        expect(read.data!.getMatchRestoreRounds.blocked_reason).toBeNull();
+    it("lets a match_organizer restart the map", async () => {
+      await asTeamPlayer("match_organizer", async () => {
+        try {
+          const { errors } = await restartMap(
+            people.teamPlayer,
+            "match_organizer",
+          );
+          expect(errors).toBeUndefined();
+          expect(rcon).toEqual(["match_state Warmup"]);
+        } finally {
+          await postgres.query(
+            `UPDATE match_map_rounds SET deleted_at = NULL
+              WHERE match_map_id = $1 AND round < 3`,
+            [mapId],
+          );
+        }
+      });
+    });
 
-        const { errors } = await pause(
-          people.teamPlayer,
-          "administrator",
-          true,
+    it("still refuses a moderator who organizes and plays in it", async () => {
+      await asTeamPlayer("moderator", async () => {
+        const read = await restoreRounds(people.teamPlayer, "moderator");
+        expect(read.data!.getMatchRestoreRounds.blocked_reason).toBe(
+          "team_member",
         );
-        expect(errors).toBeUndefined();
-        expect(rcon).toEqual(["pause"]);
+        expect(
+          (await restore(people.teamPlayer, "moderator", 2)).errors?.[0]
+            .message,
+        ).toBe(
+          "organizers on one of the teams can't restore rounds; players can still call the in-game vote",
+        );
+        expect(
+          (await pause(people.teamPlayer, "moderator", true)).errors?.[0]
+            .message,
+        ).toBe(
+          "organizers on one of the teams can't pause or resume the match",
+        );
+        expect(rcon).toEqual([]);
       });
     });
   });
@@ -740,7 +780,7 @@ describe("match recovery (Hasura actions and permissions)", () => {
       });
     });
 
-    it("opens the Rounds tab with every player's economy", async () => {
+    it("opens the Rounds tab with scores but no economy", async () => {
       const { data, errors } = await restoreRounds(
         people.match_organizer,
         "match_organizer",
@@ -749,8 +789,14 @@ describe("match recovery (Hasura actions and permissions)", () => {
       expect(data!.getMatchRestoreRounds).toMatchObject({
         restorable: true,
         blocked_reason: null,
-        economy_hidden: false,
+        economy_hidden: true,
       });
+      expect(data!.getMatchRestoreRounds.rounds).toHaveLength(3);
+      expect(
+        data!.getMatchRestoreRounds.rounds.every(
+          (round: { players: Array<unknown> }) => round.players.length === 0,
+        ),
+      ).toBe(true);
     });
 
     it("restores a round", async () => {
@@ -923,7 +969,7 @@ describe("match recovery (Hasura actions and permissions)", () => {
       expect(rcon).toEqual([]);
     });
 
-    it("can't use the controls while playing in its own tournament's match", async () => {
+    it("keeps the controls while playing in its own tournament's match", async () => {
       await postgres.query(
         `INSERT INTO match_lineup_players (match_lineup_id, steam_id) VALUES ($1, $2)`,
         [tournamentLineupId, people.tournament_organizer],
@@ -934,16 +980,87 @@ describe("match recovery (Hasura actions and permissions)", () => {
           "tournament_organizer",
           tournamentMatchId,
         );
-        expect(errors?.[0].message).toBe(
-          "organizers on one of the teams can't pause or resume the match",
-        );
-        expect(rcon).toEqual([]);
+        expect(errors).toBeUndefined();
+        expect(rcon).toEqual(["pause"]);
       } finally {
         await postgres.query(
           "DELETE FROM match_lineup_players WHERE match_lineup_id = $1 AND steam_id = $2",
           [tournamentLineupId, people.tournament_organizer],
         );
       }
+    });
+  });
+
+  // DEAFCS: rebooting a match server is administrator-only.
+  it.each(ROLES)(
+    "offers rebootMatchServer only to administrators (%s)",
+    async (role) => {
+      expect((await fields(role)).includes("rebootMatchServer")).toBe(
+        role === "administrator",
+      );
+    },
+  );
+
+  // DEAFCS: a server's real address (host, port, GOTV port) only for
+  // administrators; public servers keep their join links.
+  describe("server addresses", () => {
+    let publicServerId: string;
+
+    beforeAll(async () => {
+      const [server] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO servers (host, label, rcon_password, port, tv_port, enabled, connected, region, type, is_dedicated)
+         VALUES ('203.0.113.7', 'public-casual', '\\x00'::bytea, 27016, 27021, true, true, 'TestA', 'Casual', true)
+         RETURNING id`,
+      );
+      publicServerId = server.id;
+    });
+
+    const server = (role: string, columns: string) =>
+      graphql(
+        `
+          query ($id: uuid!) {
+            servers_by_pk(id: $id) {
+              ${columns}
+            }
+          }
+        `,
+        role,
+        role === "guest" ? "0" : people[role],
+        { id: publicServerId },
+      );
+
+    it.each(["guest", ...ROLES.filter((role) => role !== "administrator")])(
+      "hides host, port and tv_port from %s but keeps the join link",
+      async (role) => {
+        for (const column of ["host", "port", "tv_port"]) {
+          const { errors } = await server(role, `id ${column}`);
+          expect(errors?.[0].message).toMatch(new RegExp(column));
+        }
+
+        const { data, errors } = await server(
+          role,
+          "id label connection_link connection_string",
+        );
+        expect(errors).toBeUndefined();
+        expect(data!.servers_by_pk).toMatchObject({
+          label: "public-casual",
+          connection_link: expect.stringContaining("+connect "),
+          connection_string: expect.stringContaining("connect "),
+        });
+      },
+    );
+
+    it("still shows administrators the address", async () => {
+      const { data, errors } = await server(
+        "administrator",
+        "host port tv_port",
+      );
+      expect(errors).toBeUndefined();
+      expect(data!.servers_by_pk).toEqual({
+        host: "203.0.113.7",
+        port: 27016,
+        tv_port: 27021,
+      });
     });
   });
 

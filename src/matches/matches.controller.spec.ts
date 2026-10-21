@@ -52,27 +52,34 @@ describe("MatchesController", () => {
     );
   });
 
-  it("rejects non-organizers", async () => {
-    matchAssistant.isOrganizer.mockResolvedValue(false);
+  // DEAFCS: administrators only, even for the match's own organizers.
+  it.each([
+    "user",
+    "verified_user",
+    "streamer",
+    "moderator",
+    "match_organizer",
+    "tournament_organizer",
+  ])("refuses a %s who organizes the match", async (role) => {
+    matchAssistant.isOrganizer.mockResolvedValue(true);
 
     await expect(
       controller.rebootMatchServer({
         match_id: "match-1",
-        user: { steam_id: "user-1" } as any,
+        user: { steam_id: "user-1", role } as any,
       }),
-    ).rejects.toThrow("you are not a match organizer");
+    ).rejects.toThrow("only administrators can reboot the match server");
 
     expect(matchAssistant.rebootOnDemandServer).not.toHaveBeenCalled();
   });
 
-  it("initiates a reboot for organizers", async () => {
-    matchAssistant.isOrganizer.mockResolvedValue(true);
+  it("initiates a reboot for administrators", async () => {
     matchAssistant.rebootOnDemandServer.mockResolvedValue(undefined);
 
     await expect(
       controller.rebootMatchServer({
         match_id: "match-1",
-        user: { steam_id: "user-1" } as any,
+        user: { steam_id: "user-1", role: "administrator" } as any,
       }),
     ).resolves.toEqual({ success: true });
 
@@ -320,20 +327,28 @@ describe("MatchesController.checkIntoMatch authorization", () => {
   });
 
   it("confirms the starting lineup and checks in together when the team has substitutes", async () => {
-    const controller = setup({ status: "WaitingForCheckIn", can_check_in: true });
+    const controller = setup({
+      status: "WaitingForCheckIn",
+      can_check_in: true,
+    });
     controller.postgres.client.query
       .mockResolvedValueOnce({ rows: [{ id: "lineup-1", seated: 5, size: 5 }] })
       .mockResolvedValue({ rows: [] });
 
     await call(controller);
 
-    const sql = controller.postgres.client.query.mock.calls.map((c: any) => c[0]);
+    const sql = controller.postgres.client.query.mock.calls.map(
+      (c: any) => c[0],
+    );
     expect(sql[1]).toMatch(/starting_lineup_confirmed_at = now()/);
     expect(sql[2]).toMatch(/checked_in = true/);
   });
 
   it("does not check in a lineup that is not exactly the starting size", async () => {
-    const controller = setup({ status: "WaitingForCheckIn", can_check_in: true });
+    const controller = setup({
+      status: "WaitingForCheckIn",
+      can_check_in: true,
+    });
     controller.postgres.client.query.mockResolvedValueOnce({
       rows: [{ id: "lineup-1", seated: 4, size: 5 }],
     });

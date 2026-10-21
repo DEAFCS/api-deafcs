@@ -1353,8 +1353,9 @@ export class MatchesController {
   public async rebootMatchServer(data: { match_id: string; user: User }) {
     const { match_id, user } = data;
 
-    if (!(await this.matchAssistant.isOrganizer(match_id, user))) {
-      throw Error("you are not a match organizer");
+    // DEAFCS: administrators only; upstream lets the match's organizers.
+    if (!isRoleAbove(user.role, "administrator")) {
+      throw Error("only administrators can reboot the match server");
     }
 
     await this.matchAssistant.rebootOnDemandServer(match_id);
