@@ -489,19 +489,43 @@ export class MatchRecoveryService {
     return { success: true };
   }
 
-  // DEAFCS: the same rule as the map controls. An organizer on one of the
-  // teams would be taking back the other team's ban or giving their own team
-  // time, so only match organizers, tournament organizers and administrators
-  // may.
+  // DEAFCS: Veto Recovery is for staff only, also while they play in the
+  // match: administrators and match organizers on every match, tournament
+  // organizers on their own tournaments' matches. A match's owner, someone
+  // listed as a tournament's organizer without the role, and moderators may
+  // not (upstream lets every match organizer, owners included).
   private async requireVetoControl(matchId: string, viewer: RecoveryViewer) {
-    const match = await this.getMatch(matchId);
-
     if (
-      (await this.isTeamAffiliated(match, viewer.steam_id)) &&
-      !isRoleAbove(viewer.role, "match_organizer")
+      viewer.role === "administrator" ||
+      viewer.role === "match_organizer"
     ) {
-      throw Error("organizers on one of the teams can't change the veto");
+      return;
     }
+
+    if (viewer.role === "tournament_organizer") {
+      const [row] = await this.postgres.query<Array<{ own: boolean }>>(
+        `SELECT EXISTS (
+                  SELECT 1
+                    FROM tournament_brackets tb
+                    JOIN tournament_stages ts ON ts.id = tb.tournament_stage_id
+                    JOIN tournaments t ON t.id = ts.tournament_id
+                   WHERE tb.match_id = $1
+                     AND (
+                       t.organizer_steam_id = $2
+                       OR EXISTS (
+                         SELECT 1 FROM tournament_organizers o
+                          WHERE o.tournament_id = t.id AND o.steam_id = $2
+                       )
+                     )
+                ) AS own`,
+        [matchId, viewer.steam_id],
+      );
+      if (row?.own) {
+        return;
+      }
+    }
+
+    throw Error("only staff can change the veto");
   }
 
   // DEAFCS: Pause and Resume as a predefined action, so organizers never need
