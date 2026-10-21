@@ -1,25 +1,34 @@
--- Whether the operator can start a "tv" (GOTV, delayed) game streamer for this
--- match right now. The streamer always watches over GOTV, never Playcast, so
--- this needs a server with a tv_port and waits for the configured tv_delay.
--- It does not depend on what the viewer is shown on the match page.
+-- Whether the operator can start a "tv" (GOTV / Playcast, delayed) game
+-- streamer for this match right now. TV mode reuses the existing
+-- get_match_tv_connection_string() gate, so it implicitly waits for the
+-- configured tv_delay to elapse and for either Playcast or a server-side
+-- tv_port to be available.
 CREATE OR REPLACE FUNCTION public.can_stream_tv(match public.matches, hasura_session json)
 RETURNS boolean
 LANGUAGE plpgsql STABLE
 AS $$
+DECLARE
+    has_tv_port boolean;
+    use_playcast text;
 BEGIN
     IF NOT can_stream_live(match, hasura_session) THEN
         RETURN false;
     END IF;
 
-    RETURN COALESCE((
-        SELECT s.tv_port IS NOT NULL
-               AND m.started_at IS NOT NULL
-               AND NOW() >= m.started_at + (mo.tv_delay || ' seconds')::interval
-          FROM matches m
-         INNER JOIN servers s ON s.id = m.server_id
-         INNER JOIN match_options mo ON mo.id = m.match_options_id
-         WHERE m.id = match.id
-         LIMIT 1
-    ), false);
+    -- TV mode needs a path: Playcast enabled OR the server has a tv_port.
+    use_playcast := get_setting('use_playcast', 'false');
+
+    SELECT (s.tv_port IS NOT NULL) INTO has_tv_port
+    FROM servers s
+    WHERE s.id = match.server_id
+    LIMIT 1;
+
+    IF NOT (use_playcast = 'true' OR COALESCE(has_tv_port, false)) THEN
+        RETURN false;
+    END IF;
+
+    -- Defer to the existing tv_delay/started_at gating.
+    -- "pending" means the delay is not up yet.
+    RETURN COALESCE(get_match_tv_connection_string(match, hasura_session), 'pending') <> 'pending';
 END;
 $$;

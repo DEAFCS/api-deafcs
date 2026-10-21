@@ -2,7 +2,7 @@ DROP FUNCTION IF EXISTS public.get_match_tv_connection_link(match matches, hasur
 
 -- What a viewer is shown for watching the match, one line per way to watch:
 --   playcast "<relay>/<match>"            verified users and up (no server address)
---   connect <host>:<tv_port>; password .. administrators only (GOTV: shows the real address)
+--   connect <host>:<tv_port>; password .. streamers and up (GOTV: shows the real address)
 -- Players in the match get nothing. Until the tv delay is up the answer is the single
 -- word "pending" for a viewer who will get a stream, and NULL for one who will not.
 -- The website picks the lines apart by their first word.
@@ -45,9 +45,8 @@ CREATE OR REPLACE FUNCTION public.get_match_tv_connection_string(match public.ma
         lines := lines || CONCAT('playcast "', relay_domain, '/', match_id, '"');
     END IF;
 
-    -- GOTV connects to the real address, so it is for administrators only.
-    IF tv_port IS NOT NULL
-       AND COALESCE(hasura_session ->> 'x-hasura-role', '') IN ('administrator', 'admin') THEN
+    -- GOTV connects to the real address, so it is for streamers and up.
+    IF tv_port IS NOT NULL AND is_above_role('streamer', hasura_session) THEN
         password := player_match_password(match, 'tv', hasura_session);
 
         IF password IS NOT NULL THEN
