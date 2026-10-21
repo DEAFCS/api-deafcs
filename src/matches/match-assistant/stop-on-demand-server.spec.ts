@@ -49,6 +49,7 @@ type FakePod = {
 type FakeJob = {
   uid: string;
   finished?: boolean;
+  createdAt?: string;
   pods: FakePod[];
 };
 
@@ -87,7 +88,13 @@ describe("MatchAssistantService on-demand server stop", () => {
         throw notFound();
       }
       return {
-        metadata: { name, uid: job.uid },
+        metadata: {
+          name,
+          uid: job.uid,
+          creationTimestamp: job.createdAt
+            ? new Date(job.createdAt)
+            : undefined,
+        },
         status: {
           conditions: job.finished
             ? [{ type: "Complete", status: "True" }]
@@ -265,6 +272,90 @@ describe("MatchAssistantService on-demand server stop", () => {
       ]);
       expect(deletedPods()).toEqual([`${M_JOB}-pending`]);
       expect(stopChecks()).toEqual([]);
+    });
+  });
+
+  // DEAFCS: a "server removed" event (Restart Match, Reset Veto, a
+  // reassignment) retried or delivered late must not stop the match's next
+  // server, which reuses the Job name.
+  describe("stopOnDemandServer (graceful, for an event)", () => {
+    const REMOVED_AT = "2026-10-21T21:44:27.123456";
+
+    it("stops the server that was running when it was removed", async () => {
+      jobs[M_JOB] = {
+        uid: "uid-old",
+        createdAt: "2026-10-21T21:30:00.000Z",
+        pods: [{ name: `${M_JOB}-old` }],
+      };
+
+      await service.stopOnDemandServer(MATCH_ID, false, REMOVED_AT);
+
+      expect(signalledPods()).toEqual([`${M_JOB}-old`]);
+    });
+
+    it("leaves the match's next server running, under the same Job name", async () => {
+      jobs[M_JOB] = {
+        uid: "uid-new",
+        createdAt: "2026-10-21T21:46:00.000Z",
+        pods: [{ name: `${M_JOB}-new` }],
+      };
+
+      await service.stopOnDemandServer(MATCH_ID, false, REMOVED_AT);
+
+      expect(signalledPods()).toEqual([]);
+      expect(deletedJobs()).toEqual([]);
+      expect(deletedPods()).toEqual([]);
+      expect(stopChecks()).toEqual([]);
+    });
+
+    it("leaves a next server that is still booting alone too", async () => {
+      jobs[M_JOB] = {
+        uid: "uid-new",
+        createdAt: "2026-10-21T21:46:00.000Z",
+        pods: [{ name: `${M_JOB}-new`, phase: "Pending", running: false }],
+      };
+
+      await service.stopOnDemandServer(MATCH_ID, false, REMOVED_AT);
+
+      expect(deletedJobs()).toEqual([]);
+      expect(deletedPods()).toEqual([]);
+    });
+
+    it("reads Hasura's created_at without a zone as UTC", async () => {
+      // One minute before the removal in UTC; a local-time reading would
+      // put the removal hours off on a machine east or west of UTC.
+      jobs[M_JOB] = {
+        uid: "uid-old",
+        createdAt: "2026-10-21T21:43:27.000Z",
+        pods: [{ name: `${M_JOB}-old` }],
+      };
+
+      await service.stopOnDemandServer(MATCH_ID, false, REMOVED_AT);
+
+      expect(signalledPods()).toEqual([`${M_JOB}-old`]);
+
+      jobs[M_JOB] = {
+        uid: "uid-new",
+        createdAt: "2026-10-21T21:45:27.000Z",
+        pods: [{ name: `${M_JOB}-new` }],
+      };
+      mockExec.mockClear();
+
+      await service.stopOnDemandServer(MATCH_ID, false, REMOVED_AT);
+
+      expect(signalledPods()).toEqual([]);
+    });
+
+    it("stops as before without an event time", async () => {
+      jobs[M_JOB] = {
+        uid: "uid-new",
+        createdAt: "2026-10-21T21:46:00.000Z",
+        pods: [{ name: `${M_JOB}-new` }],
+      };
+
+      await service.stopOnDemandServer(MATCH_ID);
+
+      expect(signalledPods()).toEqual([`${M_JOB}-new`]);
     });
   });
 

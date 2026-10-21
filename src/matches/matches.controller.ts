@@ -830,7 +830,14 @@ export class MatchesController {
     ) {
       try {
         if (!(await this.isReplacedByOwnOnDemandServer(data, matchId))) {
-          await this.matchAssistant.stopOnDemandServer(matchId);
+          // DEAFCS: only the server this change removed. A retried or late
+          // event (Restart Match, Reset Veto, a reassignment) must not stop
+          // the new server the match got since under the same Job name.
+          await this.matchAssistant.stopOnDemandServer(
+            matchId,
+            false,
+            data.created_at,
+          );
         }
       } catch (error) {
         this.logger.error(
@@ -2453,9 +2460,7 @@ export class MatchesController {
     const resolvedScheduledAt =
       scheduled_at && scheduled_at.trim().length > 0 ? scheduled_at : null;
 
-    const [created] = await this.postgres.query<
-      Array<{ match_id: string }>
-    >(
+    const [created] = await this.postgres.query<Array<{ match_id: string }>>(
       `SELECT recreate_tournament_bracket_match($1::uuid, $2::timestamptz) AS match_id`,
       [bracket_id, resolvedScheduledAt],
     );

@@ -102,6 +102,8 @@ describe("MatchesController after a tournament reset", () => {
       .mockResolvedValue(undefined);
   });
 
+  const EVENT_AT = "2026-10-21T21:44:27.123456";
+
   const updated = (
     old: Record<string, unknown>,
     next: Record<string, unknown>,
@@ -110,6 +112,7 @@ describe("MatchesController after a tournament reset", () => {
       op: "UPDATE",
       old: { id: MATCH_ID, source: "5stack", ...old },
       new: { id: MATCH_ID, source: "5stack", ...old, ...next },
+      created_at: EVENT_AT,
     } as any);
 
   describe("ResetTournamentMatch", () => {
@@ -182,7 +185,11 @@ describe("MatchesController after a tournament reset", () => {
         { server_id: null },
       );
 
-      expect(matchAssistant.stopOnDemandServer).toHaveBeenCalledWith(MATCH_ID);
+      expect(matchAssistant.stopOnDemandServer).toHaveBeenCalledWith(
+        MATCH_ID,
+        false,
+        EVENT_AT,
+      );
       expect(matchAssistant.assignServer).not.toHaveBeenCalled();
       // No match-end handling for a match that is starting over.
       expect(scheduledMatchesQueue.add).not.toHaveBeenCalled();
@@ -250,7 +257,11 @@ describe("MatchesController after a tournament reset", () => {
       ).resolves.toBeUndefined();
 
       expect(matchAssistant.stopOnDemandServer).toHaveBeenCalledTimes(1);
-      expect(matchAssistant.stopOnDemandServer).toHaveBeenCalledWith(MATCH_ID);
+      expect(matchAssistant.stopOnDemandServer).toHaveBeenCalledWith(
+        MATCH_ID,
+        false,
+        EVENT_AT,
+      );
       expect(matchAssistant.assignServer).not.toHaveBeenCalled();
       expect(scheduledMatchesQueue.add).not.toHaveBeenCalled();
       expect(
@@ -341,6 +352,8 @@ describe("MatchesController after a tournament reset", () => {
 
           expect(matchAssistant.stopOnDemandServer).toHaveBeenCalledWith(
             MATCH_ID,
+            false,
+            EVENT_AT,
           );
         },
       );
