@@ -8,7 +8,6 @@ import { TypeSenseService } from "../type-sense/type-sense.service";
 import { RedisManagerService } from "../redis/redis-manager/redis-manager.service";
 import { CacheService } from "../cache/cache.service";
 import { User } from "../auth/types/User";
-import { isRoleAbove } from "../utilities/isRoleAbove";
 
 @Injectable()
 export class RconService {
@@ -28,55 +27,10 @@ export class RconService {
   private connections: Record<string, RconClient> = {};
   private connectTimeouts: Record<string, NodeJS.Timeout> = {};
 
-  // An elevated role is not by itself a licence to drive every server: match
-  // servers are reachable only by that match's organizer, while dedicated
-  // servers stay open to the moderation roles that police public play.
-  public async canAccessServer(serverId: string, user: User): Promise<boolean> {
-    if (user.role === "administrator") {
-      return true;
-    }
-
-    if (!isRoleAbove(user.role, "moderator")) {
-      return false;
-    }
-
-    const { servers_by_pk: server } = await this.hasuraService.query({
-      servers_by_pk: {
-        __args: {
-          id: serverId,
-        },
-        is_dedicated: true,
-      },
-    });
-
-    if (!server) {
-      return false;
-    }
-
-    if (server.is_dedicated) {
-      return true;
-    }
-
-    const { matches } = await this.hasuraService.query(
-      {
-        matches: {
-          __args: {
-            where: {
-              server_id: {
-                _eq: serverId,
-              },
-              status: {
-                _nin: ["Canceled", "Finished", "Forfeit", "Surrendered", "Tie"],
-              },
-            },
-          },
-          is_organizer: true,
-        },
-      },
-      user.steam_id,
-    );
-
-    return matches.some((match) => match.is_organizer);
+  // DEAFCS: RCON is for administrators only. No other role reaches any server,
+  // not even as the organizer of the match running on it.
+  public async canAccessServer(_serverId: string, user: User): Promise<boolean> {
+    return user.role === "administrator";
   }
 
   public async connect(serverId: string): Promise<RconClient | null> {

@@ -1571,7 +1571,6 @@ export class GameStreamerService {
       );
     }
 
-    const usePlaycast = await this.readUsePlaycast();
 
     const claim = await this.claimGpuForLive(matchId, mode);
     if (claim === null) {
@@ -1586,7 +1585,6 @@ export class GameStreamerService {
       matchId,
       match.server,
       match.password,
-      usePlaycast,
       mode,
     );
 
@@ -1967,12 +1965,10 @@ export class GameStreamerService {
       );
     }
 
-    const usePlaycast = await this.readUsePlaycast();
     const connectEnv = await this.buildConnectEnv(
       toMatchId,
       toMatch.server,
       toMatch.password,
-      usePlaycast,
       mode,
     );
 
@@ -2648,17 +2644,6 @@ export class GameStreamerService {
     });
   }
 
-  private async readUsePlaycast(): Promise<boolean> {
-    const { settings_by_pk } = await this.hasura.query({
-      settings_by_pk: {
-        __args: { name: "use_playcast" },
-        name: true,
-        value: true,
-      },
-    });
-    return settings_by_pk?.value === "true";
-  }
-
   private async claimGpuForLive(
     matchId: string,
     mode: "live" | "tv",
@@ -2824,7 +2809,6 @@ export class GameStreamerService {
       game_server_node?: { node_ip?: string | null } | null;
     },
     matchPassword: string,
-    usePlaycast: boolean,
     mode: "live" | "tv",
   ): Promise<V1EnvVar[]> {
     const host =
@@ -2832,25 +2816,13 @@ export class GameStreamerService {
         ? server.game_server_node.node_ip
         : server.host;
 
-    // tv mode: respect the GOTV/Playcast path so the broadcast carries the
-    // configured tv_delay. Playcast (when enabled) wins over the server's
-    // tv_port — same precedence as get_match_tv_connection_string().
+    // tv mode: always GOTV, so the broadcast carries the configured tv_delay
+    // and the pod never has to type anything into the console (DEAFCS: the
+    // streamer does not use Playcast, whatever use_playcast says).
     if (mode === "tv") {
-      if (usePlaycast) {
-        return [
-          // DEAFCS: our own relay (the same one the match page and the game server
-          // use), not upstream's tv.5stack.gg, which has never heard of our matches.
-          {
-            name: "PLAYCAST_URL",
-            value: `${this.appConfig.relayDomain}/${matchId}`,
-          },
-          { name: "PLAYCAST_PASSWORD", value: "" },
-        ];
-      }
-
       if (!server.tv_port) {
         throw new Error(
-          "tv mode requires a server with tv_port or Playcast enabled",
+          "tv mode requires a server with a tv_port",
         );
       }
 
