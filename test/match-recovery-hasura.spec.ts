@@ -1003,126 +1003,6 @@ describe("match recovery (Hasura actions and permissions)", () => {
 
   // DEAFCS: a server's real address (host, port, GOTV port) only for
   // administrators; public servers keep their join links.
-  describe("server addresses", () => {
-    let publicServerId: string;
-
-    beforeAll(async () => {
-      const [server] = await postgres.query<Array<{ id: string }>>(
-        `INSERT INTO servers (host, label, rcon_password, port, tv_port, enabled, connected, region, type, is_dedicated)
-         VALUES ('203.0.113.7', 'public-casual', '\\x00'::bytea, 27016, 27021, true, true, 'TestA', 'Casual', true)
-         RETURNING id`,
-      );
-      publicServerId = server.id;
-    });
-
-    const server = (role: string, columns: string) =>
-      graphql(
-        `
-          query ($id: uuid!) {
-            servers_by_pk(id: $id) {
-              ${columns}
-            }
-          }
-        `,
-        role,
-        role === "guest" ? "0" : people[role],
-        { id: publicServerId },
-      );
-
-    it.each(["guest", ...ROLES.filter((role) => role !== "administrator")])(
-      "hides host, port and tv_port from %s but keeps the join link",
-      async (role) => {
-        for (const column of ["host", "port", "tv_port"]) {
-          const { errors } = await server(role, `id ${column}`);
-          expect(errors?.[0].message).toMatch(new RegExp(column));
-        }
-
-        const { data, errors } = await server(
-          role,
-          "id label connection_link connection_string",
-        );
-        expect(errors).toBeUndefined();
-        expect(data!.servers_by_pk).toMatchObject({
-          label: "public-casual",
-          connection_link: expect.stringContaining("+connect "),
-          connection_string: expect.stringContaining("connect "),
-        });
-      },
-    );
-
-    it("still shows administrators the address", async () => {
-      const { data, errors } = await server(
-        "administrator",
-        "host port tv_port",
-      );
-      expect(errors).toBeUndefined();
-      expect(data!.servers_by_pk).toEqual({
-        host: "203.0.113.7",
-        port: 27016,
-        tv_port: 27021,
-      });
-    });
-  });
-
-  it("restarts the map from warmup and keeps its rounds restorable", async () => {
-    const { data, errors } = await graphql(
-      `
-        mutation ($id: uuid!) {
-          restartMatchMap(match_id: $id) {
-            success
-          }
-        }
-      `,
-      "administrator",
-      people.administrator,
-      { id: matchId },
-    );
-
-    expect(errors).toBeUndefined();
-    expect(data!.restartMatchMap).toEqual({ success: true });
-    expect(rcon).toEqual(["match_state Warmup"]);
-    const rows = await postgres.query<
-      Array<{ round: number; undone: boolean }>
-    >(
-      `SELECT round, deleted_at IS NOT NULL AS undone FROM match_map_rounds
-        WHERE match_map_id = $1 ORDER BY round`,
-      [mapId],
-    );
-    expect(rows).toEqual([
-      { round: 1, undone: true },
-      { round: 2, undone: true },
-      { round: 3, undone: true },
-    ]);
-  });
-
-  it("never shows an undone round to players once the map is finished", async () => {
-    await postgres.query(
-      `UPDATE match_map_rounds SET deleted_at = NULL WHERE match_map_id = $1 AND round < 3`,
-      [mapId],
-    );
-    await fx.finishMap(mapId);
-
-    for (const role of ["guest", "user"]) {
-      const { data, errors } = await graphql(
-        `
-          query ($id: uuid!) {
-            match_map_rounds(
-              where: { match_map_id: { _eq: $id } }
-              order_by: { round: asc }
-            ) {
-              round
-            }
-          }
-        `,
-        role,
-        role === "guest" ? "0" : people.user,
-        { id: mapId },
-      );
-      expect(errors).toBeUndefined();
-      expect(data!.match_map_rounds).toEqual([{ round: 1 }, { round: 2 }]);
-    }
-  });
-
   // Undo Last Step, Fix a Mis-pick, Redo the Veto (rewindMapVeto) and Give 30s
   // More (extendVetoClock), ported from 5Stack API 9f4c954 (#686).
   describe("veto recovery", () => {
@@ -1286,5 +1166,125 @@ describe("match recovery (Hasura actions and permissions)", () => {
         );
       }
     });
+  });
+
+  describe("server addresses", () => {
+    let publicServerId: string;
+
+    beforeAll(async () => {
+      const [server] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO servers (host, label, rcon_password, port, tv_port, enabled, connected, region, type, is_dedicated)
+         VALUES ('203.0.113.7', 'public-casual', '\\x00'::bytea, 27016, 27021, true, true, 'TestA', 'Casual', true)
+         RETURNING id`,
+      );
+      publicServerId = server.id;
+    });
+
+    const server = (role: string, columns: string) =>
+      graphql(
+        `
+          query ($id: uuid!) {
+            servers_by_pk(id: $id) {
+              ${columns}
+            }
+          }
+        `,
+        role,
+        role === "guest" ? "0" : people[role],
+        { id: publicServerId },
+      );
+
+    it.each(["guest", ...ROLES.filter((role) => role !== "administrator")])(
+      "hides host, port and tv_port from %s but keeps the join link",
+      async (role) => {
+        for (const column of ["host", "port", "tv_port"]) {
+          const { errors } = await server(role, `id ${column}`);
+          expect(errors?.[0].message).toMatch(new RegExp(column));
+        }
+
+        const { data, errors } = await server(
+          role,
+          "id label connection_link connection_string",
+        );
+        expect(errors).toBeUndefined();
+        expect(data!.servers_by_pk).toMatchObject({
+          label: "public-casual",
+          connection_link: expect.stringContaining("+connect "),
+          connection_string: expect.stringContaining("connect "),
+        });
+      },
+    );
+
+    it("still shows administrators the address", async () => {
+      const { data, errors } = await server(
+        "administrator",
+        "host port tv_port",
+      );
+      expect(errors).toBeUndefined();
+      expect(data!.servers_by_pk).toEqual({
+        host: "203.0.113.7",
+        port: 27016,
+        tv_port: 27021,
+      });
+    });
+  });
+
+  it("restarts the map from warmup and keeps its rounds restorable", async () => {
+    const { data, errors } = await graphql(
+      `
+        mutation ($id: uuid!) {
+          restartMatchMap(match_id: $id) {
+            success
+          }
+        }
+      `,
+      "administrator",
+      people.administrator,
+      { id: matchId },
+    );
+
+    expect(errors).toBeUndefined();
+    expect(data!.restartMatchMap).toEqual({ success: true });
+    expect(rcon).toEqual(["match_state Warmup"]);
+    const rows = await postgres.query<
+      Array<{ round: number; undone: boolean }>
+    >(
+      `SELECT round, deleted_at IS NOT NULL AS undone FROM match_map_rounds
+        WHERE match_map_id = $1 ORDER BY round`,
+      [mapId],
+    );
+    expect(rows).toEqual([
+      { round: 1, undone: true },
+      { round: 2, undone: true },
+      { round: 3, undone: true },
+    ]);
+  });
+
+  it("never shows an undone round to players once the map is finished", async () => {
+    await postgres.query(
+      `UPDATE match_map_rounds SET deleted_at = NULL WHERE match_map_id = $1 AND round < 3`,
+      [mapId],
+    );
+    await fx.finishMap(mapId);
+
+    for (const role of ["guest", "user"]) {
+      const { data, errors } = await graphql(
+        `
+          query ($id: uuid!) {
+            match_map_rounds(
+              where: { match_map_id: { _eq: $id } }
+              order_by: { round: asc }
+            ) {
+              round
+            }
+          }
+        `,
+        role,
+        role === "guest" ? "0" : people.user,
+        { id: mapId },
+      );
+      expect(errors).toBeUndefined();
+      expect(data!.match_map_rounds).toEqual([{ round: 1 }, { round: 2 }]);
+    }
   });
 });
