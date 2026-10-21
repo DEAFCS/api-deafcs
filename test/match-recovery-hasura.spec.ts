@@ -1004,19 +1004,24 @@ describe("match recovery (Hasura actions and permissions)", () => {
   // DEAFCS: a server's real address (host, port, GOTV port) only for
   // administrators; public servers keep their join links.
   // Undo Last Step, Fix a Mis-pick, Redo the Veto (rewindMapVeto) and Give 30s
-  // More (extendVetoClock), ported from 5Stack API 9f4c954 (#686).
+  // More (extendVetoClock), ported from 5Stack API 9f4c954 (#686). DEAFCS: for
+  // staff only, also while playing: administrators and match organizers on
+  // every match, tournament organizers on their own tournaments' matches.
   describe("veto recovery", () => {
-    let vetoMatchId: string;
+    let plainMatchId: string;
+    let cupMatchId: string;
+    let cupLineupId: string;
+    let listedUser: string;
 
-    const picks = async () => {
+    const picks = async (id: string) => {
       const [{ count }] = await postgres.query<Array<{ count: number }>>(
         "SELECT COUNT(*)::int AS count FROM match_map_veto_picks WHERE match_id = $1",
-        [vetoMatchId],
+        [id],
       );
       return count;
     };
 
-    const ban = async () => {
+    const ban = async (id: string) => {
       await postgres.query(
         `INSERT INTO match_map_veto_picks (match_id, type, match_lineup_id, map_id)
          SELECT m.id, 'Ban', get_map_veto_picking_lineup_id(m), mp.map_id
@@ -1026,29 +1031,25 @@ describe("match recovery (Hasura actions and permissions)", () => {
           WHERE m.id = $1
             AND mp.map_id NOT IN (SELECT map_id FROM match_map_veto_picks WHERE match_id = m.id)
           LIMIT 1`,
-        [vetoMatchId],
+        [id],
       );
     };
 
-    const rewind = (steam: string, role: string, step: number) =>
+    const rewind = (steam: string, role: string, id: string, step: number) =>
       graphql(
         `
-          mutation ($id: uuid!, $step: Int!, $expected: Int) {
-            rewindMapVeto(
-              match_id: $id
-              step: $step
-              expected_picks: $expected
-            ) {
+          mutation ($id: uuid!, $step: Int!) {
+            rewindMapVeto(match_id: $id, step: $step) {
               success
             }
           }
         `,
         role,
         steam,
-        { id: vetoMatchId, step },
+        { id, step },
       );
 
-    const addTime = (steam: string, role: string) =>
+    const addTime = (steam: string, role: string, id: string) =>
       graphql(
         `
           mutation ($id: uuid!) {
@@ -1059,35 +1060,74 @@ describe("match recovery (Hasura actions and permissions)", () => {
         `,
         role,
         steam,
-        { id: vetoMatchId },
+        { id },
       );
 
-    beforeAll(async () => {
+    // Both actions on a two-ban veto; the first error, or null.
+    const tryBoth = async (steam: string, role: string, id: string) => {
+      const first = await rewind(steam, role, id, 2);
+      const second = await addTime(steam, role, id);
+      return first.errors?.[0].message ?? second.errors?.[0].message ?? null;
+    };
+
+    const vetoMatch = async () => {
       const { poolId } = await fx.mapPool(7);
       const match = await fx.match({
         bestOf: 3,
         mapVeto: true,
         mapPoolId: poolId,
       });
-      vetoMatchId = match.id;
       await postgres.query(
         "UPDATE matches SET status = 'Live', organizer_steam_id = $2 WHERE id = $1",
-        [vetoMatchId, people.matchOwner],
+        [match.id, people.matchOwner],
       );
+      return match;
+    };
+
+    beforeAll(async () => {
+      const plain = await vetoMatch();
+      plainMatchId = plain.id;
       await postgres.query(
         `INSERT INTO match_lineup_players (match_lineup_id, steam_id)
          VALUES ($1, $2)`,
-        [match.lineup_1_id, people.teamPlayer],
+        [plain.lineup_1_id, people.teamPlayer],
+      );
+
+      const cup = await vetoMatch();
+      cupMatchId = cup.id;
+      cupLineupId = cup.lineup_1_id;
+      const [tournament] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO tournaments (name, start, organizer_steam_id, match_options_id, status)
+         VALUES ($1, now() + interval '1 day', $2, $3, 'Setup') RETURNING id`,
+        [fx.nextName("veto-cup"), people.tournament_organizer, cup.options_id],
+      );
+      const [stage] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO tournament_stages (tournament_id, type, "order", min_teams, max_teams)
+         VALUES ($1, 'SingleElimination', 1, 4, 8) RETURNING id`,
+        [tournament.id],
+      );
+      await postgres.query(
+        `INSERT INTO tournament_brackets (tournament_stage_id, match_id, round)
+         VALUES ($1, $2, 1)`,
+        [stage.id, cupMatchId],
+      );
+      // Listed as the cup's organizer, but without the role.
+      listedUser = await fx.player("listed-user");
+      await postgres.query(
+        "INSERT INTO tournament_organizers (tournament_id, steam_id) VALUES ($1, $2)",
+        [tournament.id, listedUser],
       );
     });
 
     beforeEach(async () => {
-      await postgres.query(
-        "DELETE FROM match_map_veto_picks WHERE match_id = $1",
-        [vetoMatchId],
-      );
-      await ban();
-      await ban();
+      for (const id of [plainMatchId, cupMatchId]) {
+        await postgres.query(
+          "DELETE FROM match_map_veto_picks WHERE match_id = $1",
+          [id],
+        );
+        await ban(id);
+        await ban(id);
+      }
     });
 
     it("hides them from guests", async () => {
@@ -1102,67 +1142,112 @@ describe("match recovery (Hasura actions and permissions)", () => {
       );
     });
 
-    it.each(["user", "moderator", "tournament_organizer"])(
-      "refuses a %s who doesn't organize the match",
+    it.each(["administrator", "match_organizer"])(
+      "lets a %s on any match",
       async (role) => {
-        for (const run of [
-          () => rewind(people[role], role, 1),
-          () => addTime(people[role], role),
-        ]) {
-          expect((await run()).errors?.[0].message).toBe(
-            "you are not a match organizer",
-          );
+        for (const id of [plainMatchId, cupMatchId]) {
+          expect(await tryBoth(people[role], role, id)).toBeNull();
+          expect(await picks(id)).toBe(1);
         }
-        expect(await picks()).toBe(2);
       },
     );
 
-    it("lets the match's owner take back the last step and give more time", async () => {
-      expect((await addTime(people.matchOwner, "user")).errors).toBeUndefined();
+    it("lets a tournament_organizer on its own tournament's match only", async () => {
       expect(
-        (await rewind(people.matchOwner, "user", 2)).errors,
-      ).toBeUndefined();
-      expect(await picks()).toBe(1);
+        await tryBoth(
+          people.tournament_organizer,
+          "tournament_organizer",
+          cupMatchId,
+        ),
+      ).toBeNull();
+      expect(await picks(cupMatchId)).toBe(1);
+
+      expect(
+        await tryBoth(
+          people.tournament_organizer,
+          "tournament_organizer",
+          plainMatchId,
+        ),
+      ).toBe("you are not a match organizer");
+      expect(await picks(plainMatchId)).toBe(2);
     });
 
-    it("lets a match_organizer redo the whole veto", async () => {
-      expect(
-        (await rewind(people.match_organizer, "match_organizer", 1)).errors,
-      ).toBeUndefined();
-      expect(await picks()).toBe(0);
+    it("refuses the match's owner, who organizes it but is not staff", async () => {
+      expect(await tryBoth(people.matchOwner, "user", plainMatchId)).toBe(
+        "only staff can change the veto",
+      );
+      expect(await picks(plainMatchId)).toBe(2);
     });
 
-    it("refuses an organizer who plays in the match, unless staff", async () => {
+    it("refuses someone listed as the cup's organizer without the role", async () => {
+      expect(await tryBoth(listedUser, "user", cupMatchId)).toBe(
+        "only staff can change the veto",
+      );
+      expect(await picks(cupMatchId)).toBe(2);
+    });
+
+    it.each(["user", "verified_user", "streamer", "moderator"])(
+      "refuses a %s",
+      async (role) => {
+        expect(await tryBoth(people[role], role, plainMatchId)).toBe(
+          "you are not a match organizer",
+        );
+        expect(await picks(plainMatchId)).toBe(2);
+      },
+    );
+
+    it("refuses a moderator who owns the match", async () => {
       await postgres.query(
         "UPDATE matches SET organizer_steam_id = $2 WHERE id = $1",
-        [vetoMatchId, people.teamPlayer],
+        [plainMatchId, people.moderator],
       );
       try {
-        for (const run of [
-          () => rewind(people.teamPlayer, "moderator", 1),
-          () => addTime(people.teamPlayer, "moderator"),
-        ]) {
-          expect((await run()).errors?.[0].message).toBe(
-            "organizers on one of the teams can't change the veto",
-          );
-        }
-        expect(await picks()).toBe(2);
-
-        await postgres.query(
-          "UPDATE players SET role = 'match_organizer' WHERE steam_id = $1",
-          [people.teamPlayer],
+        expect(await tryBoth(people.moderator, "moderator", plainMatchId)).toBe(
+          "only staff can change the veto",
         );
-        expect(
-          (await addTime(people.teamPlayer, "match_organizer")).errors,
-        ).toBeUndefined();
+        expect(await picks(plainMatchId)).toBe(2);
+      } finally {
+        await postgres.query(
+          "UPDATE matches SET organizer_steam_id = $2 WHERE id = $1",
+          [plainMatchId, people.matchOwner],
+        );
+      }
+    });
+
+    it("lets staff who play in the match", async () => {
+      await postgres.query(
+        `INSERT INTO match_lineup_players (match_lineup_id, steam_id)
+         VALUES ($1, $2)`,
+        [cupLineupId, people.teamPlayer],
+      );
+      await postgres.query(
+        `INSERT INTO tournament_organizers (tournament_id, steam_id)
+         SELECT ts.tournament_id, $2
+           FROM tournament_brackets tb
+           JOIN tournament_stages ts ON ts.id = tb.tournament_stage_id
+          WHERE tb.match_id = $1`,
+        [cupMatchId, people.teamPlayer],
+      );
+      try {
+        for (const [role, id] of [
+          ["match_organizer", plainMatchId],
+          ["tournament_organizer", cupMatchId],
+        ]) {
+          await postgres.query(
+            "UPDATE players SET role = $2 WHERE steam_id = $1",
+            [people.teamPlayer, role],
+          );
+          expect(await tryBoth(people.teamPlayer, role, id)).toBeNull();
+          expect(await picks(id)).toBe(1);
+        }
       } finally {
         await postgres.query(
           "UPDATE players SET role = 'moderator' WHERE steam_id = $1",
           [people.teamPlayer],
         );
         await postgres.query(
-          "UPDATE matches SET organizer_steam_id = $2 WHERE id = $1",
-          [vetoMatchId, people.matchOwner],
+          "DELETE FROM tournament_organizers WHERE steam_id = $1",
+          [people.teamPlayer],
         );
       }
     });

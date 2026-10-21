@@ -927,24 +927,31 @@ describe("MatchRecoveryService", () => {
     });
   });
 
-  // Ported from 5Stack API 9f4c954 (#686); DEAFCS passes the viewer.
-  describe("rewindMapVeto", () => {
-    const withReleasedServer = (
-      postgres: ReturnType<typeof setup>["postgres"],
-      serverId: string | null,
-    ) => {
-      const query = postgres.query.getMockImplementation()!;
-      postgres.query.mockImplementation((async (sql: string) =>
-        sql.includes("rewind_map_veto")
-          ? [{ server_id: serverId }]
-          : query(sql)) as never);
-    };
+  // Ported from 5Stack API 9f4c954 (#686). DEAFCS passes the viewer, and only
+  // staff may (see "who may change the veto" below).
+  const STAFF = { steam_id: VIEWER.steam_id, role: "match_organizer" } as const;
 
+  // The query the service answers with: rewind_map_veto's released server, and
+  // whether a tournament organizer organizes this match's tournament.
+  const answer = (
+    postgres: ReturnType<typeof setup>["postgres"],
+    { serverId = null as string | null, own = false } = {},
+  ) => {
+    const query = postgres.query.getMockImplementation()!;
+    postgres.query.mockImplementation((async (sql: string) =>
+      sql.includes("rewind_map_veto")
+        ? [{ server_id: serverId }]
+        : sql.includes("AS own")
+          ? [{ own }]
+          : query(sql)) as never);
+  };
+
+  describe("rewindMapVeto", () => {
     it("tells the released server to drop the old maps", async () => {
       const { service, postgres, matchAssistant } = setup();
-      withReleasedServer(postgres, "server-1");
+      answer(postgres, { serverId: "server-1" });
 
-      await service.rewindMapVeto("match-1", 5, 9, VIEWER);
+      await service.rewindMapVeto("match-1", 5, 9, STAFF);
 
       expect(postgres.query).toHaveBeenCalledWith(
         expect.stringContaining("rewind_map_veto($1, $2, $3)"),
@@ -957,9 +964,9 @@ describe("MatchRecoveryService", () => {
 
     it("leaves servers alone while the veto is still running", async () => {
       const { service, postgres, matchAssistant } = setup();
-      withReleasedServer(postgres, null);
+      answer(postgres);
 
-      await service.rewindMapVeto("match-1", 2, undefined, VIEWER);
+      await service.rewindMapVeto("match-1", 2, undefined, STAFF);
 
       expect(postgres.query).toHaveBeenCalledWith(
         expect.stringContaining("rewind_map_veto($1, $2, $3)"),
@@ -970,12 +977,12 @@ describe("MatchRecoveryService", () => {
 
     it("logs who rewound it", async () => {
       const { service, postgres, logger } = setup();
-      withReleasedServer(postgres, null);
+      answer(postgres);
 
-      await service.rewindMapVeto("match-1", 3, 4, VIEWER);
+      await service.rewindMapVeto("match-1", 3, 4, STAFF);
 
       expect(logger.log).toHaveBeenCalledWith(
-        `[match-1] organizer rewound the veto to step 3 (by ${VIEWER.steam_id}, user)`,
+        `[match-1] organizer rewound the veto to step 3 (by ${VIEWER.steam_id}, match_organizer)`,
       );
     });
   });
@@ -984,47 +991,66 @@ describe("MatchRecoveryService", () => {
     it("adds the time and logs who did", async () => {
       const { service, postgres, logger } = setup();
 
-      await service.extendVetoClock("match-1", 30, VIEWER);
+      await service.extendVetoClock("match-1", 30, STAFF);
 
       expect(postgres.query).toHaveBeenCalledWith(
         "SELECT extend_veto_clock($1, $2)",
         ["match-1", 30],
       );
       expect(logger.log).toHaveBeenCalledWith(
-        `[match-1] organizer added 30s to the veto clock (by ${VIEWER.steam_id}, user)`,
+        `[match-1] organizer added 30s to the veto clock (by ${VIEWER.steam_id}, match_organizer)`,
       );
     });
   });
 
-  // DEAFCS: an organizer on one of the teams can't take back the other team's
-  // ban or give their own team time, unless they are staff.
-  describe("veto controls for organizers on one of the teams", () => {
+  // DEAFCS: administrators and match organizers on every match, tournament
+  // organizers on their own tournaments' matches, also while playing in it.
+  // Never a match's owner (role user) or a moderator.
+  describe("who may change the veto", () => {
     const vetoCalls = (postgres: ReturnType<typeof setup>["postgres"]) =>
       postgres.query.mock.calls.filter(([sql]) =>
         /rewind_map_veto|extend_veto_clock/.test(sql),
       );
 
-    it("refuses a player who organizes their own match", async () => {
-      const { service, postgres, matchAssistant } = setup({ affiliated: true });
+    const tryBoth = async (role: string, own: boolean) => {
+      const { service, postgres } = setup({ affiliated: true });
+      answer(postgres, { own });
+      const viewer = { steam_id: VIEWER.steam_id, role } as never;
+      const results = await Promise.allSettled([
+        service.rewindMapVeto("match-1", 1, 3, viewer),
+        service.extendVetoClock("match-1", 30, viewer),
+      ]);
+      return { results, calls: vetoCalls(postgres).length };
+    };
 
-      await expect(
-        service.rewindMapVeto("match-1", 1, 3, VIEWER),
-      ).rejects.toThrow("organizers on one of the teams can't change the veto");
-      await expect(
-        service.extendVetoClock("match-1", 30, VIEWER),
-      ).rejects.toThrow("organizers on one of the teams can't change the veto");
-
-      expect(vetoCalls(postgres)).toEqual([]);
-      expect(matchAssistant.refreshServerMatch).not.toHaveBeenCalled();
+    it.each([
+      ["administrator", false],
+      ["match_organizer", false],
+      ["tournament_organizer", true],
+    ])("lets a %s, even playing in it", async (role, own) => {
+      const { results, calls } = await tryBoth(role, own);
+      expect(results.map((result) => result.status)).toEqual([
+        "fulfilled",
+        "fulfilled",
+      ]);
+      expect(calls).toBe(2);
     });
 
-    it("lets a match organizer on one of the teams", async () => {
-      const { service, postgres } = setup({ affiliated: true });
-      const viewer = { ...VIEWER, role: "match_organizer" } as const;
-
-      await service.extendVetoClock("match-1", 30, viewer);
-
-      expect(vetoCalls(postgres)).toHaveLength(1);
+    it.each([
+      ["tournament_organizer", false],
+      ["moderator", true],
+      ["streamer", true],
+      ["verified_user", true],
+      ["user", true],
+    ])("refuses a %s (own tournament: %s)", async (role, own) => {
+      const { results, calls } = await tryBoth(role, own);
+      for (const result of results) {
+        expect(result.status).toBe("rejected");
+        expect((result as PromiseRejectedResult).reason.message).toBe(
+          "only staff can change the veto",
+        );
+      }
+      expect(calls).toBe(0);
     });
   });
 });
