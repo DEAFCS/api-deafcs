@@ -62,6 +62,13 @@ export default class KillEvent extends MatchEventProcessor<{
 
             hitgroup: this.data.hitgroup,
           },
+          // A game server redelivers an event whose ack it missed (an API
+          // restart mid-match). The row is already stored, so the replay is
+          // acknowledged instead of failing on the primary key forever.
+          on_conflict: {
+            constraint: "player_kills_pkey",
+            update_columns: [],
+          },
         },
         __typename: true,
       },
