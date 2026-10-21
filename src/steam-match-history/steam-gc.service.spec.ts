@@ -11,7 +11,9 @@ import { SteamPresenceService } from "../steam-presence/steam-presence.service";
 
 const BOT_STEAM_ID = "76561198668284475";
 
-const fakeRefreshToken = () => {
+const STREAMER_STEAM_ID = "76561198669755049";
+
+const fakeRefreshToken = (sub = BOT_STEAM_ID) => {
   const part = (value: object) =>
     Buffer.from(JSON.stringify(value)).toString("base64url");
   const now = Math.floor(Date.now() / 1000);
@@ -19,7 +21,7 @@ const fakeRefreshToken = () => {
     part({ typ: "JWT", alg: "EdDSA" }),
     part({
       iss: "steam",
-      sub: BOT_STEAM_ID,
+      sub,
       aud: ["client", "web", "renew", "derive"],
       iat: now,
       exp: now + 3600,
@@ -45,15 +47,27 @@ const newClient = () =>
 // steam-user builds the logon message on the next tick.
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
-const gcService = (cached: string) =>
+// STEAM_USER / STEAM_PASSWORD are the livestream (DEAFCS Streamer) account.
+const STREAMER_CONFIG = {
+  "steam.steamUser": "deafcs-streamer",
+  "steam.steamPassword": "streamer-password",
+};
+const GC_CONFIG = {
+  ...STREAMER_CONFIG,
+  "steam.steamGcSteamId64": BOT_STEAM_ID,
+  "steam.steamGcUser": "deafcs-bot",
+  "steam.steamGcPassword": "password",
+};
+
+const gcService = (
+  cached: string,
+  config: Record<string, string> = GC_CONFIG,
+  cache = { get: jest.fn(async () => cached), put: jest.fn() },
+) =>
   new SteamGcService(
     { log: jest.fn(), warn: jest.fn(), error: jest.fn() } as never,
-    {
-      get: jest.fn((key: string) =>
-        key === "steam.steamUser" ? "deafcs-bot" : "password",
-      ),
-    } as never,
-    { get: jest.fn(async () => cached), put: jest.fn() } as never,
+    { get: jest.fn((key: string) => config[key]) } as never,
+    cache as never,
   );
 
 const presenceLogOn = async (client: SteamUser, cached: string) => {
@@ -108,7 +122,7 @@ describe("SteamGcService logon id", () => {
     });
   });
 
-  it("logs in with its own logon id when using STEAM_USER credentials", async () => {
+  it("logs in with its own logon id when using STEAM_GC_USER credentials", async () => {
     const client = newClient();
     await gcService("")["logOn"](client);
     await settle();
@@ -137,5 +151,124 @@ describe("SteamGcService logon id", () => {
     expect(loggedOnWith(gc).obfuscated_private_ip?.v4).not.toBe(
       loggedOnWith(presence).obfuscated_private_ip?.v4,
     );
+  });
+});
+
+describe("SteamGcService account", () => {
+  beforeEach(() => {
+    // connect() arms a 30 s GC-ready timeout; keep it from outliving the test.
+    jest.useFakeTimers({ doNotFake: ["setImmediate", "nextTick"] });
+    jest
+      .spyOn(
+        SteamUser.prototype as unknown as { _doConnection: () => void },
+        "_doConnection",
+      )
+      .mockImplementation(() => undefined);
+    jest
+      .spyOn(SteamUser.prototype, "logOff")
+      .mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    jest.clearAllTimers();
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it("is disabled without STEAM_GC_STEAMID64, even when STEAM_USER is set", () => {
+    expect(gcService("", STREAMER_CONFIG).isAvailable()).toBe(false);
+    expect(gcService("", GC_CONFIG).isAvailable()).toBe(true);
+  });
+
+  it("refuses to log in without STEAM_GC_STEAMID64", async () => {
+    const client = newClient();
+
+    await expect(
+      gcService(fakeRefreshToken(), STREAMER_CONFIG)["logOn"](client),
+    ).rejects.toThrow("STEAM_GC_STEAMID64 not configured");
+    await settle();
+
+    expect(loggedOnWith(client)).toBeUndefined();
+  });
+
+  it("never falls back to STEAM_USER when there is no stored token", async () => {
+    const client = newClient();
+    const service = gcService("", {
+      ...STREAMER_CONFIG,
+      "steam.steamGcSteamId64": BOT_STEAM_ID,
+    });
+
+    await expect(service["logOn"](client)).rejects.toThrow(
+      "STEAM_GC_USER / STEAM_GC_PASSWORD not configured",
+    );
+    await settle();
+
+    expect(loggedOnWith(client)).toBeUndefined();
+  });
+
+  it("ignores a stored token of another account and uses STEAM_GC_USER", async () => {
+    const client = newClient();
+    await gcService(fakeRefreshToken(STREAMER_STEAM_ID))["logOn"](client);
+    await settle();
+
+    expect(loggedOnWith(client).access_token).toBeUndefined();
+    expect(loggedOnWith(client).account_name).toBe("deafcs-bot");
+  });
+
+  it("does not log in with a stored token of another account and no GC password", async () => {
+    const client = newClient();
+    const service = gcService(fakeRefreshToken(STREAMER_STEAM_ID), {
+      ...STREAMER_CONFIG,
+      "steam.steamGcSteamId64": BOT_STEAM_ID,
+    });
+
+    await expect(service["logOn"](client)).rejects.toThrow(
+      "no stored refresh token for STEAM_GC_STEAMID64",
+    );
+    await settle();
+
+    expect(loggedOnWith(client)).toBeUndefined();
+  });
+
+  it("only stores refresh tokens of the GC account", async () => {
+    const cache = { get: jest.fn(async () => ""), put: jest.fn() };
+    const service = gcService("", GC_CONFIG, cache);
+    service["connect"]().catch(() => undefined);
+    await settle();
+    const client = service["client"] as SteamUser;
+
+    client.emit("refreshToken", fakeRefreshToken(STREAMER_STEAM_ID));
+    client.emit("refreshToken", "not-a-jwt");
+    expect(cache.put).not.toHaveBeenCalled();
+
+    const token = fakeRefreshToken();
+    client.emit("refreshToken", token);
+    expect(cache.put).toHaveBeenCalledWith("steam-gc:refresh-token", token);
+
+    service["teardown"]();
+  });
+
+  it("logs off when Steam logs it on as another account", async () => {
+    const service = gcService(fakeRefreshToken());
+    // Only the loggedOn check is under test here; the logon itself is above.
+    jest
+      .spyOn(service as unknown as { logOn: () => Promise<void> }, "logOn")
+      .mockResolvedValue(undefined);
+    const rejected = expect(service["connect"]()).rejects.toThrow(
+      "logged on as the wrong steam account",
+    );
+    await settle();
+    const client = service["client"] as SteamUser;
+    const logOff = jest.mocked(client.logOff);
+
+    (client as unknown as { steamID: object }).steamID = {
+      getSteamID64: () => STREAMER_STEAM_ID,
+    };
+    client.emit("loggedOn");
+
+    await rejected;
+    expect(logOff).toHaveBeenCalled();
+    expect(service["client"]).toBeUndefined();
+    expect(service.isReady()).toBe(false);
   });
 });
