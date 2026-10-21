@@ -15,6 +15,11 @@ export type TwitchChannelStatus = {
   gameId: string | null;
   gameName: string | null;
   title: string | null;
+  // Present on live statuses fetched since /twitch/live; older cache entries
+  // may lack them, so readers treat undefined as null.
+  viewerCount?: number | null;
+  startedAt?: string | null;
+  thumbnailUrl?: string | null;
   checkedAt: string;
 };
 
@@ -25,7 +30,18 @@ type HelixStream = {
   game_name: string;
   type: string;
   title: string;
+  viewer_count?: number;
+  started_at?: string;
+  thumbnail_url?: string;
 };
+
+// Helix gives a "{width}x{height}" template on Twitch's image CDN. Only that
+// host is passed on (never an arbitrary URL), at a small fixed size.
+const TWITCH_THUMBNAIL_PREFIX = "https://static-cdn.jtvnw.net/";
+export function twitchThumbnail(template: string | undefined | null): string | null {
+  if (!template || !template.startsWith(TWITCH_THUMBNAIL_PREFIX)) return null;
+  return template.replace("{width}", "320").replace("{height}", "180");
+}
 
 // Twitch's "Counter-Strike" category (CS2 took over the former CS:GO
 // category id). The name check covers a possible separate "Counter-Strike 2"
@@ -119,6 +135,9 @@ export class TwitchService {
       gameId: null,
       gameName: null,
       title: null,
+      viewerCount: null,
+      startedAt: null,
+      thumbnailUrl: null,
       checkedAt,
     };
   }
@@ -169,6 +188,9 @@ export class TwitchService {
             gameId: stream.game_id || null,
             gameName: stream.game_name || null,
             title: stream.title || null,
+            viewerCount: Number.isFinite(stream.viewer_count) ? Number(stream.viewer_count) : null,
+            startedAt: stream.started_at || null,
+            thumbnailUrl: twitchThumbnail(stream.thumbnail_url),
             checkedAt,
           }
         : { ...this.unavailable(channel, checkedAt), available: true };

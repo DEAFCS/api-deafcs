@@ -24,6 +24,7 @@ import {
   match_map_demos_set_input,
   matches_set_input,
   servers_set_input,
+  servers_bool_exp,
   game_server_nodes_set_input,
   match_lineup_players_set_input,
   e_notification_types_enum,
@@ -2733,10 +2734,19 @@ export class MatchesController {
 
   @HasuraEvent()
   public async server_availability(data: HasuraEventData<servers_set_input>) {
+    // DEAFCS: a draining server is not free yet; the waiting match is tried
+    // again when the drain clears, by which time the old pod has disconnected.
+    // (draining_match_id is newer than the generated client.)
+    type Draining = { draining_match_id?: string | null };
+    const draining = !!(data.new as Draining).draining_match_id;
+    const drained =
+      !!(data.old as Draining | undefined)?.draining_match_id && !draining;
+
     if (
       data.new.enabled === false ||
-      data.new.connected === false ||
-      data.new.reserved_by_match_id !== null
+      (data.new.connected === false && !drained) ||
+      data.new.reserved_by_match_id !== null ||
+      draining
     ) {
       return;
     }
@@ -2803,6 +2813,10 @@ export class MatchesController {
               reserved_by_match_id: {
                 _is_null: true,
               },
+              // DEAFCS: a draining server is not free (MatchAssistantService.notDraining).
+              ...({
+                draining_match_id: { _is_null: true },
+              } as unknown as servers_bool_exp),
             },
           },
           aggregate: {

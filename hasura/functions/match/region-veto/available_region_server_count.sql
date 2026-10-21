@@ -15,6 +15,7 @@ BEGIN
     AND
         (gsn.id IS NULL OR (gsn.enabled = true AND gsn.enabled_for_match_making = true))
     and s.reserved_by_match_id IS NULL
+    and s.draining_match_id IS NULL
     and s.enabled = true
     and type = 'Ranked';
 
