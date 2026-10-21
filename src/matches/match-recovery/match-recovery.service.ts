@@ -278,7 +278,7 @@ export class MatchRecoveryService {
     }
 
     this.logger.log(
-      `[${matchId}] organizer requested a restore to round ${round}`,
+      `[${matchId}] organizer requested a restore to round ${round} ${this.actor(viewer)}`,
     );
 
     return { success: true };
@@ -390,7 +390,46 @@ export class MatchRecoveryService {
     ]);
 
     this.logger.log(
-      `[${matchId}] organizer restarted map ${match.match_map_id} from warmup`,
+      `[${matchId}] organizer restarted map ${match.match_map_id} from warmup ${this.actor(viewer)}`,
+    );
+
+    return { success: true };
+  }
+
+  // DEAFCS: Pause and Resume as a predefined action, so organizers never need
+  // the RCON console. The plugin takes a console pause as an admin pause.
+  public async setMatchPaused(
+    matchId: string,
+    paused: boolean,
+    viewer: RecoveryViewer,
+  ) {
+    const match = await this.getMatch(matchId);
+
+    const blockedReason = this.mapControlBlockedReason(
+      match,
+      viewer,
+      await this.isTeamAffiliated(match, viewer.steam_id),
+    );
+    if (blockedReason === "team_member") {
+      throw Error(
+        "organizers on one of the teams can't pause or resume the match",
+      );
+    }
+
+    const allowed = paused ? ["Live", "Overtime"] : ["Paused"];
+    if (blockedReason || !allowed.includes(match.map_status ?? "")) {
+      throw Error(
+        paused ? "there is no live map to pause" : "the map isn't paused",
+      );
+    }
+
+    const response = await this.matchAssistant.setServerPaused(matchId, paused);
+    if (response === undefined) {
+      throw Error("the match server can't be reached");
+    }
+
+    this.logger.log(
+      `[${matchId}] organizer ${paused ? "paused" : "resumed"} map ${match.match_map_id} ${this.actor(viewer)}`,
     );
 
     return { success: true };
@@ -641,12 +680,17 @@ export class MatchRecoveryService {
     }
 
     // The in-game reset needs both teams to vote for it; an organizer who is on
-    // one of them would skip that vote.
-    if (affiliated && !isRoleAbove(viewer.role, "moderator")) {
+    // one of them would skip that vote. DEAFCS: only administrators may, where
+    // upstream lets moderators and above.
+    if (affiliated && !isRoleAbove(viewer.role, "administrator")) {
       return "team_member";
     }
 
     return null;
+  }
+
+  private actor(viewer: RecoveryViewer) {
+    return `(by ${viewer.steam_id}, ${viewer.role})`;
   }
 
   private expectedPlayers(match: MatchRow) {

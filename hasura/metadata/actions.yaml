@@ -1056,6 +1056,14 @@ actions:
       forward_client_headers: true
     permissions:
       - role: user
+  - name: setMatchPaused
+    definition:
+      kind: synchronous
+      handler: '{{HASURA_GRAPHQL_ACTIONS_HOOK}}'
+      forward_client_headers: true
+    permissions:
+      - role: user
+    comment: 'DEAFCS: Pause or resume a live map for its organizers, without the RCON console.'
   - name: restartService
     definition:
       kind: synchronous

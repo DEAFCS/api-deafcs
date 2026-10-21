@@ -214,15 +214,20 @@ const setup = (
       async (): Promise<string | undefined> =>
         "serverResponse" in options ? options.serverResponse : "",
     ),
+    setServerPaused: jest.fn(
+      async (): Promise<string | undefined> =>
+        "serverResponse" in options ? options.serverResponse : "",
+    ),
   };
 
+  const logger = { log: jest.fn(), warn: jest.fn() };
   const service = new MatchRecoveryService(
-    { log: jest.fn(), warn: jest.fn() } as never,
+    logger as never,
     postgres as never,
     matchAssistant as never,
   );
 
-  return { service, postgres, matchAssistant };
+  return { service, postgres, matchAssistant, logger };
 };
 
 describe("MatchRecoveryService", () => {
@@ -374,12 +379,31 @@ describe("MatchRecoveryService", () => {
       );
     });
 
-    it("still lets a moderator on one of the teams restore", async () => {
+    // DEAFCS: upstream lets moderators and above restore a match they play
+    // in; here only administrators can.
+    it.each(["moderator", "match_organizer", "tournament_organizer"] as const)(
+      "refuses a %s on one of the teams",
+      async (role) => {
+        const { service } = setup({ affiliated: true });
+
+        const result = await service.getRestoreRounds("match-1", {
+          steam_id: VIEWER.steam_id,
+          role,
+        });
+
+        expect(result).toMatchObject({
+          economy_hidden: true,
+          blocked_reason: "team_member",
+        });
+      },
+    );
+
+    it("still lets an administrator on one of the teams restore", async () => {
       const { service } = setup({ affiliated: true });
 
       const result = await service.getRestoreRounds("match-1", {
         steam_id: VIEWER.steam_id,
-        role: "moderator",
+        role: "administrator",
       });
 
       expect(result).toMatchObject({
@@ -668,6 +692,86 @@ describe("MatchRecoveryService", () => {
 
       await expect(service.restartMatch("match-1")).rejects.toThrow(message);
       expect(postgres.transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("who did it", () => {
+    it("logs the organizer behind a restore, a map restart and a pause", async () => {
+      const { service, logger } = setup();
+      const viewer = {
+        steam_id: VIEWER.steam_id,
+        role: "match_organizer",
+      } as const;
+
+      await service.restoreRound("match-1", 12, viewer);
+      await service.restartMatchMap("match-1", viewer);
+      await service.setMatchPaused("match-1", true, viewer);
+
+      expect(logger.log.mock.calls.map(([line]) => line)).toEqual([
+        `[match-1] organizer requested a restore to round 12 (by ${VIEWER.steam_id}, match_organizer)`,
+        `[match-1] organizer restarted map ${MAP_ID} from warmup (by ${VIEWER.steam_id}, match_organizer)`,
+        `[match-1] organizer paused map ${MAP_ID} (by ${VIEWER.steam_id}, match_organizer)`,
+      ]);
+    });
+  });
+
+  describe("setMatchPaused", () => {
+    it.each([
+      [true, "Live"],
+      [true, "Overtime"],
+      [false, "Paused"],
+    ])("asks the server to pause (%s) a %s map", async (paused, mapStatus) => {
+      const { service, matchAssistant, postgres } = setup({
+        match: matchRow({ map_status: mapStatus }),
+      });
+
+      await expect(
+        service.setMatchPaused("match-1", paused, VIEWER),
+      ).resolves.toEqual({ success: true });
+      expect(matchAssistant.setServerPaused).toHaveBeenCalledWith(
+        "match-1",
+        paused,
+      );
+      expect(postgres.transaction).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        true,
+        { match: matchRow({ map_status: "Paused" }) },
+        "there is no live map to pause",
+      ],
+      [
+        true,
+        { match: matchRow({ map_status: "Warmup" }) },
+        "there is no live map to pause",
+      ],
+      [
+        true,
+        { match: matchRow({ status: "Finished" }) },
+        "there is no live map to pause",
+      ],
+      [false, {}, "the map isn't paused"],
+      [
+        true,
+        { affiliated: true },
+        "organizers on one of the teams can't pause or resume the match",
+      ],
+    ])("refuses %#", async (paused, options, message) => {
+      const { service, matchAssistant } = setup(options);
+
+      await expect(
+        service.setMatchPaused("match-1", paused, VIEWER),
+      ).rejects.toThrow(message);
+      expect(matchAssistant.setServerPaused).not.toHaveBeenCalled();
+    });
+
+    it("says so when the server can't be reached", async () => {
+      const { service } = setup({ serverResponse: undefined });
+
+      await expect(
+        service.setMatchPaused("match-1", true, VIEWER),
+      ).rejects.toThrow("the match server can't be reached");
     });
   });
 

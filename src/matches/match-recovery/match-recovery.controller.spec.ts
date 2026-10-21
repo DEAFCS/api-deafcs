@@ -11,6 +11,7 @@ describe("MatchRecoveryController", () => {
       restoreRound: jest.fn(async () => ({ success: true })),
       restartMatch: jest.fn(async () => ({ success: true })),
       restartMatchMap: jest.fn(async () => ({ success: true })),
+      setMatchPaused: jest.fn(async () => ({ success: true })),
     };
 
     return {
@@ -37,11 +38,15 @@ describe("MatchRecoveryController", () => {
     await expect(
       controller.restartMatchMap({ match_id: "match-1", user }),
     ).rejects.toThrow("you are not a match organizer");
+    await expect(
+      controller.setMatchPaused({ match_id: "match-1", paused: true, user }),
+    ).rejects.toThrow("you are not a match organizer");
 
     expect(recovery.getRestoreRounds).not.toHaveBeenCalled();
     expect(recovery.restoreRound).not.toHaveBeenCalled();
     expect(recovery.restartMatch).not.toHaveBeenCalled();
     expect(recovery.restartMatchMap).not.toHaveBeenCalled();
+    expect(recovery.setMatchPaused).not.toHaveBeenCalled();
   });
 
   // A request posted straight to the API's action endpoint, without Hasura's
@@ -98,6 +103,7 @@ describe("MatchRecoveryController", () => {
         "getMatchRestoreRounds",
         "restoreMatchRound",
         "restartMatchMap",
+        "setMatchPaused",
       ]) {
         const response = await call(name, { round: 4 });
         expect(response.status).toHaveBeenCalledWith(400);
@@ -109,6 +115,7 @@ describe("MatchRecoveryController", () => {
       expect(shared.recovery.getRestoreRounds).not.toHaveBeenCalled();
       expect(shared.recovery.restoreRound).not.toHaveBeenCalled();
       expect(shared.recovery.restartMatchMap).not.toHaveBeenCalled();
+      expect(shared.recovery.setMatchPaused).not.toHaveBeenCalled();
     });
 
     // DEAFCS: raw RCON is administrator-only (fc108eb1). An organizer gets the
@@ -118,6 +125,14 @@ describe("MatchRecoveryController", () => {
       expect(shared.recovery.restoreRound).toHaveBeenCalledWith(
         "match-1",
         4,
+        user,
+      );
+
+      // Pause takes a yes or no, never a command.
+      await call("setMatchPaused", { paused: "sw_pause; rcon_password x" });
+      expect(shared.recovery.setMatchPaused).toHaveBeenCalledWith(
+        "match-1",
+        false,
         user,
       );
 
@@ -147,10 +162,16 @@ describe("MatchRecoveryController", () => {
     await controller.restoreMatchRound({ match_id: "match-1", round: 4, user });
     await controller.restartMatch({ match_id: "match-1", user });
     await controller.restartMatchMap({ match_id: "match-1", user });
+    await controller.setMatchPaused({
+      match_id: "match-1",
+      paused: true,
+      user,
+    });
 
     expect(recovery.getRestoreRounds).toHaveBeenCalledWith("match-1", user);
     expect(recovery.restoreRound).toHaveBeenCalledWith("match-1", 4, user);
     expect(recovery.restartMatch).toHaveBeenCalledWith("match-1");
     expect(recovery.restartMatchMap).toHaveBeenCalledWith("match-1", user);
+    expect(recovery.setMatchPaused).toHaveBeenCalledWith("match-1", true, user);
   });
 });

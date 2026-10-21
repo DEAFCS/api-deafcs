@@ -121,6 +121,10 @@ describe("match recovery (Hasura actions and permissions)", () => {
       rcon.push("match_state Warmup");
       return rconReply;
     },
+    setServerPaused: async (_id: string, paused: boolean) => {
+      rcon.push(paused ? "pause" : "resume");
+      return rconReply;
+    },
     refreshServerMatch: async () => undefined,
   };
 
@@ -360,6 +364,7 @@ describe("match recovery (Hasura actions and permissions)", () => {
     expect(names).not.toContain("getMatchRestoreRounds");
     expect(names).not.toContain("restoreMatchRound");
     expect(names).not.toContain("restartMatchMap");
+    expect(names).not.toContain("setMatchPaused");
   });
 
   it.each(ROLES)("lets a signed-in %s call them", async (role) => {
@@ -369,6 +374,7 @@ describe("match recovery (Hasura actions and permissions)", () => {
         "getMatchRestoreRounds",
         "restoreMatchRound",
         "restartMatchMap",
+        "setMatchPaused",
       ]),
     );
   });
@@ -483,6 +489,163 @@ describe("match recovery (Hasura actions and permissions)", () => {
         [matchId, people.matchOwner],
       );
     }
+  });
+
+  const pause = (steam: string, role: string, paused: boolean) =>
+    graphql(
+      `
+        mutation ($id: uuid!, $paused: Boolean!) {
+          setMatchPaused(match_id: $id, paused: $paused) {
+            success
+          }
+        }
+      `,
+      role,
+      steam,
+      { id: matchId, paused },
+    );
+
+  const restartMap = (steam: string, role: string) =>
+    graphql(
+      `
+        mutation ($id: uuid!) {
+          restartMatchMap(match_id: $id) {
+            success
+          }
+        }
+      `,
+      role,
+      steam,
+      { id: matchId },
+    );
+
+  // DEAFCS: an organizer who plays in the match, whatever their role, can't
+  // use the recovery or pause controls on it; only an administrator can.
+  describe("an organizer playing in the match", () => {
+    const asTeamPlayer = async (role: string, run: () => Promise<void>) => {
+      await postgres.query("UPDATE players SET role = $2 WHERE steam_id = $1", [
+        people.teamPlayer,
+        role,
+      ]);
+      await postgres.query(
+        "UPDATE matches SET organizer_steam_id = $2 WHERE id = $1",
+        [matchId, people.teamPlayer],
+      );
+      try {
+        await run();
+      } finally {
+        await postgres.query(
+          "UPDATE matches SET organizer_steam_id = $2 WHERE id = $1",
+          [matchId, people.matchOwner],
+        );
+        await postgres.query(
+          "UPDATE players SET role = 'moderator' WHERE steam_id = $1",
+          [people.teamPlayer],
+        );
+      }
+    };
+
+    it.each(["moderator", "match_organizer", "tournament_organizer"])(
+      "refuses a %s, without touching the server",
+      async (role) => {
+        await asTeamPlayer(role, async () => {
+          const read = await restoreRounds(people.teamPlayer, role);
+          expect(read.errors).toBeUndefined();
+          expect(read.data!.getMatchRestoreRounds.blocked_reason).toBe(
+            "team_member",
+          );
+
+          expect(
+            (await restore(people.teamPlayer, role, 2)).errors?.[0].message,
+          ).toBe(
+            "organizers on one of the teams can't restore rounds; players can still call the in-game vote",
+          );
+          expect(
+            (await restartMap(people.teamPlayer, role)).errors?.[0].message,
+          ).toBe("organizers on one of the teams can't restart the map");
+          expect(
+            (await pause(people.teamPlayer, role, true)).errors?.[0].message,
+          ).toBe(
+            "organizers on one of the teams can't pause or resume the match",
+          );
+          expect(rcon).toEqual([]);
+        });
+      },
+    );
+
+    it("still lets an administrator", async () => {
+      await asTeamPlayer("administrator", async () => {
+        const read = await restoreRounds(people.teamPlayer, "administrator");
+        expect(read.data!.getMatchRestoreRounds.blocked_reason).toBeNull();
+
+        const { errors } = await pause(
+          people.teamPlayer,
+          "administrator",
+          true,
+        );
+        expect(errors).toBeUndefined();
+        expect(rcon).toEqual(["pause"]);
+      });
+    });
+  });
+
+  describe("pause and resume", () => {
+    it.each(["administrator", "match_organizer", "matchOwner"])(
+      "lets the %s pause a live map through the game server",
+      async (who) => {
+        const role = who === "matchOwner" ? "user" : who;
+        const { data, errors } = await pause(people[who], role, true);
+        expect(errors).toBeUndefined();
+        expect(data!.setMatchPaused).toEqual({ success: true });
+        expect(rcon).toEqual(["pause"]);
+      },
+    );
+
+    it.each(["user", "moderator", "tournament_organizer"])(
+      "refuses a %s who doesn't organize the match",
+      async (role) => {
+        const { errors } = await pause(people[role], role, true);
+        expect(errors?.[0].message).toBe("you are not a match organizer");
+        expect(rcon).toEqual([]);
+      },
+    );
+
+    it("only resumes a paused map", async () => {
+      const live = await pause(
+        people.match_organizer,
+        "match_organizer",
+        false,
+      );
+      expect(live.errors?.[0].message).toBe("the map isn't paused");
+
+      await postgres.query(
+        "UPDATE match_maps SET status = 'Paused' WHERE id = $1",
+        [mapId],
+      );
+      try {
+        const paused = await pause(
+          people.match_organizer,
+          "match_organizer",
+          true,
+        );
+        expect(paused.errors?.[0].message).toBe(
+          "there is no live map to pause",
+        );
+
+        const { errors } = await pause(
+          people.match_organizer,
+          "match_organizer",
+          false,
+        );
+        expect(errors).toBeUndefined();
+        expect(rcon).toEqual(["resume"]);
+      } finally {
+        await postgres.query(
+          "UPDATE match_maps SET status = 'Live' WHERE id = $1",
+          [mapId],
+        );
+      }
+    });
   });
 
   it("restores a round with a backup through the game server", async () => {
