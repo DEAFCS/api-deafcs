@@ -125,6 +125,9 @@ const ROUNDS = [
 
 const VIEWER = { steam_id: "76561198000000099", role: "user" } as const;
 
+// DEAFCS: the only viewer who gets players' money and weapons.
+const ADMIN = { steam_id: "76561198000000098", role: "administrator" } as const;
+
 // A full 5v5: vexa and osk carry the backup data, eight more fill the lineups.
 const lineupPlayers = (oskConnected: boolean, benchedSub: boolean) => [
   {
@@ -279,7 +282,7 @@ describe("MatchRecoveryService", () => {
     it("reads each backup into the players' state for the round after it", async () => {
       const { service } = setup({ oskConnected: false });
 
-      const result = await service.getRestoreRounds("match-1", VIEWER);
+      const result = await service.getRestoreRounds("match-1", ADMIN);
 
       expect(result).toMatchObject({
         match_map_id: MAP_ID,
@@ -379,11 +382,17 @@ describe("MatchRecoveryService", () => {
       );
     });
 
-    // DEAFCS: upstream lets moderators and above restore a match they play
-    // in; here only administrators can.
-    it.each(["moderator", "match_organizer", "tournament_organizer"] as const)(
-      "refuses a %s on one of the teams",
-      async (role) => {
+    // DEAFCS: match organizers, tournament organizers and administrators may
+    // restore a match they play in (upstream: moderators and above); none of
+    // them sees the economy then.
+    it.each([
+      ["moderator", "team_member"],
+      ["match_organizer", null],
+      ["tournament_organizer", null],
+      ["administrator", null],
+    ] as const)(
+      "a %s on one of the teams: blocked_reason %s, economy hidden",
+      async (role, blockedReason) => {
         const { service } = setup({ affiliated: true });
 
         const result = await service.getRestoreRounds("match-1", {
@@ -393,23 +402,58 @@ describe("MatchRecoveryService", () => {
 
         expect(result).toMatchObject({
           economy_hidden: true,
-          blocked_reason: "team_member",
+          blocked_reason: blockedReason,
         });
+        expect(result.rounds.map((round) => round.lineup_1_score)).toEqual([
+          6, 6, 7,
+        ]);
+        expect(result.rounds.every((round) => round.players.length === 0)).toBe(
+          true,
+        );
       },
     );
 
-    it("still lets an administrator on one of the teams restore", async () => {
-      const { service } = setup({ affiliated: true });
+    it.each([
+      "user",
+      "moderator",
+      "match_organizer",
+      "tournament_organizer",
+    ] as const)(
+      "never shows a %s who isn't playing the economy",
+      async (role) => {
+        const { service } = setup();
+
+        const result = await service.getRestoreRounds("match-1", {
+          steam_id: VIEWER.steam_id,
+          role,
+        });
+
+        expect(result).toMatchObject({
+          economy_hidden: true,
+          blocked_reason: null,
+          restorable: true,
+        });
+        expect(result.rounds).toHaveLength(3);
+        expect(result.rounds.every((round) => round.players.length === 0)).toBe(
+          true,
+        );
+      },
+    );
+
+    it("hides the economy on a finished map too", async () => {
+      const { service } = setup({
+        match: matchRow({ status: "Finished", map_status: "Finished" }),
+      });
 
       const result = await service.getRestoreRounds("match-1", {
         steam_id: VIEWER.steam_id,
-        role: "administrator",
+        role: "match_organizer",
       });
 
-      expect(result).toMatchObject({
-        economy_hidden: true,
-        blocked_reason: null,
-      });
+      expect(result.economy_hidden).toBe(true);
+      expect(result.rounds.every((round) => round.players.length === 0)).toBe(
+        true,
+      );
     });
 
     it("has nothing to restore in a Rush match", async () => {
@@ -428,7 +472,7 @@ describe("MatchRecoveryService", () => {
         rounds: [ROUNDS[0], ROUNDS[1], { ...ROUNDS[2], undone: true }],
       });
 
-      const result = await service.getRestoreRounds("match-1", VIEWER);
+      const result = await service.getRestoreRounds("match-1", ADMIN);
 
       expect(result.live_round).toBe(13);
       expect(result.rounds.map((round) => [round.round, round.undone])).toEqual(
@@ -716,6 +760,25 @@ describe("MatchRecoveryService", () => {
   });
 
   describe("setMatchPaused", () => {
+    it.each([
+      "match_organizer",
+      "tournament_organizer",
+      "administrator",
+    ] as const)("lets a %s playing in the match pause it", async (role) => {
+      const { service, matchAssistant } = setup({ affiliated: true });
+
+      await expect(
+        service.setMatchPaused("match-1", true, {
+          steam_id: VIEWER.steam_id,
+          role,
+        }),
+      ).resolves.toEqual({ success: true });
+      expect(matchAssistant.setServerPaused).toHaveBeenCalledWith(
+        "match-1",
+        true,
+      );
+    });
+
     it.each([
       [true, "Live"],
       [true, "Overtime"],

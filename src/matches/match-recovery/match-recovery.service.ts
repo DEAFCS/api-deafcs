@@ -163,7 +163,10 @@ export class MatchRecoveryService {
       match.map_status ?? "",
     );
 
-    result.economy_hidden = inProgress && affiliated;
+    // DEAFCS: players' money, weapons and equipment only ever reach an
+    // administrator who isn't playing in the match. Upstream hides them only
+    // from someone on one of the teams while the map is being played.
+    result.economy_hidden = this.economyHidden(viewer, affiliated);
 
     const rows = await this.getRounds(match.match_map_id);
     const lineupBySteamId = new Map(
@@ -680,13 +683,18 @@ export class MatchRecoveryService {
     }
 
     // The in-game reset needs both teams to vote for it; an organizer who is on
-    // one of them would skip that vote. DEAFCS: only administrators may, where
-    // upstream lets moderators and above.
-    if (affiliated && !isRoleAbove(viewer.role, "administrator")) {
+    // one of them would skip that vote. DEAFCS: match organizers, tournament
+    // organizers and administrators may, where upstream lets moderators and
+    // above. They still never see the economy (economyHidden).
+    if (affiliated && !isRoleAbove(viewer.role, "match_organizer")) {
       return "team_member";
     }
 
     return null;
+  }
+
+  private economyHidden(viewer: RecoveryViewer, affiliated: boolean) {
+    return affiliated || !isRoleAbove(viewer.role, "administrator");
   }
 
   private actor(viewer: RecoveryViewer) {

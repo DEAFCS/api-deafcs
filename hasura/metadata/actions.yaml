@@ -674,7 +674,8 @@ actions:
       handler: '{{HASURA_GRAPHQL_ACTIONS_HOOK}}'
       forward_client_headers: true
     permissions:
-      - role: user
+      - role: administrator
+    comment: 'DEAFCS: administrators only (upstream: the match organizers).'
   - name: reconnectLive
     definition:
       kind: synchronous
