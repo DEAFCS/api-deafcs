@@ -57,21 +57,6 @@ export class MatchRecoveryController {
     );
   }
 
-  @HasuraAction()
-  public async extendVetoClock(data: {
-    match_id: string;
-    seconds: number;
-    user: User;
-  }) {
-    await this.requireOrganizer(data.match_id, data.user);
-
-    return await this.recovery.extendVetoClock(
-      data.match_id,
-      data.seconds,
-      data.user,
-    );
-  }
-
   // DEAFCS: Pause and Resume for organizers without the RCON console.
   @HasuraAction()
   public async setMatchPaused(data: {

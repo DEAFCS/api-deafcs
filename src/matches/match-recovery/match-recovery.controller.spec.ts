@@ -175,12 +175,12 @@ describe("MatchRecoveryController", () => {
     expect(recovery.setMatchPaused).toHaveBeenCalledWith("match-1", true, user);
   });
 
-  // Ported from 5Stack API 9f4c954 (#686); DEAFCS passes the user on.
-  describe("veto recovery", () => {
+  // Reset Veto: upstream's rewindMapVeto (5Stack API 9f4c954, #686) at step 1;
+  // DEAFCS passes the user on.
+  describe("Reset Veto", () => {
     const vetoSetup = (organizer: boolean) => {
       const recovery = {
         rewindMapVeto: jest.fn(async () => ({ success: true })),
-        extendVetoClock: jest.fn(async () => ({ success: true })),
       };
       return {
         controller: new MatchRecoveryController(
@@ -191,18 +191,14 @@ describe("MatchRecoveryController", () => {
       };
     };
 
-    it("keeps Undo, Fix a Mis-pick, Redo and Give 30s More to organizers", async () => {
+    it("keeps it to organizers", async () => {
       const { controller, recovery } = vetoSetup(false);
 
       await expect(
-        controller.rewindMapVeto({ match_id: "match-1", step: 3, user }),
-      ).rejects.toThrow("you are not a match organizer");
-      await expect(
-        controller.extendVetoClock({ match_id: "match-1", seconds: 30, user }),
+        controller.rewindMapVeto({ match_id: "match-1", step: 1, user }),
       ).rejects.toThrow("you are not a match organizer");
 
       expect(recovery.rewindMapVeto).not.toHaveBeenCalled();
-      expect(recovery.extendVetoClock).not.toHaveBeenCalled();
     });
 
     it("hands organizers' requests to the service", async () => {
@@ -210,27 +206,23 @@ describe("MatchRecoveryController", () => {
 
       await controller.rewindMapVeto({
         match_id: "match-1",
-        step: 3,
+        step: 1,
         expected_picks: 5,
-        user,
-      });
-      await controller.extendVetoClock({
-        match_id: "match-1",
-        seconds: 30,
         user,
       });
 
       expect(recovery.rewindMapVeto).toHaveBeenCalledWith(
         "match-1",
-        3,
+        1,
         5,
         user,
       );
-      expect(recovery.extendVetoClock).toHaveBeenCalledWith(
-        "match-1",
-        30,
-        user,
-      );
+    });
+
+    it("has no Give 30s More", () => {
+      expect(
+        (vetoSetup(true).controller as any).extendVetoClock,
+      ).toBeUndefined();
     });
   });
 });

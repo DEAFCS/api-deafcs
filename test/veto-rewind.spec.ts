@@ -10,8 +10,9 @@ import {
 // map_veto_pick_expires_at, and the cases at the end cover what DEAFCS adds
 // (played maps, demos and stats are never deleted; on-demand servers drain).
 //
-// rewind_map_veto and extend_veto_clock: the organizer's Undo Last Step, Fix a
-// Mis-pick, Redo the Veto and Give 30s More.
+// rewind_map_veto as upstream tests it (every step). DEAFCS offers only Reset
+// Veto (step 1, rewindMapVeto refuses later steps) and has no
+// extend_veto_clock (Give 30s More).
 describe("veto rewind (SQL-driven)", () => {
   let db: SqlTestDb;
   let postgres: PostgresService;
@@ -362,7 +363,7 @@ describe("veto rewind (SQL-driven)", () => {
     expect((await state(match.id)).status).toBe("Live");
   });
 
-  it("gives a redone veto and an extended clock a fresh auto-cancel window", async () => {
+  it("gives a redone veto a fresh auto-cancel window", async () => {
     const match = await createVetoMatch();
     await withAutoCancel(match.id, true);
     await play(match, 6);
@@ -378,12 +379,6 @@ describe("veto rewind (SQL-driven)", () => {
     expect((await state(match.id)).cancels_at!.getTime()).toBeGreaterThan(
       fresh,
     );
-
-    await soon();
-    await postgres.query("SELECT extend_veto_clock($1, 600)", [match.id]);
-    expect((await state(match.id)).cancels_at!.getTime()).toBeGreaterThan(
-      fresh,
-    );
   });
 
   it("leaves auto-cancel alone on matches that don't use it", async () => {
@@ -395,7 +390,6 @@ describe("veto rewind (SQL-driven)", () => {
     ]);
 
     await rewind(match.id, 1);
-    await postgres.query("SELECT extend_veto_clock($1, 30)", [match.id]);
 
     expect((await state(match.id)).cancels_at).toBeNull();
   });
@@ -615,53 +609,6 @@ describe("veto rewind (SQL-driven)", () => {
         reserved_by_match_id: other.id,
         draining_match_id: null,
       });
-    });
-  });
-
-  describe("extend_veto_clock", () => {
-    const extend = (matchId: string, seconds: number) =>
-      postgres.query<Array<{ expires_at: Date }>>(
-        "SELECT extend_veto_clock($1, $2) AS expires_at",
-        [matchId, seconds],
-      );
-
-    it("adds time to the running clock", async () => {
-      const match = await createVetoMatch();
-      const before = (await state(match.id)).map_veto_pick_expires_at!;
-
-      const [{ expires_at }] = await extend(match.id, 30);
-
-      expect(expires_at.getTime() - before.getTime()).toBe(30_000);
-      expect((await state(match.id)).map_veto_pick_expires_at!.getTime()).toBe(
-        expires_at.getTime(),
-      );
-    });
-
-    it("starts from now when the clock already ran out", async () => {
-      const match = await createVetoMatch();
-      await postgres.query(
-        "UPDATE matches SET map_veto_pick_expires_at = NOW() - interval '1 minute' WHERE id = $1",
-        [match.id],
-      );
-
-      const [{ expires_at }] = await extend(match.id, 30);
-
-      expect(expires_at.getTime()).toBeGreaterThan(Date.now() + 20_000);
-    });
-
-    it("refuses when no veto clock is running, and silly amounts", async () => {
-      const match = await createVetoMatch();
-      await expect(extend(match.id, 0)).rejects.toThrow(
-        "Add between 1 and 600 seconds",
-      );
-      await expect(extend(match.id, 601)).rejects.toThrow(
-        "Add between 1 and 600 seconds",
-      );
-
-      await play(match);
-      await expect(extend(match.id, 30)).rejects.toThrow(
-        "The veto clock is not running",
-      );
     });
   });
 });
