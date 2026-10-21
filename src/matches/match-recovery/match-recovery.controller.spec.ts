@@ -1,3 +1,4 @@
+import { HasuraController } from "src/hasura/hasura.controller";
 import { MatchRecoveryController } from "./match-recovery.controller";
 
 describe("MatchRecoveryController", () => {
@@ -41,6 +42,47 @@ describe("MatchRecoveryController", () => {
     expect(recovery.restoreRound).not.toHaveBeenCalled();
     expect(recovery.restartMatch).not.toHaveBeenCalled();
     expect(recovery.restartMatchMap).not.toHaveBeenCalled();
+  });
+
+  // DEAFCS: Restart Match is not a registered action, so even a request that
+  // reaches the API's action endpoint directly never gets to the service.
+  it("keeps Restart Match out of the action endpoint", async () => {
+    const { controller, recovery } = setup(true);
+    const hasura = new HasuraController(
+      { error: jest.fn() } as never,
+      {} as never,
+      new Map([
+        [
+          "MatchesModule",
+          {
+            name: "MatchesModule",
+            controllers: new Map([
+              [
+                MatchRecoveryController,
+                { name: "MatchRecoveryController", instance: controller },
+              ],
+            ]),
+          },
+        ],
+      ]) as never,
+    );
+    const call = (name: string) => {
+      const response = { json: jest.fn(), status: jest.fn() };
+      response.status.mockReturnValue(response);
+      return hasura.actions(
+        {
+          user,
+          body: { action: { name }, input: { match_id: "match-1" } },
+        } as never,
+        response as never,
+      );
+    };
+
+    await call("restartMatchMap");
+    expect(recovery.restartMatchMap).toHaveBeenCalledWith("match-1", user);
+
+    await expect(call("restartMatch")).rejects.toThrow();
+    expect(recovery.restartMatch).not.toHaveBeenCalled();
   });
 
   it("hands organizers' requests to the service", async () => {

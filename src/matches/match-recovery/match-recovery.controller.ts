@@ -40,10 +40,10 @@ export class MatchRecoveryController {
     return await this.recovery.restartMatchMap(data.match_id, data.user);
   }
 
-  // DEAFCS: not in the Hasura metadata yet. A restart leaves the old on-demand
-  // server running until a match sent back to check-in stops its server
-  // (tournament-reset server fix); add the action once that has landed.
-  @HasuraAction()
+  // DEAFCS: Restart Match stays switched off until its replacement-server test
+  // passes. It is neither in the Hasura metadata nor registered as an action,
+  // so a direct POST to /hasura/actions can't reach it either. Upstream has
+  // @HasuraAction() here; add it back together with the metadata action.
   public async restartMatch(data: { match_id: string; user: User }) {
     await this.requireOrganizer(data.match_id, data.user);
 
