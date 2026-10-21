@@ -7,6 +7,8 @@ import { DemoMetadataService } from "../demo-metadata.service";
 
 @UseQueue("Demos", DemoQueues.Demos)
 export class CleanDemos extends WorkerHost {
+  private static readonly PAGE_SIZE = 10;
+
   private maxStorageInBytes: number;
   private minRetentionInDays: number;
   private totalStoredBytes: number;
@@ -76,7 +78,8 @@ export class CleanDemos extends WorkerHost {
   }
 
   private async deleteOldDemos() {
-    if (this.totalStoredBytes < this.maxStorageInBytes) {
+    // DEAFCS: storage at the limit is within it (upstream: `<`).
+    if (this.totalStoredBytes <= this.maxStorageInBytes) {
       return 0;
     }
 
@@ -107,46 +110,60 @@ export class CleanDemos extends WorkerHost {
       Date.now() - this.minRetentionInDays * 24 * 60 * 60 * 1000,
     ).toISOString();
 
-    const { match_map_demos } = await this.hasura.query({
-      match_map_demos: {
-        __args: {
-          limit: 10,
-          where: {
-            match: {
-              ended_at: {
-                _lt: finishedAfter,
-              },
-            },
-          },
-          order_by: [
-            {
-              match: {
-                ended_at: "asc",
-              },
-            },
-          ],
-        },
-        id: true,
-        size: true,
-        playback_size: true,
-        file: true,
-      },
-    });
-
+    // DEAFCS: upstream re-queried the same first page on every recursion (no
+    // offset, nothing is deleted while the list is built) and stopped after
+    // the first demo of each page, so a small oldest demo meant tens of
+    // thousands of queries and copies of one demo. Page through instead, in a
+    // stable order (ended_at ties broken by id), until enough is freed or no
+    // demo past retention is left.
     const demosToDelete = [];
+    let offset = 0;
 
-    for (const demo of match_map_demos) {
-      demosToDelete.push(demo);
-      this.totalStoredBytes -= (demo.size ?? 0) + (demo.playback_size ?? 0);
+    while (this.totalStoredBytes > this.maxStorageInBytes) {
+      const { match_map_demos } = await this.hasura.query({
+        match_map_demos: {
+          __args: {
+            limit: CleanDemos.PAGE_SIZE,
+            offset,
+            where: {
+              match: {
+                ended_at: {
+                  _lt: finishedAfter,
+                },
+              },
+            },
+            order_by: [
+              {
+                match: {
+                  ended_at: "asc",
+                },
+              },
+              {
+                id: "asc",
+              },
+            ],
+          },
+          id: true,
+          size: true,
+          playback_size: true,
+          file: true,
+        },
+      });
 
-      if (this.totalStoredBytes > this.maxStorageInBytes) {
+      for (const demo of match_map_demos) {
+        if (this.totalStoredBytes <= this.maxStorageInBytes) {
+          break;
+        }
+
+        demosToDelete.push(demo);
+        this.totalStoredBytes -= (demo.size ?? 0) + (demo.playback_size ?? 0);
+      }
+
+      if (match_map_demos.length < CleanDemos.PAGE_SIZE) {
         break;
       }
-    }
 
-    if (this.totalStoredBytes > this.maxStorageInBytes) {
-      const moreDemosToDelete = await this.findDemosToDelete();
-      demosToDelete.push(...moreDemosToDelete);
+      offset += match_map_demos.length;
     }
 
     return demosToDelete;
