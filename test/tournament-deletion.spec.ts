@@ -67,11 +67,13 @@ describe("tournament deletion (SQL-driven)", () => {
   // and finally the matches -- each match re-verified via NOT EXISTS against
   // *any* remaining tournament_brackets reference (not just this
   // tournament's) before it is touched. Returns the match ids actually
-  // deleted.
+  // deleted and the clip file keys read before the cascade removed them.
+  // keepPlayed mirrors the Cancelled event: matches with demos or clips stay.
   const deleteTournamentMatchRows = async (
     client: PoolClient,
     tournamentId: string,
-  ): Promise<string[]> => {
+    keepPlayed = false,
+  ): Promise<{ matchIds: string[]; clipKeys: string[] }> => {
     const detached = await client.query<{ match_id: string }>(
       `WITH owned_brackets AS (
          SELECT tb.id, tb.match_id
@@ -79,6 +81,19 @@ describe("tournament deletion (SQL-driven)", () => {
          JOIN public.tournament_stages ts ON ts.id = tb.tournament_stage_id
          WHERE ts.tournament_id = $1
            AND tb.match_id IS NOT NULL
+           AND NOT (
+             $2::boolean AND (
+               EXISTS (
+                 SELECT 1 FROM public.match_map_demos d
+                 WHERE d.match_id = tb.match_id
+               )
+               OR EXISTS (
+                 SELECT 1 FROM public.match_clips c
+                 JOIN public.match_maps mm ON mm.id = c.match_map_id
+                 WHERE mm.match_id = tb.match_id
+               )
+             )
+           )
          FOR UPDATE
        ),
        detached AS (
@@ -89,12 +104,12 @@ describe("tournament deletion (SQL-driven)", () => {
          RETURNING ob.match_id
        )
        SELECT DISTINCT match_id FROM detached`,
-      [tournamentId],
+      [tournamentId, keepPlayed],
     );
 
     const candidateIds = detached.rows.map((row) => row.match_id);
     if (candidateIds.length === 0) {
-      return [];
+      return { matchIds: [], clipKeys: [] };
     }
 
     const deletable = await client.query<{ id: string }>(
@@ -108,18 +123,38 @@ describe("tournament deletion (SQL-driven)", () => {
     );
     const matchIds = deletable.rows.map((row) => row.id);
     if (matchIds.length === 0) {
-      return [];
+      return { matchIds: [], clipKeys: [] };
     }
 
-    await client.query(
-      `DELETE FROM public.match_map_demos WHERE match_id = ANY($1::uuid[])`,
+    const clips = await client.query<{
+      file: string | null;
+      thumbnail_url: string | null;
+    }>(
+      `SELECT c.file, c.thumbnail_url
+         FROM public.match_clips c
+         JOIN public.match_maps mm ON mm.id = c.match_map_id
+        WHERE mm.match_id = ANY($1::uuid[])`,
       [matchIds],
     );
+    const clipKeys = clips.rows
+      .flatMap((clip) => [clip.file, clip.thumbnail_url])
+      .filter((key): key is string => !!key);
+
+    if (keepPlayed) {
+      if (clips.rows.length > 0) {
+        throw Error("a cancelled tournament's match gained clips, retrying");
+      }
+    } else {
+      await client.query(
+        `DELETE FROM public.match_map_demos WHERE match_id = ANY($1::uuid[])`,
+        [matchIds],
+      );
+    }
     await client.query(`DELETE FROM public.matches WHERE id = ANY($1::uuid[])`, [
       matchIds,
     ]);
 
-    return matchIds;
+    return { matchIds, clipKeys };
   };
 
   // Mirrors exactly what TournamentsController.deleteTournament runs inside
@@ -476,6 +511,148 @@ describe("tournament deletion (SQL-driven)", () => {
     expect(clip).toBeUndefined();
   });
 
+  // The cascade above removes match_clips, so the S3 purge after commit can
+  // only remove the clip files whose keys were read before the delete.
+  it("reads the deleted matches' clip keys before the cascade, and only theirs", async () => {
+    const t = await tfx.launch(
+      [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 }],
+      4,
+    );
+    const other = await tfx.launch(
+      [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 }],
+      4,
+    );
+    const matchId = (await tfx.getBrackets(t.stageIds[0])).find(
+      (b) => b.round === 1,
+    )!.match_id!;
+    const otherMatchId = (await tfx.getBrackets(other.stageIds[0])).find(
+      (b) => b.round === 1,
+    )!.match_id!;
+    const player = await fx.player();
+    const { matchMapId } = await attachDemoAndClip(matchId, player);
+    const { matchMapId: otherMatchMapId } = await attachDemoAndClip(
+      otherMatchId,
+      player,
+    );
+    await postgres.query(
+      `INSERT INTO match_clips (match_map_id, file, thumbnail_url)
+       VALUES ($1, 'clips/system/job-a.mp4', 'clips/system/job-a.jpg'),
+              ($1, 'clips/system/job-b.mp4', NULL),
+              ($2, 'clips/system/job-other.mp4', 'clips/system/job-other.jpg')`,
+      [matchMapId, otherMatchMapId],
+    );
+
+    let deleted = { matchIds: [] as string[], clipKeys: [] as string[] };
+    await postgres.transaction(async (client) => {
+      deleted = await deleteTournamentMatchRows(client, t.id);
+    });
+
+    expect(deleted.matchIds).toContain(matchId);
+    expect(deleted.clipKeys.sort()).toEqual([
+      "clips/system/job-a.jpg",
+      "clips/system/job-a.mp4",
+      "clips/system/job-b.mp4",
+    ]);
+    const remaining = await postgres.query<Array<{ file: string | null }>>(
+      `SELECT file FROM match_clips WHERE file IS NOT NULL ORDER BY file`,
+    );
+    expect(remaining.map((row) => row.file)).toEqual([
+      "clips/system/job-other.mp4",
+    ]);
+  });
+
+  // DEAFCS rule: cancelling deletes no demo, clip or thumbnail. Played matches
+  // stay linked, so deleting the tournament later still finds their files.
+  it("cancelling keeps matches with demos or clips linked and deletes only unplayed ones", async () => {
+    const t = await tfx.launch(
+      [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 }],
+      4,
+    );
+    const [first, second] = (await tfx.getBrackets(t.stageIds[0])).filter(
+      (b) => b.round === 1,
+    );
+    const player = await fx.player();
+    // first: a demo and a clip. second: only a clip (its demo already past
+    // retention). The final has no match yet or an unplayed one.
+    const { demoId } = await attachDemoAndClip(first.match_id!, player);
+    const [map] = await postgres.query<Array<{ id: string }>>(
+      `INSERT INTO match_maps (match_id, map_id, "order")
+       SELECT $1, id, 1 FROM maps ORDER BY name LIMIT 1 RETURNING id`,
+      [second.match_id],
+    );
+    await postgres.query(
+      `INSERT INTO match_clips (match_map_id, file, thumbnail_url)
+       VALUES ($1, 'clips/system/job-second.mp4', 'clips/system/job-second.jpg')`,
+      [map.id],
+    );
+    const before = await tfx.getBrackets(t.stageIds[0]);
+    const unplayed = before
+      .filter((b) => b.match_id && b.id !== first.id && b.id !== second.id)
+      .map((b) => b.match_id!);
+
+    let cancelled = { matchIds: [] as string[], clipKeys: [] as string[] };
+    await postgres.transaction(async (client) => {
+      cancelled = await deleteTournamentMatchRows(client, t.id, true);
+    });
+
+    expect(cancelled.matchIds.sort()).toEqual(unplayed.sort());
+    expect(cancelled.clipKeys).toEqual([]);
+    expect(await bracketMatchId(first.id)).toBe(first.match_id);
+    expect(await bracketMatchId(second.id)).toBe(second.match_id);
+    const [demo] = await postgres.query<Array<{ id: string }>>(
+      `SELECT id FROM match_map_demos WHERE id = $1`,
+      [demoId],
+    );
+    expect(demo).toBeDefined();
+
+    // Rebuilding the bracket (reopening registration) must not delete them.
+    await expect(
+      postgres.query(`SELECT public.delete_tournament_brackets_and_matches($1)`, [
+        t.id,
+      ]),
+    ).rejects.toThrow(/played matches with demos or clips/);
+    expect(await bracketMatchId(first.id)).toBe(first.match_id);
+
+    // Deleting the tournament removes them and answers every clip key.
+    let deleted = { matchIds: [] as string[], clipKeys: [] as string[] };
+    await postgres.transaction(async (client) => {
+      await awards.deleteTournamentAwardRecords(client, t.id);
+      deleted = await deleteTournamentMatchRows(client, t.id);
+      await client.query(`DELETE FROM public.tournaments WHERE id = $1`, [
+        t.id,
+      ]);
+    });
+    expect(deleted.matchIds.sort()).toEqual(
+      [first.match_id!, second.match_id!].sort(),
+    );
+    expect(deleted.clipKeys.sort()).toEqual([
+      "clips/system/job-second.jpg",
+      "clips/system/job-second.mp4",
+    ]);
+    expect(await tournamentExists(t.id)).toBe(false);
+  });
+
+  it("rebuilding a bracket of only unplayed matches still works", async () => {
+    const t = await tfx.launch(
+      [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 }],
+      4,
+    );
+    const matchId = (await tfx.getBrackets(t.stageIds[0])).find(
+      (b) => b.round === 1,
+    )!.match_id!;
+
+    await postgres.query(
+      `SELECT public.delete_tournament_brackets_and_matches($1)`,
+      [t.id],
+    );
+
+    const [match] = await postgres.query<Array<{ id: string }>>(
+      `SELECT id FROM matches WHERE id = $1`,
+      [matchId],
+    );
+    expect(match).toBeUndefined();
+  });
+
   // This is the reported production failure reproduced directly: a real,
   // fully played-out tournament (multiple rounds, multiple bracket rows)
   // deleted end to end. Before the fix, deleting matches without first
@@ -567,7 +744,10 @@ describe("tournament deletion (SQL-driven)", () => {
     )!.match_id!;
 
     await postgres.transaction(async (client) => {
-      const deletedMatchIds = await deleteTournamentMatchRows(client, t.id);
+      const { matchIds: deletedMatchIds } = await deleteTournamentMatchRows(
+        client,
+        t.id,
+      );
       expect(deletedMatchIds).toContain(matchId);
 
       // At this point, mid-transaction, the match is already gone but the

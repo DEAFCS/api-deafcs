@@ -20,7 +20,12 @@ import {
   TERMINAL_STATUSES,
   resolveInClusterApiBase,
 } from "./clips.constants";
-import { removeClipFiles } from "./clip-files";
+import {
+  DeletedFiles,
+  removeClipFiles,
+  removeDeletedFiles,
+} from "./clip-files";
+import { RemoveDeletedFiles } from "./jobs/RemoveDeletedFiles";
 const STATUS_HISTORY_CAP = 50;
 const LAST_TICK_FOR_MALFORMED = Number.MAX_SAFE_INTEGER;
 
@@ -29,6 +34,7 @@ type ClipSegmentSpec = ClipSpec["segments"][number];
 @Injectable()
 export class ClipsService {
   private static readonly CLIP_VIEW_TTL_SECONDS = 6 * 60 * 60;
+  public static readonly REMOVE_DELETED_FILES_ATTEMPTS = 10;
 
   constructor(
     private readonly logger: Logger,
@@ -1362,6 +1368,35 @@ export class ClipsService {
           __typename: true,
         },
       });
+    }
+  }
+
+  // DEAFCS: for files whose rows were deleted in a transaction that has already
+  // committed (permanent tournament delete). Nothing else knows about them, so
+  // what cannot be removed now goes to RemoveDeletedFiles, which retries for
+  // about 8.5 hours and keeps a job that still fails (removeOnFail: false).
+  public async removeDeletedFiles(files: DeletedFiles): Promise<void> {
+    const left = await removeDeletedFiles(this.s3, files);
+    const remaining = [...left.keys, ...left.prefixes];
+    if (remaining.length === 0) {
+      return;
+    }
+
+    this.logger.warn(
+      `[remove-deleted-files] ${remaining.length} file(s) could not be removed, retrying in the background`,
+    );
+
+    try {
+      await this.batchQueue.add(RemoveDeletedFiles.name, left, {
+        attempts: ClipsService.REMOVE_DELETED_FILES_ATTEMPTS,
+        backoff: { type: "exponential", delay: 60 * 1000 },
+        removeOnFail: false,
+      });
+    } catch (error) {
+      this.logger.error(
+        `[remove-deleted-files] could not queue a retry, still stored: ${remaining.join(", ")}`,
+        error,
+      );
     }
   }
 

@@ -21,6 +21,7 @@ import {
   BatchHighlightsRenderJobEvents,
 } from "./jobs/BatchHighlightsRenderJob";
 import { ReconcileQueuedHighlights } from "./jobs/ReconcileQueuedHighlights";
+import { RemoveDeletedFiles } from "./jobs/RemoveDeletedFiles";
 
 @Module({
   imports: [
@@ -53,6 +54,7 @@ import { ReconcileQueuedHighlights } from "./jobs/ReconcileQueuedHighlights";
     BatchHighlightsRenderJobEvents,
     CleanClips,
     ReconcileQueuedHighlights,
+    RemoveDeletedFiles,
     ...getQueuesProcessors("Clips"),
     loggerFactory(),
   ],

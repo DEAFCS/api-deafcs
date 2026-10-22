@@ -33,7 +33,7 @@ describe("TournamentsController.deleteTournament", () => {
   let hasura: { query: jest.Mock; mutation: jest.Mock };
   let postgres: { transaction: jest.Mock };
   let awards: { deleteTournamentAwardRecords: jest.Mock };
-  let clips: { deleteClipsForMatch: jest.Mock };
+  let clips: { removeDeletedFiles: jest.Mock };
   let demoMetadata: { deleteDemosForMatch: jest.Mock };
   let logger: { log: jest.Mock; error: jest.Mock };
   let client: { query: jest.Mock };
@@ -42,10 +42,12 @@ describe("TournamentsController.deleteTournament", () => {
   // what Postgres would actually return for each statement in
   // deleteTournamentMatchRows. `detachedIds` is what the detach CTE reports
   // as previously-linked match ids; `deletableIds` (defaults to the same
-  // list) is what the NOT-EXISTS-guarded SELECT reports as safe to delete.
+  // list) is what the NOT-EXISTS-guarded SELECT reports as safe to delete;
+  // `clipRows` is what the clip-key SELECT finds for those matches.
   const configureMatchRows = (
     detachedIds: string[],
     deletableIds: string[] = detachedIds,
+    clipRows: Array<{ file: string | null; thumbnail_url: string | null }> = [],
   ) => {
     client.query.mockImplementation(async (sql: string) => {
       if (/WITH owned_brackets/i.test(sql)) {
@@ -53,6 +55,9 @@ describe("TournamentsController.deleteTournament", () => {
       }
       if (/SELECT m\.id FROM public\.matches/i.test(sql)) {
         return { rows: deletableIds.map((id) => ({ id })) };
+      }
+      if (/SELECT c\.file, c\.thumbnail_url/i.test(sql)) {
+        return { rows: clipRows };
       }
       if (/DELETE FROM public\.tournaments/i.test(sql)) {
         return { rows: [{ id: tournamentId }] };
@@ -66,7 +71,7 @@ describe("TournamentsController.deleteTournament", () => {
     hasura = { query: jest.fn(), mutation: jest.fn() };
     postgres = { transaction: jest.fn() };
     awards = { deleteTournamentAwardRecords: jest.fn() };
-    clips = { deleteClipsForMatch: jest.fn().mockResolvedValue(undefined) };
+    clips = { removeDeletedFiles: jest.fn().mockResolvedValue(undefined) };
     demoMetadata = {
       deleteDemosForMatch: jest.fn().mockResolvedValue(undefined),
     };
@@ -180,7 +185,7 @@ describe("TournamentsController.deleteTournament", () => {
     expect(postgres.transaction).not.toHaveBeenCalled();
   });
 
-  it("detaches bracket rows, deletes match_map_demos, deletes matches, then the tournament -- in that order, inside one transaction", async () => {
+  it("detaches bracket rows, reads clip keys, deletes match_map_demos, deletes matches, then the tournament -- in that order, inside one transaction", async () => {
     queueAuthQueries();
     configureMatchRows(["match-1"]);
 
@@ -201,6 +206,10 @@ describe("TournamentsController.deleteTournament", () => {
       client.query,
       matchQueryCallIndex(/SELECT m\.id FROM public\.matches/i),
     );
+    const clipKeysOrder = callOrderFor(
+      client.query,
+      matchQueryCallIndex(/SELECT c\.file, c\.thumbnail_url/i),
+    );
     const demosOrder = callOrderFor(
       client.query,
       matchQueryCallIndex(/DELETE FROM public\.match_map_demos/i),
@@ -216,7 +225,8 @@ describe("TournamentsController.deleteTournament", () => {
 
     expect(awardsOrder).toBeLessThan(detachOrder);
     expect(detachOrder).toBeLessThan(deletableOrder);
-    expect(deletableOrder).toBeLessThan(demosOrder);
+    expect(deletableOrder).toBeLessThan(clipKeysOrder);
+    expect(clipKeysOrder).toBeLessThan(demosOrder);
     expect(demosOrder).toBeLessThan(matchesOrder);
     expect(matchesOrder).toBeLessThan(tournamentOrder);
 
@@ -227,7 +237,8 @@ describe("TournamentsController.deleteTournament", () => {
     expect(detachCall[0]).toMatch(/SET match_id = NULL/i);
     expect(detachCall[0]).toMatch(/ts\.tournament_id = \$1/i);
     expect(detachCall[0]).toMatch(/SELECT DISTINCT match_id/i);
-    expect(detachCall[1]).toEqual([tournamentId]);
+    // Deleting the tournament detaches every match, played or not.
+    expect(detachCall[1]).toEqual([tournamentId, false]);
 
     expect(client.query).toHaveBeenCalledWith(
       expect.stringMatching(/DELETE FROM public\.match_map_demos/i),
@@ -267,7 +278,9 @@ describe("TournamentsController.deleteTournament", () => {
       -1,
     );
     expect(matchQueryCallIndex(/^\s*DELETE FROM public\.matches/i)).toBe(-1);
-    expect(clips.deleteClipsForMatch).not.toHaveBeenCalled();
+    expect(matchQueryCallIndex(/SELECT c\.file, c\.thumbnail_url/i)).toBe(-1);
+    expect(demoMetadata.deleteDemosForMatch).not.toHaveBeenCalled();
+    expect(clips.removeDeletedFiles).not.toHaveBeenCalled();
   });
 
   it("does not delete a candidate match that is still referenced by another bracket, or purge its assets", async () => {
@@ -287,9 +300,12 @@ describe("TournamentsController.deleteTournament", () => {
       expect.stringMatching(/^\s*DELETE FROM public\.matches/i),
       [["match-1"]],
     );
-    expect(clips.deleteClipsForMatch).toHaveBeenCalledTimes(1);
-    expect(clips.deleteClipsForMatch).toHaveBeenCalledWith("match-1");
-    expect(clips.deleteClipsForMatch).not.toHaveBeenCalledWith("match-2");
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringMatching(/SELECT c\.file, c\.thumbnail_url/i),
+      [["match-1"]],
+    );
+    expect(demoMetadata.deleteDemosForMatch).toHaveBeenCalledTimes(1);
+    expect(demoMetadata.deleteDemosForMatch).toHaveBeenCalledWith("match-1");
   });
 
   it("never calls Hasura's delete_tournaments_by_pk or delete_matches_by_pk mutations from inside the transaction path", async () => {
@@ -318,7 +334,7 @@ describe("TournamentsController.deleteTournament", () => {
       controller.deleteTournament({ user, tournament_id: tournamentId }),
     ).rejects.toThrow(/forced sql failure/);
 
-    expect(clips.deleteClipsForMatch).not.toHaveBeenCalled();
+    expect(clips.removeDeletedFiles).not.toHaveBeenCalled();
     expect(demoMetadata.deleteDemosForMatch).not.toHaveBeenCalled();
     expect(hasura.mutation).not.toHaveBeenCalled();
   });
@@ -330,10 +346,13 @@ describe("TournamentsController.deleteTournament", () => {
     await controller.deleteTournament({ user, tournament_id: tournamentId });
 
     const transactionOrder = postgres.transaction.mock.invocationCallOrder[0];
-    const clipsOrder = clips.deleteClipsForMatch.mock.invocationCallOrder[0];
+    const clipsOrder = clips.removeDeletedFiles.mock.invocationCallOrder[0];
     expect(clipsOrder).toBeGreaterThan(transactionOrder);
 
-    expect(clips.deleteClipsForMatch).toHaveBeenCalledWith("match-1");
+    expect(clips.removeDeletedFiles).toHaveBeenCalledWith({
+      keys: [],
+      prefixes: [],
+    });
     expect(demoMetadata.deleteDemosForMatch).toHaveBeenCalledWith("match-1");
     expect(hasura.mutation).not.toHaveBeenCalled();
   });
@@ -341,7 +360,7 @@ describe("TournamentsController.deleteTournament", () => {
   it("a failed S3 purge does not throw or report the database deletion as failed", async () => {
     queueAuthQueries();
     configureMatchRows(["match-1"]);
-    clips.deleteClipsForMatch.mockRejectedValue(new Error("s3 down"));
+    demoMetadata.deleteDemosForMatch.mockRejectedValue(new Error("s3 down"));
 
     await expect(
       controller.deleteTournament({ user, tournament_id: tournamentId }),
@@ -354,6 +373,63 @@ describe("TournamentsController.deleteTournament", () => {
     // The transaction already committed; cleanup failure must not roll it back
     // or re-trigger tournament/match deletion.
     expect(postgres.transaction).toHaveBeenCalledTimes(1);
+    // Nothing else knows about the demo folder now: it goes to the retry.
+    expect(clips.removeDeletedFiles).toHaveBeenCalledWith({
+      keys: [],
+      prefixes: ["demos/match-1/"],
+    });
+  });
+
+  // The cascade deletes match_clips, so the purge after commit used to find
+  // no clips and left every video and thumbnail in MinIO.
+  it("removes the clip files of the deleted matches by the keys read before the delete", async () => {
+    queueAuthQueries();
+    configureMatchRows(
+      ["match-1", "match-2"],
+      ["match-1", "match-2"],
+      [
+        {
+          file: "clips/system/job-1.mp4",
+          thumbnail_url: "clips/system/job-1.jpg",
+        },
+        { file: "clips/76561199000000001/job-2.mp4", thumbnail_url: null },
+      ],
+    );
+
+    await controller.deleteTournament({ user, tournament_id: tournamentId });
+
+    const clipKeysCall =
+      client.query.mock.calls[matchQueryCallIndex(/SELECT c\.file, c\.thumbnail_url/i)];
+    expect(clipKeysCall[0]).toMatch(/JOIN public\.match_maps/i);
+    expect(clipKeysCall[1]).toEqual([["match-1", "match-2"]]);
+    expect(clips.removeDeletedFiles).toHaveBeenCalledTimes(1);
+    expect(clips.removeDeletedFiles).toHaveBeenCalledWith({
+      keys: [
+        "clips/system/job-1.mp4",
+        "clips/system/job-1.jpg",
+        "clips/76561199000000001/job-2.mp4",
+      ],
+      prefixes: [],
+    });
+  });
+
+  it("a failed clip purge is logged, not reported as a failed deletion", async () => {
+    queueAuthQueries();
+    configureMatchRows(
+      ["match-1"],
+      ["match-1"],
+      [{ file: "clips/system/job-1.mp4", thumbnail_url: null }],
+    );
+    clips.removeDeletedFiles.mockRejectedValue(new Error("redis down"));
+
+    await expect(
+      controller.deleteTournament({ user, tournament_id: tournamentId }),
+    ).resolves.toEqual({ success: true });
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining("failed to purge clip files of 1 matches"),
+      expect.any(Error),
+    );
   });
 
   it("returns success once the transaction commits, even if there were no matches or awards", async () => {
@@ -617,7 +693,7 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
   let controller: TournamentsController;
   let hasura: { query: jest.Mock; mutation: jest.Mock };
   let postgres: { transaction: jest.Mock };
-  let clips: { deleteClipsForMatch: jest.Mock };
+  let clips: { removeDeletedFiles: jest.Mock };
   let demoMetadata: { deleteDemosForMatch: jest.Mock };
   let tournamentVoice: { removeTournamentVoice: jest.Mock };
   let logger: { log: jest.Mock; error: jest.Mock };
@@ -626,6 +702,7 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
   const configureMatchRows = (
     detachedIds: string[],
     deletableIds: string[] = detachedIds,
+    clipRows: Array<{ file: string | null; thumbnail_url: string | null }> = [],
   ) => {
     client.query.mockImplementation(async (sql: string) => {
       if (/WITH owned_brackets/i.test(sql)) {
@@ -633,6 +710,9 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
       }
       if (/SELECT m\.id FROM public\.matches/i.test(sql)) {
         return { rows: deletableIds.map((id) => ({ id })) };
+      }
+      if (/SELECT c\.file, c\.thumbnail_url/i.test(sql)) {
+        return { rows: clipRows };
       }
       return { rows: [] };
     });
@@ -642,7 +722,7 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
     logger = { log: jest.fn(), error: jest.fn() };
     hasura = { query: jest.fn(), mutation: jest.fn() };
     postgres = { transaction: jest.fn() };
-    clips = { deleteClipsForMatch: jest.fn().mockResolvedValue(undefined) };
+    clips = { removeDeletedFiles: jest.fn().mockResolvedValue(undefined) };
     demoMetadata = {
       deleteDemosForMatch: jest.fn().mockResolvedValue(undefined),
     };
@@ -671,7 +751,7 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
     };
   });
 
-  it("detaches and deletes cancelled-tournament match rows atomically, then purges S3, without calling delete_matches_by_pk", async () => {
+  it("detaches and deletes only unplayed match rows atomically, without calling delete_matches_by_pk", async () => {
     configureMatchRows(["match-1"]);
 
     await controller.tournament_events({
@@ -681,16 +761,62 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
     } as any);
 
     expect(postgres.transaction).toHaveBeenCalledTimes(1);
+    const detachCall = client.query.mock.calls.find((call) =>
+      /WITH owned_brackets/i.test(call[0]),
+    );
+    // Cancelling keeps matches with demos or clips linked to their bracket.
+    expect(detachCall[1]).toEqual([tournamentId, true]);
+    expect(detachCall[0]).toMatch(/public\.match_map_demos d/i);
+    expect(detachCall[0]).toMatch(/public\.match_clips c/i);
     expect(client.query).toHaveBeenCalledWith(
       expect.stringMatching(/^\s*DELETE FROM public\.matches/i),
       [["match-1"]],
     );
     expect(hasura.mutation).not.toHaveBeenCalled();
     expect(hasura.query).not.toHaveBeenCalled();
+  });
 
-    const transactionOrder = postgres.transaction.mock.invocationCallOrder[0];
-    const clipsOrder = clips.deleteClipsForMatch.mock.invocationCallOrder[0];
-    expect(clipsOrder).toBeGreaterThan(transactionOrder);
+  // DEAFCS rule: cancelling a tournament never deletes demos, clips or
+  // thumbnails; only deleting the tournament does.
+  it("deletes no file and no demo row", async () => {
+    configureMatchRows(["match-1"]);
+
+    await controller.tournament_events({
+      op: "UPDATE",
+      old: { id: tournamentId, status: "Live" },
+      new: { id: tournamentId, status: "Cancelled" },
+    } as any);
+
+    expect(
+      client.query.mock.calls.some((call) =>
+        /DELETE FROM public\.match_map_demos/i.test(call[0]),
+      ),
+    ).toBe(false);
+    expect(clips.removeDeletedFiles).not.toHaveBeenCalled();
+    expect(demoMetadata.deleteDemosForMatch).not.toHaveBeenCalled();
+  });
+
+  it("rolls back when a match gained clips during the cancel, so the retry keeps it", async () => {
+    configureMatchRows(
+      ["match-1"],
+      ["match-1"],
+      [{ file: "clips/system/job-1.mp4", thumbnail_url: null }],
+    );
+
+    await expect(
+      controller.tournament_events({
+        op: "UPDATE",
+        old: { id: tournamentId, status: "Live" },
+        new: { id: tournamentId, status: "Cancelled" },
+      } as any),
+    ).rejects.toThrow("a cancelled tournament's match gained clips, retrying");
+
+    expect(
+      client.query.mock.calls.some((call) =>
+        /^\s*DELETE FROM public\.matches/i.test(call[0]),
+      ),
+    ).toBe(false);
+    expect(clips.removeDeletedFiles).not.toHaveBeenCalled();
   });
 
   it("does not purge S3 when there was nothing to detach", async () => {
@@ -702,7 +828,7 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
       new: { id: tournamentId, status: "Cancelled" },
     } as any);
 
-    expect(clips.deleteClipsForMatch).not.toHaveBeenCalled();
+    expect(clips.removeDeletedFiles).not.toHaveBeenCalled();
     expect(demoMetadata.deleteDemosForMatch).not.toHaveBeenCalled();
   });
 });
