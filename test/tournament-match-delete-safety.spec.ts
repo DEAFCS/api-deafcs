@@ -134,8 +134,11 @@ describe("tournament match delete safety and orphan recovery (SQL-driven)", () =
       expect(Number(gone.n)).toBe(0);
     });
 
-    it("the Hasura delete permission refuses tournament matches too", () => {
+    it("no role may delete a match directly through Hasura", () => {
       // Bypassing the action (a direct delete mutation) is closed in metadata.
+      // DEAFCS: closed for every match, not only tournament ones (a direct
+      // delete would leave the match's demo and clip files in storage);
+      // test/matches-delete-permissions-hasura.spec.ts checks it on real Hasura.
       const yaml = fs.readFileSync(
         path.join(
           __dirname,
@@ -143,16 +146,7 @@ describe("tournament match delete safety and orphan recovery (SQL-driven)", () =
         ),
         "utf8",
       );
-      const deleteBlock = yaml.slice(yaml.indexOf("delete_permissions:"), yaml.indexOf("event_triggers:"));
-      const admin = deleteBlock.slice(
-        deleteBlock.indexOf("role: administrator"),
-        deleteBlock.indexOf("role: user"),
-      );
-      const user = deleteBlock.slice(deleteBlock.indexOf("role: user"));
-      for (const block of [admin, user]) {
-        expect(block).toMatch(/_not:\s*\n\s*tournament_brackets: \{\}/);
-      }
-      expect(user).toContain("is_organizer");
+      expect(yaml).not.toMatch(/^delete_permissions:/m);
     });
   });
 

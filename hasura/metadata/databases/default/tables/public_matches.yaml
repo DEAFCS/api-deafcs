@@ -767,26 +767,13 @@ update_permissions:
         is_organizer:
           _eq: true
     comment: ""
-delete_permissions:
-  # A match a tournament bracket points at is never deleted directly: the bracket
-  # would keep its slot (and possibly a winner) with no match to reset. Tournament
-  # matches are cancelled or reset from the bracket; internal flows that remove
-  # them (reset, restructuring, deleting the tournament) do not go through here.
-  - role: administrator
-    permission:
-      filter:
-        _not:
-          tournament_brackets: {}
-    comment: ""
-  - role: user
-    permission:
-      filter:
-        _and:
-          - is_organizer:
-              _eq: true
-          - _not:
-              tournament_brackets: {}
-    comment: ""
+# DEAFCS: no role may delete a match directly (upstream lets administrators and
+# a match's organizer delete one outside a bracket). A direct delete takes the
+# match's demo and clip rows with it and leaves their files in storage. Matches
+# are deleted through the deleteMatch action (administrator only), which
+# removes the files first, or by the API and SQL flows that handle files
+# themselves (RemoveCancelledMatches and tournament delete clean them up;
+# bracket resets and league season deletes only delete unplayed matches).
 event_triggers:
   - name: match_events
     definition:
