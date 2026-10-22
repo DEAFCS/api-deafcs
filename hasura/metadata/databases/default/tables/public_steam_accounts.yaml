@@ -30,6 +30,7 @@ select_permissions:
         - last_node_id
         - created_at
         - updated_at
+        - role
       filter: {}
       allow_aggregations: true
     comment: ""
@@ -39,11 +40,15 @@ update_permissions:
       columns:
         - username
         - password
-      filter: {}
+      filter:
+        role:
+          _eq: gpu
       check: null
     comment: ""
 delete_permissions:
   - role: administrator
     permission:
-      filter: {}
+      filter:
+        role:
+          _eq: gpu
     comment: ""
