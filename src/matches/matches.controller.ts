@@ -853,6 +853,7 @@ export class MatchesController {
           id: matchId,
         },
         id: true,
+        status: true,
         options: {
           prefer_dedicated_server: true,
         },
@@ -869,11 +870,17 @@ export class MatchesController {
       throw Error("unable to find match");
     }
 
+    // DEAFCS: only while the match is still in the status this event says.
+    // A late or retried Live event (Hasura fetches events in batches and
+    // retries failed ones) would otherwise assign and boot a server for a
+    // match that Restart Match, Reset Veto or a cancel has moved on since,
+    // and push it to WaitingForServer past its check-in.
     if (
-      (status === "Live" &&
+      match.status === status &&
+      ((status === "Live" &&
         (!match.server || data.old.status !== "WaitingForServer")) ||
-      (status === "WaitingForServer" &&
-        data.old.server_id !== data.new.server_id)
+        (status === "WaitingForServer" &&
+          data.old.server_id !== data.new.server_id))
     ) {
       if (match.server) {
         if (match.server.reserved_by_match_id === matchId) {

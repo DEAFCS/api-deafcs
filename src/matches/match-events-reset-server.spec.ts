@@ -30,9 +30,12 @@ describe("MatchesController after a tournament reset", () => {
     reserved_by_match_id: string | null;
     game_server_node_id: string | null;
   } | null;
+  // The match's status now; by default the status the event moved it to.
+  let currentStatus: string | undefined;
 
   beforeEach(() => {
     server = null;
+    currentStatus = undefined;
 
     hasura = {
       query: jest.fn(async (query: Record<string, unknown>) => {
@@ -40,6 +43,7 @@ describe("MatchesController after a tournament reset", () => {
           return {
             matches_by_pk: {
               id: MATCH_ID,
+              status: currentStatus,
               options: { prefer_dedicated_server: false },
               server,
             },
@@ -107,13 +111,15 @@ describe("MatchesController after a tournament reset", () => {
   const updated = (
     old: Record<string, unknown>,
     next: Record<string, unknown>,
-  ) =>
-    controller.match_events({
+  ) => {
+    currentStatus ??= (next.status ?? old.status) as string;
+    return controller.match_events({
       op: "UPDATE",
       old: { id: MATCH_ID, source: "5stack", ...old },
       new: { id: MATCH_ID, source: "5stack", ...old, ...next },
       created_at: EVENT_AT,
     } as any);
+  };
 
   describe("ResetTournamentMatch", () => {
     const sql = () => postgres.query.mock.calls.map(([query]) => query);
@@ -392,6 +398,40 @@ describe("MatchesController after a tournament reset", () => {
       expect(matchAssistant.reserveDedicatedServer).toHaveBeenCalledWith(
         MATCH_ID,
       );
+      expect(matchAssistant.assignServer).not.toHaveBeenCalled();
+    });
+
+    // DEAFCS: a Live event delivered late or retried, after Restart Match,
+    // Reset Veto or a cancel moved the match on, must not boot a server.
+    it.each(["WaitingForCheckIn", "Veto", "Canceled"])(
+      "assigns nothing for a late Live event once the match is %s",
+      async (now) => {
+        currentStatus = now;
+        await updated(
+          { status: "Live", server_id: null },
+          { server_id: SERVER_ID },
+        );
+
+        expect(matchAssistant.assignServer).not.toHaveBeenCalled();
+        expect(matchAssistant.reserveDedicatedServer).not.toHaveBeenCalled();
+      },
+    );
+
+    it("reserves nothing for a late Live event once the match is back in check-in", async () => {
+      server = {
+        id: SERVER_ID,
+        is_dedicated: true,
+        reserved_by_match_id: null,
+        game_server_node_id: null,
+      };
+      currentStatus = "WaitingForCheckIn";
+
+      await updated(
+        { status: "WaitingForCheckIn", server_id: SERVER_ID },
+        { status: "Live" },
+      );
+
+      expect(matchAssistant.reserveDedicatedServer).not.toHaveBeenCalled();
       expect(matchAssistant.assignServer).not.toHaveBeenCalled();
     });
   });
