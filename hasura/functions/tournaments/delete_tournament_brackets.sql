@@ -6,8 +6,9 @@ BEGIN
    -- DEAFCS: a match with demos or clips is never deleted from here (the SQL
    -- delete cannot remove its files from storage). Cancelling keeps such
    -- matches linked; only deleting the tournament removes them and their
-   -- files. Without this, the demo FK failed with a raw error and a match
-   -- with only clips left its files behind.
+   -- files. Without this, the delete below silently took their demo rows
+   -- (match_map_demos.match_id is ON DELETE CASCADE) and clip rows, and
+   -- left every file behind in storage.
    IF EXISTS (
        SELECT 1
        FROM tournament_brackets tb

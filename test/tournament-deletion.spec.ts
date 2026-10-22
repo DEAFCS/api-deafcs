@@ -17,7 +17,8 @@ import {
 // match_map_demos and the matches themselves), then
 // `DELETE FROM tournaments ... RETURNING id` -- against a real, migrated
 // Postgres instance so the award_occurrences_calculated_tournament
-// constraint, the award_recipients/match_map_demos ON DELETE RESTRICT FKs,
+// constraint, the award_recipients ON DELETE RESTRICT FK, the
+// match_map_demos FKs (match_id CASCADE, match_map_id RESTRICT),
 // the tbd_tournament_brackets / tad_matches trigger interaction, and the
 // match/tournament FK cascades are all genuinely enforced rather than mocked.
 // Controller-level concerns (auth/status/league guards, S3 cleanup ordering,
@@ -69,10 +70,13 @@ describe("tournament deletion (SQL-driven)", () => {
   // tournament's) before it is touched. Returns the match ids actually
   // deleted and the clip file keys read before the cascade removed them.
   // keepPlayed mirrors the Cancelled event: matches with demos or clips stay.
+  // afterDetach (tests only) runs right after the detach, to land a demo or
+  // clip in the middle of a cancel.
   const deleteTournamentMatchRows = async (
     client: PoolClient,
     tournamentId: string,
     keepPlayed = false,
+    afterDetach?: (matchIds: string[]) => Promise<void>,
   ): Promise<{ matchIds: string[]; clipKeys: string[] }> => {
     const detached = await client.query<{ match_id: string }>(
       `WITH owned_brackets AS (
@@ -111,6 +115,7 @@ describe("tournament deletion (SQL-driven)", () => {
     if (candidateIds.length === 0) {
       return { matchIds: [], clipKeys: [] };
     }
+    await afterDetach?.(candidateIds);
 
     const deletable = await client.query<{ id: string }>(
       `SELECT m.id FROM public.matches m
@@ -124,6 +129,26 @@ describe("tournament deletion (SQL-driven)", () => {
     const matchIds = deletable.rows.map((row) => row.id);
     if (matchIds.length === 0) {
       return { matchIds: [], clipKeys: [] };
+    }
+
+    if (keepPlayed) {
+      await lockForCancel(client, matchIds);
+      const played = await client.query<{ played: boolean }>(
+        `SELECT EXISTS (
+                  SELECT 1 FROM public.match_map_demos
+                   WHERE match_id = ANY($1::uuid[])
+                ) OR EXISTS (
+                  SELECT 1 FROM public.match_clips c
+                    JOIN public.match_maps mm ON mm.id = c.match_map_id
+                   WHERE mm.match_id = ANY($1::uuid[])
+                ) AS played`,
+        [matchIds],
+      );
+      if (played.rows[0]?.played) {
+        throw Error(
+          "a cancelled tournament's match gained demos or clips, retrying",
+        );
+      }
     }
 
     const clips = await client.query<{
@@ -140,11 +165,7 @@ describe("tournament deletion (SQL-driven)", () => {
       .flatMap((clip) => [clip.file, clip.thumbnail_url])
       .filter((key): key is string => !!key);
 
-    if (keepPlayed) {
-      if (clips.rows.length > 0) {
-        throw Error("a cancelled tournament's match gained clips, retrying");
-      }
-    } else {
+    if (!keepPlayed) {
       await client.query(
         `DELETE FROM public.match_map_demos WHERE match_id = ANY($1::uuid[])`,
         [matchIds],
@@ -155,6 +176,18 @@ describe("tournament deletion (SQL-driven)", () => {
     ]);
 
     return { matchIds, clipKeys };
+  };
+
+  // The cancel path's locks, as in deleteTournamentMatchRows.
+  const lockForCancel = async (client: PoolClient, matchIds: string[]) => {
+    await client.query(
+      `SELECT 1 FROM public.matches WHERE id = ANY($1::uuid[]) FOR UPDATE`,
+      [matchIds],
+    );
+    await client.query(
+      `SELECT 1 FROM public.match_maps WHERE match_id = ANY($1::uuid[]) FOR UPDATE`,
+      [matchIds],
+    );
   };
 
   // Mirrors exactly what TournamentsController.deleteTournament runs inside
@@ -184,7 +217,7 @@ describe("tournament deletion (SQL-driven)", () => {
   };
 
   // Attaches a demo row and a clip row to a match, exercising the
-  // match_map_demos RESTRICT FK and the match_maps -> match_clips CASCADE.
+  // match_map_demos FKs and the match_maps -> match_clips CASCADE.
   const attachDemoAndClip = async (matchId: string, steamId: string) => {
     const [matchMap] = await postgres.query<Array<{ id: string }>>(
       `INSERT INTO match_maps (match_id, map_id, "order")
@@ -630,6 +663,137 @@ describe("tournament deletion (SQL-driven)", () => {
       "clips/system/job-second.mp4",
     ]);
     expect(await tournamentExists(t.id)).toBe(false);
+  });
+
+  // The fact the cancel path is built on: nothing in the schema stops a match
+  // delete from taking its demo and clip rows (and so orphaning their files).
+  it("a plain match delete silently takes its demo and clip rows", async () => {
+    const t = await tfx.launch(
+      [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 }],
+      4,
+    );
+    const matchId = (await tfx.getBrackets(t.stageIds[0])).find(
+      (b) => b.round === 1,
+    )!.match_id!;
+    const { demoId, clipId } = await attachDemoAndClip(
+      matchId,
+      await fx.player(),
+    );
+
+    await postgres.transaction(async (client) => {
+      await client.query(
+        `UPDATE tournament_brackets SET match_id = NULL WHERE match_id = $1`,
+        [matchId],
+      );
+      await client.query(`DELETE FROM matches WHERE id = $1`, [matchId]);
+    });
+
+    const [demo] = await postgres.query<Array<{ id: string }>>(
+      `SELECT id FROM match_map_demos WHERE id = $1`,
+      [demoId],
+    );
+    const [clip] = await postgres.query<Array<{ id: string }>>(
+      `SELECT id FROM match_clips WHERE id = $1`,
+      [clipId],
+    );
+    expect(demo).toBeUndefined();
+    expect(clip).toBeUndefined();
+  });
+
+  it("cancelling rolls back when a demo lands after the detach, and the retry keeps the match", async () => {
+    const t = await tfx.launch(
+      [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 }],
+      4,
+    );
+    const bracket = (await tfx.getBrackets(t.stageIds[0])).find(
+      (b) => b.round === 1,
+    )!;
+    const matchId = bracket.match_id!;
+
+    // A demo only (no clip yet) commits from another connection after the
+    // detach, before the locks: the case the re-check exists for.
+    await expect(
+      postgres.transaction((client) =>
+        deleteTournamentMatchRows(client, t.id, true, async (ids) => {
+          if (!ids.includes(matchId)) {
+            return;
+          }
+          const [map] = await postgres.query<Array<{ id: string }>>(
+            `INSERT INTO match_maps (match_id, map_id, "order")
+             SELECT $1, id, 1 FROM maps ORDER BY name LIMIT 1 RETURNING id`,
+            [matchId],
+          );
+          await postgres.query(
+            `INSERT INTO match_map_demos (file, match_id, match_map_id, size)
+             VALUES ($1, $2, $3, 1)`,
+            [`demos/${matchId}/1.dem`, matchId, map.id],
+          );
+        }),
+      ),
+    ).rejects.toThrow(
+      "a cancelled tournament's match gained demos or clips, retrying",
+    );
+
+    // Rolled back: the bracket still points at the match, demo intact.
+    expect(await bracketMatchId(bracket.id)).toBe(matchId);
+    const [demo] = await postgres.query<Array<{ c: string }>>(
+      `SELECT count(*) AS c FROM match_map_demos WHERE match_id = $1`,
+      [matchId],
+    );
+    expect(Number(demo.c)).toBe(1);
+
+    // The event retry keeps it.
+    let retried = { matchIds: [] as string[], clipKeys: [] as string[] };
+    await postgres.transaction(async (client) => {
+      retried = await deleteTournamentMatchRows(client, t.id, true);
+    });
+    expect(retried.matchIds).not.toContain(matchId);
+    expect(await bracketMatchId(bracket.id)).toBe(matchId);
+  });
+
+  it("the cancel locks make a demo or clip insert in flight wait for the cancel", async () => {
+    const t = await tfx.launch(
+      [{ type: "SingleElimination", order: 1, minTeams: 4, maxTeams: 8 }],
+      4,
+    );
+    const matchId = (await tfx.getBrackets(t.stageIds[0])).find(
+      (b) => b.round === 1,
+    )!.match_id!;
+    const [map] = await postgres.query<Array<{ id: string }>>(
+      `INSERT INTO match_maps (match_id, map_id, "order")
+       SELECT $1, id, 9 FROM maps ORDER BY name LIMIT 1 RETURNING id`,
+      [matchId],
+    );
+
+    const blocked = async (sql: string, params: unknown[]) => {
+      try {
+        await postgres.transaction(async (other) => {
+          await other.query(`SET LOCAL lock_timeout = '300ms'`);
+          await other.query(sql, params);
+        });
+        return "inserted";
+      } catch (error) {
+        return (error as Error).message;
+      }
+    };
+
+    await postgres.transaction(async (client) => {
+      await lockForCancel(client, [matchId]);
+
+      expect(
+        await blocked(
+          `INSERT INTO match_map_demos (file, match_id, match_map_id, size)
+           VALUES ($1, $2, $3, 1)`,
+          [`demos/${matchId}/9.dem`, matchId, map.id],
+        ),
+      ).toMatch(/lock timeout/i);
+      expect(
+        await blocked(
+          `INSERT INTO match_clips (match_map_id, file) VALUES ($1, 'clips/system/x.mp4')`,
+          [map.id],
+        ),
+      ).toMatch(/lock timeout/i);
+    });
   });
 
   it("rebuilding a bracket of only unplayed matches still works", async () => {

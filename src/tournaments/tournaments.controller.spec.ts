@@ -699,10 +699,12 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
   let logger: { log: jest.Mock; error: jest.Mock };
   let client: { query: jest.Mock };
 
+  // `played` is what the locked re-check right before the delete reports: a
+  // demo or clip that landed on a match after the detach.
   const configureMatchRows = (
     detachedIds: string[],
     deletableIds: string[] = detachedIds,
-    clipRows: Array<{ file: string | null; thumbnail_url: string | null }> = [],
+    played = false,
   ) => {
     client.query.mockImplementation(async (sql: string) => {
       if (/WITH owned_brackets/i.test(sql)) {
@@ -711,12 +713,15 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
       if (/SELECT m\.id FROM public\.matches/i.test(sql)) {
         return { rows: deletableIds.map((id) => ({ id })) };
       }
-      if (/SELECT c\.file, c\.thumbnail_url/i.test(sql)) {
-        return { rows: clipRows };
+      if (/AS played/i.test(sql)) {
+        return { rows: [{ played }] };
       }
       return { rows: [] };
     });
   };
+
+  const queryIndex = (pattern: RegExp) =>
+    client.query.mock.calls.findIndex((call) => pattern.test(call[0]));
 
   beforeEach(() => {
     logger = { log: jest.fn(), error: jest.fn() };
@@ -796,12 +801,38 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
     expect(demoMetadata.deleteDemosForMatch).not.toHaveBeenCalled();
   });
 
-  it("rolls back when a match gained clips during the cancel, so the retry keeps it", async () => {
-    configureMatchRows(
-      ["match-1"],
-      ["match-1"],
-      [{ file: "clips/system/job-1.mp4", thumbnail_url: null }],
+  // A match delete silently takes its demo and clip rows (match_map_demos
+  // .match_id is ON DELETE CASCADE), so nothing but this check stops one.
+  it("locks the matches and their maps, then re-checks demos and clips, before the delete", async () => {
+    configureMatchRows(["match-1"]);
+
+    await controller.tournament_events({
+      op: "UPDATE",
+      old: { id: tournamentId, status: "Live" },
+      new: { id: tournamentId, status: "Cancelled" },
+    } as any);
+
+    const lockMatches = queryIndex(
+      /SELECT 1 FROM public\.matches WHERE id = ANY\(\$1::uuid\[\]\) FOR UPDATE/i,
     );
+    const lockMaps = queryIndex(
+      /SELECT 1 FROM public\.match_maps WHERE match_id = ANY\(\$1::uuid\[\]\) FOR UPDATE/i,
+    );
+    const check = queryIndex(/AS played/i);
+    const deleteMatches = queryIndex(/^\s*DELETE FROM public\.matches/i);
+    expect(lockMatches).toBeGreaterThan(-1);
+    expect(lockMatches).toBeLessThan(lockMaps);
+    expect(lockMaps).toBeLessThan(check);
+    expect(check).toBeLessThan(deleteMatches);
+    expect(client.query.mock.calls[check][0]).toMatch(
+      /public\.match_map_demos/i,
+    );
+    expect(client.query.mock.calls[check][0]).toMatch(/public\.match_clips/i);
+    expect(client.query.mock.calls[check][1]).toEqual([["match-1"]]);
+  });
+
+  it("rolls back when a match gained demos or clips during the cancel, so the retry keeps it", async () => {
+    configureMatchRows(["match-1"], ["match-1"], true);
 
     await expect(
       controller.tournament_events({
@@ -809,14 +840,24 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
         old: { id: tournamentId, status: "Live" },
         new: { id: tournamentId, status: "Cancelled" },
       } as any),
-    ).rejects.toThrow("a cancelled tournament's match gained clips, retrying");
+    ).rejects.toThrow(
+      "a cancelled tournament's match gained demos or clips, retrying",
+    );
 
-    expect(
-      client.query.mock.calls.some((call) =>
-        /^\s*DELETE FROM public\.matches/i.test(call[0]),
-      ),
-    ).toBe(false);
+    expect(queryIndex(/^\s*DELETE FROM public\.matches/i)).toBe(-1);
     expect(clips.removeDeletedFiles).not.toHaveBeenCalled();
+  });
+
+  it("deleting a tournament takes no cancel locks or re-check", async () => {
+    configureMatchRows(["match-1"]);
+
+    await (controller as any).deleteTournamentMatchRows(client, tournamentId);
+
+    expect(queryIndex(/AS played/i)).toBe(-1);
+    expect(queryIndex(/FOR UPDATE/i)).toBe(queryIndex(/WITH owned_brackets/i));
+    expect(queryIndex(/DELETE FROM public\.match_map_demos/i)).toBeGreaterThan(
+      -1,
+    );
   });
 
   it("does not purge S3 when there was nothing to detach", async () => {

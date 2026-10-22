@@ -1118,10 +1118,12 @@ export class TournamentsController {
   //     previously produced "tuple to be deleted was already modified by an
   //     operation triggered by the current command" when matches were left
   //     for the tournament cascade (via the bracket trigger) to clean up.
-  //  3. match_map_demos -- match_map_demos.match_id references matches(id)
-  //     ON DELETE RESTRICT (as does match_map_demos.match_map_id against
-  //     match_maps(id)), so demo rows must go before the match delete or it
-  //     fails outright.
+  //  3. match_map_demos -- deleted explicitly before the matches.
+  //     DEAFCS: match_map_demos.match_id is ON DELETE CASCADE (only
+  //     match_map_id against match_maps(id) is RESTRICT), so a match delete
+  //     does NOT fail on demos: it silently takes their rows, and their files
+  //     stay in storage. Verified on the production schema and in
+  //     test/tournament-deletion.spec.ts.
   //  4. matches -- everything else a match owns (match_maps and, through it,
   //     match_clips; per-round/per-player stat tables; event_match_links;
   //     match_player_disconnects; ...) is ON DELETE CASCADE from matches(id)
@@ -1135,9 +1137,10 @@ export class TournamentsController {
   // match referenced by more than one of this tournament's own bracket rows
   // is only processed once.
   // DEAFCS: with keepPlayed (cancelling), a match with demos or clips is not
-  // detached or deleted, and match_map_demos is never deleted: a demo that
-  // lands mid-cancel makes the match delete fail on its RESTRICT FK, so the
-  // event is retried and keeps that match.
+  // detached or deleted. Since a match delete silently takes its demo and
+  // clip rows (see 3.), the matches and their maps are locked and re-checked
+  // right before the delete; a demo or clip that landed since the detach
+  // rolls the cancel back, and the event retry then keeps that match.
   private async deleteTournamentMatchRows(
     client: PoolClient,
     tournamentId: string,
@@ -1200,6 +1203,37 @@ export class TournamentsController {
       return { matchIds: [], clipKeys: [] };
     }
 
+    if (keepPlayed) {
+      // A demo or clip insert takes a key-share lock on its match or map, so
+      // with these locked one still in flight waits for this transaction
+      // (and then fails on the deleted row), and one already committed is
+      // seen by the check below.
+      await client.query(
+        `SELECT 1 FROM public.matches WHERE id = ANY($1::uuid[]) FOR UPDATE`,
+        [matchIds],
+      );
+      await client.query(
+        `SELECT 1 FROM public.match_maps WHERE match_id = ANY($1::uuid[]) FOR UPDATE`,
+        [matchIds],
+      );
+      const played = await client.query<{ played: boolean }>(
+        `SELECT EXISTS (
+                  SELECT 1 FROM public.match_map_demos
+                   WHERE match_id = ANY($1::uuid[])
+                ) OR EXISTS (
+                  SELECT 1 FROM public.match_clips c
+                    JOIN public.match_maps mm ON mm.id = c.match_map_id
+                   WHERE mm.match_id = ANY($1::uuid[])
+                ) AS played`,
+        [matchIds],
+      );
+      if (played.rows[0]?.played) {
+        throw Error(
+          "a cancelled tournament's match gained demos or clips, retrying",
+        );
+      }
+    }
+
     // DEAFCS: deleting the matches cascades their match_clips rows, and the
     // purge after commit can no longer look them up, so every clip's stored
     // keys are read here first.
@@ -1217,13 +1251,7 @@ export class TournamentsController {
       .flatMap((clip) => [clip.file, clip.thumbnail_url])
       .filter((key): key is string => !!key);
 
-    if (keepPlayed) {
-      // A clip finished between the detach and here: roll back and let the
-      // event retry, which then keeps that match.
-      if (clips.rows.length > 0) {
-        throw Error("a cancelled tournament's match gained clips, retrying");
-      }
-    } else {
+    if (!keepPlayed) {
       await client.query(
         `DELETE FROM public.match_map_demos WHERE match_id = ANY($1::uuid[])`,
         [matchIds],
