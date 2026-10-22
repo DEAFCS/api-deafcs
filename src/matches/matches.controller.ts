@@ -2356,9 +2356,38 @@ export class MatchesController {
       throw Error("cannot reset while an affected downstream match is live");
     }
 
+    await this.assertDownstreamUnplayed(rows);
+
     return {
       impacts: rows,
     };
+  }
+
+  // DEAFCS: a reset deletes its downstream matches, and deleting a played one
+  // takes its results, statistics, demo and clip rows and leaves the files in
+  // storage. Refused here so the preview already says so; reset_tournament_match
+  // makes the same check under lock, which is what actually protects them.
+  public static readonly PLAYED_DOWNSTREAM_RESET_MESSAGE =
+    "A later match in this bracket has already been played, so this match cannot be reset.";
+
+  private async assertDownstreamUnplayed(
+    rows: Array<{ match_id: string | null; will_delete_match: boolean }>,
+  ) {
+    const deletedIds = rows
+      .filter((row) => row.will_delete_match && row.match_id)
+      .map((row) => row.match_id);
+    if (deletedIds.length === 0) {
+      return;
+    }
+
+    const [row] = await this.postgres.query<Array<{ played: boolean }>>(
+      `SELECT COALESCE(bool_or(public.match_has_played_data(id)), false) AS played
+         FROM unnest($1::uuid[]) AS id`,
+      [deletedIds],
+    );
+    if (row?.played) {
+      throw Error(MatchesController.PLAYED_DOWNSTREAM_RESET_MESSAGE);
+    }
   }
 
   @HasuraAction()
@@ -2376,9 +2405,13 @@ export class MatchesController {
     }
 
     const previewRows = await this.postgres.query<
-      { will_delete_match: boolean; match_status: string | null }[]
+      {
+        match_id: string | null;
+        will_delete_match: boolean;
+        match_status: string | null;
+      }[]
     >(
-      `SELECT will_delete_match, match_status FROM preview_tournament_match_reset($1::uuid)`,
+      `SELECT match_id, will_delete_match, match_status FROM preview_tournament_match_reset($1::uuid)`,
       [match_id],
     );
 
@@ -2395,6 +2428,8 @@ export class MatchesController {
     if (hasBlockingMatch) {
       throw Error("cannot reset while an affected downstream match is live");
     }
+
+    await this.assertDownstreamUnplayed(previewRows);
 
     const resolvedScheduledAt =
       scheduled_at && scheduled_at.trim().length > 0 ? scheduled_at : null;

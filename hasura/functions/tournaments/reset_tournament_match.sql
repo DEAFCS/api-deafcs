@@ -72,6 +72,7 @@ DECLARE
     source_tournament_id uuid;
     source_stage_type text;
     feeder record;
+    downstream_match_ids uuid[];
 BEGIN
     IF _reset_status NOT IN ('Scheduled', 'WaitingForCheckIn') THEN
         RAISE EXCEPTION 'reset status must be Scheduled or WaitingForCheckIn' USING ERRCODE = '22000';
@@ -117,6 +118,49 @@ BEGIN
        AND _new_winning_lineup_id <> source_match.lineup_1_id
        AND _new_winning_lineup_id <> source_match.lineup_2_id THEN
         RAISE EXCEPTION 'new winner must be one of the source match lineups' USING ERRCODE = '22000';
+    END IF;
+
+    -- DEAFCS: the downstream matches deleted below must be genuinely
+    -- unplayed. A delete takes a played match's results, statistics, demo and
+    -- clip rows with it and leaves the files in storage, so the reset is
+    -- refused instead. The matches and their maps are locked first: a result,
+    -- demo or clip write needs a lock on them, so one in flight waits for this
+    -- reset and one already committed is seen by the check.
+    WITH RECURSIVE chain AS (
+        SELECT source_bracket.id AS id
+        UNION ALL
+        SELECT parent.id
+        FROM chain
+        JOIN tournament_brackets current_bracket ON current_bracket.id = chain.id
+        JOIN tournament_brackets parent
+          ON parent.id = current_bracket.parent_bracket_id
+          OR parent.id = current_bracket.loser_parent_bracket_id
+        WHERE parent.id IS NOT NULL
+    )
+    SELECT array_agg(DISTINCT tb.match_id)
+    INTO downstream_match_ids
+    FROM tournament_brackets tb
+    JOIN chain ON chain.id = tb.id
+    WHERE tb.id <> source_bracket.id
+      AND tb.match_id IS NOT NULL;
+
+    IF downstream_match_ids IS NOT NULL THEN
+        PERFORM 1 FROM matches
+        WHERE id = ANY(downstream_match_ids)
+        ORDER BY id
+        FOR UPDATE;
+
+        PERFORM 1 FROM match_maps
+        WHERE match_id = ANY(downstream_match_ids)
+        ORDER BY id
+        FOR UPDATE;
+
+        IF EXISTS (
+            SELECT 1 FROM unnest(downstream_match_ids) AS d(id)
+            WHERE public.match_has_played_data(d.id)
+        ) THEN
+            RAISE EXCEPTION 'A later match in this bracket has already been played, so this match cannot be reset.' USING ERRCODE = '22000';
+        END IF;
     END IF;
 
     -- Clear parent slots contributed by every affected feeder.

@@ -287,6 +287,7 @@ CREATE OR REPLACE FUNCTION public.tbd_league_seasons() RETURNS TRIGGER
     AS $$
 DECLARE
     _tournament_ids uuid[];
+    _match_ids uuid[];
 BEGIN
     SELECT array_agg(tid) INTO _tournament_ids
     FROM (
@@ -298,6 +299,36 @@ BEGIN
     ) x;
 
     IF _tournament_ids IS NOT NULL THEN
+        -- DEAFCS: only a season whose matches are all genuinely unplayed is
+        -- deleted. Deleting a played match takes its results, statistics,
+        -- demo and clip rows and leaves the files in storage. The matches and
+        -- their maps are locked first, so a result, demo or clip in flight
+        -- waits for this delete and one already committed is seen here.
+        SELECT array_agg(DISTINCT tb.match_id) INTO _match_ids
+        FROM public.tournament_brackets tb
+        INNER JOIN public.tournament_stages ts ON ts.id = tb.tournament_stage_id
+        WHERE ts.tournament_id = ANY(_tournament_ids)
+          AND tb.match_id IS NOT NULL;
+
+        IF _match_ids IS NOT NULL THEN
+            PERFORM 1 FROM public.matches
+            WHERE id = ANY(_match_ids)
+            ORDER BY id
+            FOR UPDATE;
+
+            PERFORM 1 FROM public.match_maps
+            WHERE match_id = ANY(_match_ids)
+            ORDER BY id
+            FOR UPDATE;
+
+            IF EXISTS (
+                SELECT 1 FROM unnest(_match_ids) AS m(id)
+                WHERE public.match_has_played_data(m.id)
+            ) THEN
+                RAISE EXCEPTION 'This season has played matches, so it cannot be deleted.' USING ERRCODE = '22000';
+            END IF;
+        END IF;
+
         -- The league owns these tournaments; stand aside from the delete guard.
         PERFORM set_config('fivestack.league_cascade', 'true', true);
 

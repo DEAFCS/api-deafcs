@@ -182,6 +182,89 @@ describe("MatchesController after a tournament reset", () => {
 
       expect(postgres.query).not.toHaveBeenCalled();
     });
+
+    // DEAFCS: a reset never deletes a played downstream match.
+    describe("a downstream match the reset would delete", () => {
+      const PLAYED =
+        "A later match in this bracket has already been played, so this match cannot be reset.";
+
+      const downstream = (played: boolean) =>
+        postgres.query.mockImplementation(async (query: string) => {
+          if (query.includes("preview_tournament_match_reset")) {
+            return [
+              {
+                match_id: MATCH_ID,
+                will_delete_match: false,
+                match_status: "Finished",
+              },
+              {
+                match_id: "final-1",
+                will_delete_match: true,
+                match_status: "Finished",
+              },
+            ];
+          }
+          if (query.includes("match_has_played_data")) {
+            return [{ played }];
+          }
+          return [];
+        });
+
+      it("refuses the reset when it was played, before touching the bracket", async () => {
+        downstream(true);
+
+        await expect(
+          controller.ResetTournamentMatch({
+            user: { steam_id: "1" } as any,
+            match_id: MATCH_ID,
+          }),
+        ).rejects.toThrow(PLAYED);
+
+        const check = postgres.query.mock.calls.find(([query]) =>
+          query.includes("match_has_played_data"),
+        );
+        // Only the matches the reset would delete, not the source match.
+        expect(check[1]).toEqual([["final-1"]]);
+        expect(
+          sql().some((query) => query.includes("reset_tournament_match(")),
+        ).toBe(false);
+      });
+
+      it("refuses the preview too, so the organizer sees why", async () => {
+        downstream(true);
+
+        await expect(
+          controller.PreviewTournamentMatchReset({
+            user: { steam_id: "1" } as any,
+            match_id: MATCH_ID,
+          }),
+        ).rejects.toThrow(PLAYED);
+      });
+
+      it("resets when it is genuinely unplayed", async () => {
+        downstream(false);
+
+        await controller.ResetTournamentMatch({
+          user: { steam_id: "1" } as any,
+          match_id: MATCH_ID,
+        });
+
+        expect(
+          sql().some((query) => query.includes("reset_tournament_match(")),
+        ).toBe(true);
+      });
+
+      it("skips the check when the reset deletes nothing", async () => {
+        await controller.ResetTournamentMatch({
+          user: { steam_id: "1" } as any,
+          match_id: MATCH_ID,
+        });
+
+        expect(
+          sql().some((query) => query.includes("match_has_played_data")),
+        ).toBe(false);
+      });
+    });
   });
 
   describe("match_events", () => {

@@ -243,7 +243,9 @@ describe("tournament edge cases (SQL-driven)", () => {
   });
 
   describe("deep reset", () => {
-    it("resetting a quarterfinal unwinds the whole chain and the bracket replays cleanly", async () => {
+    // DEAFCS: the semifinal and final downstream were played, so the reset is
+    // refused instead of deleting them (and their demos and clips).
+    it("resetting a quarterfinal after a full playout is refused and changes nothing", async () => {
       const t = await tfx.launch(
         [{ type: "SingleElimination", order: 1, minTeams: 8, maxTeams: 8 }],
         8,
@@ -252,7 +254,8 @@ describe("tournament edge cases (SQL-driven)", () => {
       await playAllRounds(stage, 3);
       expect(await tfx.tournamentStatus(t.id)).toBe("Finished");
 
-      const quarterOne = (await tfx.getBrackets(stage)).find(
+      const before = await tfx.getBrackets(stage);
+      const quarterOne = before.find(
         (b) => b.round === 1 && b.match_number === 1,
       )!;
 
@@ -265,16 +268,40 @@ describe("tournament edge cases (SQL-driven)", () => {
       expect(preview.length).toBe(3);
       expect(preview.filter((p) => p.will_delete_match).length).toBe(2);
 
+      await expect(
+        postgres.query("SELECT * FROM reset_tournament_match($1)", [
+          quarterOne.match_id,
+        ]),
+      ).rejects.toThrow(
+        "A later match in this bracket has already been played, so this match cannot be reset.",
+      );
+
+      expect(await tfx.tournamentStatus(t.id)).toBe("Finished");
+      expect(await tfx.getBrackets(stage)).toEqual(before);
+    });
+
+    it("resetting a quarterfinal before its semifinal is played unwinds it and the bracket replays cleanly", async () => {
+      const t = await tfx.launch(
+        [{ type: "SingleElimination", order: 1, minTeams: 8, maxTeams: 8 }],
+        8,
+      );
+      const stage = t.stageIds[0];
+      await playAllRounds(stage, 1);
+
+      const quarterOne = (await tfx.getBrackets(stage)).find(
+        (b) => b.round === 1 && b.match_number === 1,
+      )!;
+
       const deleted = await postgres.query<
         Array<{ deleted_match_id: string }>
       >("SELECT * FROM reset_tournament_match($1)", [quarterOne.match_id]);
-      expect(deleted.length).toBe(2);
+      // Only the scheduled, unplayed semifinal existed downstream.
+      expect(deleted.length).toBe(1);
 
-      expect(await tfx.tournamentStatus(t.id)).toBe("Live");
       const unwound = await tfx.getBrackets(stage);
-      expect(unwound.filter((b) => !b.finished).length).toBe(3);
+      expect(unwound.filter((b) => !b.finished).length).toBe(4);
 
-      // Replay: the reset quarterfinal, then the rescheduled semi and final.
+      // Replay: the reset quarterfinal, then the semis and final.
       await tfx.winMatch(quarterOne.match_id!);
       await playAllRounds(stage, 2);
       await playAllRounds(stage, 3);
