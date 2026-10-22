@@ -43,11 +43,13 @@ describe("TournamentsController.deleteTournament", () => {
   // deleteTournamentMatchRows. `detachedIds` is what the detach CTE reports
   // as previously-linked match ids; `deletableIds` (defaults to the same
   // list) is what the NOT-EXISTS-guarded SELECT reports as safe to delete;
-  // `clipRows` is what the clip-key SELECT finds for those matches.
+  // `clipRows` is what the clip-key SELECT finds for those matches;
+  // `renderKeys` the file keys of their renders that have no clip row yet.
   const configureMatchRows = (
     detachedIds: string[],
     deletableIds: string[] = detachedIds,
     clipRows: Array<{ file: string | null; thumbnail_url: string | null }> = [],
+    renderKeys: string[] = [],
   ) => {
     client.query.mockImplementation(async (sql: string) => {
       if (/WITH owned_brackets/i.test(sql)) {
@@ -58,6 +60,9 @@ describe("TournamentsController.deleteTournament", () => {
       }
       if (/SELECT c\.file, c\.thumbnail_url/i.test(sql)) {
         return { rows: clipRows };
+      }
+      if (/FROM public\.clip_render_jobs/i.test(sql)) {
+        return { rows: renderKeys.map((key) => ({ key })) };
       }
       if (/DELETE FROM public\.tournaments/i.test(sql)) {
         return { rows: [{ id: tournamentId }] };
@@ -408,6 +413,35 @@ describe("TournamentsController.deleteTournament", () => {
         "clips/system/job-1.mp4",
         "clips/system/job-1.jpg",
         "clips/76561199000000001/job-2.mp4",
+      ],
+      prefixes: [],
+    });
+  });
+
+  // A render still uploading (or failed after its poster frame) has files
+  // only its keys name, and its row goes with the maps.
+  it("also removes the files of renders that have no clip row yet", async () => {
+    queueAuthQueries();
+    configureMatchRows(
+      ["match-1"],
+      ["match-1"],
+      [{ file: "clips/system/job-1.mp4", thumbnail_url: null }],
+      ["clips/system/job-2.mp4", "clips/system/job-2.jpg"],
+    );
+
+    await controller.deleteTournament({ user, tournament_id: tournamentId });
+
+    const renderCall =
+      client.query.mock.calls[
+        matchQueryCallIndex(/FROM public\.clip_render_jobs/i)
+      ];
+    expect(renderCall[0]).toMatch(/j\.clip_id IS NULL/i);
+    expect(renderCall[1]).toEqual([["match-1"]]);
+    expect(clips.removeDeletedFiles).toHaveBeenCalledWith({
+      keys: [
+        "clips/system/job-1.mp4",
+        "clips/system/job-2.mp4",
+        "clips/system/job-2.jpg",
       ],
       prefixes: [],
     });
@@ -848,13 +882,20 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
     expect(clips.removeDeletedFiles).not.toHaveBeenCalled();
   });
 
-  it("deleting a tournament takes no cancel locks or re-check", async () => {
+  it("deleting a tournament takes the same locks before its reads, but no played re-check", async () => {
     configureMatchRows(["match-1"]);
 
     await (controller as any).deleteTournamentMatchRows(client, tournamentId);
 
+    const lockMaps = queryIndex(
+      /SELECT 1 FROM public\.match_maps WHERE match_id = ANY\(\$1::uuid\[\]\) FOR UPDATE/i,
+    );
+    expect(lockMaps).toBeGreaterThan(-1);
+    expect(lockMaps).toBeLessThan(
+      queryIndex(/SELECT c\.file, c\.thumbnail_url/i),
+    );
+    expect(lockMaps).toBeLessThan(queryIndex(/FROM public\.clip_render_jobs/i));
     expect(queryIndex(/AS played/i)).toBe(-1);
-    expect(queryIndex(/FOR UPDATE/i)).toBe(queryIndex(/WITH owned_brackets/i));
     expect(queryIndex(/DELETE FROM public\.match_map_demos/i)).toBeGreaterThan(
       -1,
     );

@@ -1136,11 +1136,13 @@ export class TournamentsController {
   // Ids are deduplicated by the `SELECT DISTINCT` in the detach query, so a
   // match referenced by more than one of this tournament's own bracket rows
   // is only processed once.
-  // DEAFCS: with keepPlayed (cancelling), a match with demos or clips is not
-  // detached or deleted. Since a match delete silently takes its demo and
-  // clip rows (see 3.), the matches and their maps are locked and re-checked
-  // right before the delete; a demo or clip that landed since the detach
-  // rolls the cancel back, and the event retry then keeps that match.
+  // DEAFCS: the matches and their maps are locked before anything is read
+  // or deleted, so no demo, clip or render lands in between. With
+  // keepPlayed (cancelling), a match with demos or clips is not detached or
+  // deleted; since a match delete silently takes its demo and clip rows
+  // (see 3.), they are re-checked under that lock, and a demo or clip that
+  // landed since the detach rolls the cancel back, and the event retry then
+  // keeps that match.
   private async deleteTournamentMatchRows(
     client: PoolClient,
     tournamentId: string,
@@ -1203,19 +1205,20 @@ export class TournamentsController {
       return { matchIds: [], clipKeys: [] };
     }
 
+    // A demo, clip or render insert takes a key-share lock on its match or
+    // map, so with these locked one still in flight waits for this
+    // transaction (and then fails on the deleted row), and one already
+    // committed is seen by the reads below.
+    await client.query(
+      `SELECT 1 FROM public.matches WHERE id = ANY($1::uuid[]) FOR UPDATE`,
+      [matchIds],
+    );
+    await client.query(
+      `SELECT 1 FROM public.match_maps WHERE match_id = ANY($1::uuid[]) FOR UPDATE`,
+      [matchIds],
+    );
+
     if (keepPlayed) {
-      // A demo or clip insert takes a key-share lock on its match or map, so
-      // with these locked one still in flight waits for this transaction
-      // (and then fails on the deleted row), and one already committed is
-      // seen by the check below.
-      await client.query(
-        `SELECT 1 FROM public.matches WHERE id = ANY($1::uuid[]) FOR UPDATE`,
-        [matchIds],
-      );
-      await client.query(
-        `SELECT 1 FROM public.match_maps WHERE match_id = ANY($1::uuid[]) FOR UPDATE`,
-        [matchIds],
-      );
       const played = await client.query<{ played: boolean }>(
         `SELECT EXISTS (
                   SELECT 1 FROM public.match_map_demos
@@ -1250,6 +1253,22 @@ export class TournamentsController {
     const clipKeys = clips.rows
       .flatMap((clip) => [clip.file, clip.thumbnail_url])
       .filter((key): key is string => !!key);
+
+    // DEAFCS: a render with no clip row yet (in flight, or failed after its
+    // poster frame) has files only its keys name (ClipsService.GetClipS3Key
+    // and GetClipThumbnailS3Key). Its row goes with the maps, so its keys are
+    // read here too; an upload that lands later removes its own files.
+    const renders = await client.query<{ key: string }>(
+      `SELECT 'clips/' || COALESCE(j.user_steam_id::text, 'system') || '/'
+              || j.id || ext.suffix AS key
+         FROM public.clip_render_jobs j
+         JOIN public.match_maps mm ON mm.id = j.match_map_id
+        CROSS JOIN (VALUES ('.mp4'), ('.jpg')) AS ext(suffix)
+        WHERE mm.match_id = ANY($1::uuid[])
+          AND j.clip_id IS NULL`,
+      [matchIds],
+    );
+    clipKeys.push(...renders.rows.map((row) => row.key));
 
     if (!keepPlayed) {
       await client.query(

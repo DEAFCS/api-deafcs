@@ -1751,7 +1751,55 @@ export class ClipsService {
 
     await this.s3.put(key, fileStream, "image/jpeg");
 
+    // DEAFCS: the render (and its match) can be deleted while the upload
+    // runs. Checked again after the upload: a render still there now is one
+    // a tournament delete reads before it commits, and so removes this file
+    // with the rest; a render already gone leaves the file to us.
+    if (!(await this.renderJobExists(jobId))) {
+      await this.s3.remove(key);
+      throw new Error(`clip render ${jobId} not found`);
+    }
+
     return { key };
+  }
+
+  // DEAFCS: the clip row failed to land, so nothing records the files just
+  // uploaded. The usual cause is the match (with its maps and this render)
+  // deleted during the upload: the insert waits for that delete, then fails
+  // on the gone map, after the delete's own cleanup already ran. Removed
+  // unless a clip row does point at them (an insert that landed but whose
+  // answer was lost), so a live clip is never touched.
+  private async removeUnrecordedClipFiles(file: string, thumbnail: string) {
+    try {
+      const { match_clips } = await this.hasura.query({
+        match_clips: {
+          __args: {
+            where: { file: { _eq: file } },
+            limit: 1,
+          },
+          id: true,
+        },
+      });
+      if (match_clips.length > 0) {
+        return;
+      }
+      await removeClipFiles(this.s3, { file, thumbnail_url: thumbnail });
+    } catch (error) {
+      this.logger.error(
+        `[clip] could not remove unrecorded clip files ${file}, ${thumbnail}`,
+        error,
+      );
+    }
+  }
+
+  private async renderJobExists(jobId: string): Promise<boolean> {
+    const { clip_render_jobs_by_pk } = await this.hasura.query({
+      clip_render_jobs_by_pk: {
+        __args: { id: jobId },
+        id: true,
+      },
+    });
+    return !!clip_render_jobs_by_pk;
   }
 
   public async finalizeClipUpload(
@@ -1880,29 +1928,37 @@ export class ClipsService {
       spec,
     );
 
-    const { insert_match_clips_one } = await this.hasura.mutation({
-      insert_match_clips_one: {
-        __args: {
-          object: {
-            ...(userSteamId ? { user_steam_id: userSteamId } : {}),
-            target_steam_id: targetSteamId,
-            match_map_id: row.match_map_id,
-            match_map_demo_id: row.match_map_demo_id ?? null,
-            title,
-            duration_ms: durationMs,
-            file: key,
-            thumbnail_url: thumbnailUrl,
-            kills_count: killsCount,
-            round,
-            visibility,
-            size: videoSize + thumbnailSize,
+    let clipId: string;
+    try {
+      const { insert_match_clips_one } = await this.hasura.mutation({
+        insert_match_clips_one: {
+          __args: {
+            object: {
+              ...(userSteamId ? { user_steam_id: userSteamId } : {}),
+              target_steam_id: targetSteamId,
+              match_map_id: row.match_map_id,
+              match_map_demo_id: row.match_map_demo_id ?? null,
+              title,
+              duration_ms: durationMs,
+              file: key,
+              thumbnail_url: thumbnailUrl,
+              kills_count: killsCount,
+              round,
+              visibility,
+              size: videoSize + thumbnailSize,
+            },
           },
+          id: true,
         },
-        id: true,
-      },
-    });
-    const clipId = insert_match_clips_one?.id;
-    if (!clipId) throw new Error("failed to insert match_clips row");
+      });
+      if (!insert_match_clips_one?.id) {
+        throw new Error("failed to insert match_clips row");
+      }
+      clipId = insert_match_clips_one.id;
+    } catch (error) {
+      await this.removeUnrecordedClipFiles(key, thumbnailKey);
+      throw error;
+    }
 
     await this.hasura.mutation({
       update_clip_render_jobs_by_pk: {

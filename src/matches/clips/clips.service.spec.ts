@@ -378,3 +378,118 @@ describe("ClipsService.removeDeletedFiles", () => {
     );
   });
 });
+
+// DEAFCS: an upload racing the deletion of its match (tournament delete)
+// must not leave files nothing records.
+describe("ClipsService uploads racing a match deletion", () => {
+  const JOB = {
+    id: "job-1",
+    user_steam_id: null,
+    match_map_id: "map-1",
+    match_map_demo_id: null,
+    spec: { segments: [] },
+    status: "uploading",
+  };
+
+  function make(options: {
+    jobAfterUpload?: boolean;
+    insert?: "ok" | "fails";
+    rowExists?: boolean;
+  }) {
+    const stored = new Set<string>();
+    const s3 = {
+      put: jest.fn(async (key: string) => {
+        stored.add(key);
+      }),
+      stat: jest.fn(async () => ({ size: 10 })),
+      has: jest.fn(async (key: string) => stored.has(key)),
+      remove: jest.fn(async (key: string) => stored.delete(key)),
+    };
+    let jobLookups = 0;
+    const hasura = {
+      query: jest.fn(async (query: any) => {
+        if (query.clip_render_jobs_by_pk) {
+          jobLookups++;
+          // The second lookup is the one after the upload.
+          const gone = jobLookups > 1 && options.jobAfterUpload === false;
+          return { clip_render_jobs_by_pk: gone ? null : JOB };
+        }
+        if (query.match_clips) {
+          return {
+            match_clips: options.rowExists ? [{ id: "clip-1" }] : [],
+          };
+        }
+        return {};
+      }),
+      mutation: jest.fn(async (mutation: any) => {
+        if (mutation.insert_match_clips_one) {
+          if (options.insert === "fails") {
+            throw new Error(
+              'insert or update on table "match_clips" violates foreign key constraint "match_clips_match_map_id_fkey"',
+            );
+          }
+          return { insert_match_clips_one: { id: "clip-1" } };
+        }
+        return {};
+      }),
+    };
+    const logger = { log: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    const service = new ClipsService(
+      logger as any,
+      hasura as any,
+      {} as any,
+      s3 as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+    jest.spyOn(service as any, "countKillsForSpec").mockResolvedValue(0);
+    jest.spyOn(service as any, "resolveClipRound").mockResolvedValue(null);
+    return { service, stored, hasura };
+  }
+
+  it("a poster frame uploaded after its render was deleted is removed", async () => {
+    const { service, stored } = make({ jobAfterUpload: false });
+
+    await expect(
+      service.uploadClipThumbnail("job-1", {} as any),
+    ).rejects.toThrow("clip render job-1 not found");
+    expect(stored.size).toBe(0);
+  });
+
+  it("a poster frame whose render is still there is kept", async () => {
+    const { service, stored } = make({});
+
+    await service.uploadClipThumbnail("job-1", {} as any);
+    expect([...stored]).toEqual(["clips/system/job-1.jpg"]);
+  });
+
+  it("a clip row that cannot land (its map was deleted) takes its uploaded files with it", async () => {
+    const { service, stored } = make({ insert: "fails" });
+    stored.add("clips/system/job-1.jpg");
+
+    await expect(
+      service.finalizeClipUpload("job-1", {} as any, 1000),
+    ).rejects.toThrow(/match_clips_match_map_id_fkey/);
+    expect(stored.size).toBe(0);
+  });
+
+  it("never removes files a clip row does point at, even when the insert answer was lost", async () => {
+    const { service, stored } = make({ insert: "fails", rowExists: true });
+
+    await expect(
+      service.finalizeClipUpload("job-1", {} as any, 1000),
+    ).rejects.toThrow();
+    expect([...stored]).toEqual(["clips/system/job-1.mp4"]);
+  });
+
+  it("a clip that lands keeps its files", async () => {
+    const { service, stored } = make({ insert: "ok" });
+
+    await expect(
+      service.finalizeClipUpload("job-1", {} as any, 1000),
+    ).resolves.toEqual({ clipId: "clip-1", file: "clips/system/job-1.mp4" });
+    expect([...stored]).toEqual(["clips/system/job-1.mp4"]);
+  });
+});
