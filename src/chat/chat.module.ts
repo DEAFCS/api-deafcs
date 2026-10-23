@@ -27,6 +27,7 @@ import { BullBoardModule } from "@bull-board/nestjs";
 import { ChatVideoQueues } from "./enums/ChatVideoQueues";
 import { ExpireChatVideoDraft } from "./jobs/ExpireChatVideoDraft";
 import { ExpireSentChatVideoMedia } from "./jobs/ExpireSentChatVideoMedia";
+import { ExpireChatAttachment } from "./jobs/ExpireChatAttachment";
 import { getQueuesProcessors } from "../utilities/QueueProcessors";
 
 @Module({
@@ -51,6 +52,7 @@ import { getQueuesProcessors } from "../utilities/QueueProcessors";
     ExpireChatVideoDraft,
     ExpireSentChatVideoMedia,
     AbortChatAttachmentUpload,
+    ExpireChatAttachment,
     ...getQueuesProcessors("ChatVideo"),
     loggerFactory(),
   ],
