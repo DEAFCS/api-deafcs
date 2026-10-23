@@ -13,6 +13,8 @@ jest.mock("./events", () => {
         "restoreRound",
         "techTimeout",
         "kill",
+        "leaver-timeout",
+        "abandoned",
       ].map((name) => [name, TestEvent]),
     ),
   };
@@ -787,6 +789,43 @@ describe("MatchEventsGateway match binding", () => {
         expect(processor.process).toHaveBeenCalledTimes(1);
       },
     );
+
+    // DEAFCS product rule: no leaver or abandon penalty once a match has ended.
+    describe.each(["leaver-timeout", "abandoned"])("%s penalty", (name) => {
+      it("is accepted from the host while the match is live", async () => {
+        const { gateway, processor } = makeGateway();
+
+        await gateway.handleMatchEvent(
+          authedSocket(SERVER_A),
+          event({ messageId: "m1", name, data: { steam_id: "player-1" } }),
+        );
+
+        expect(processor.process).toHaveBeenCalledTimes(1);
+      });
+
+      it.each(["Finished", "Surrendered", "Canceled", "Forfeit", "Tie"])(
+        "is refused and acknowledged from the last host after the match ends (%s)",
+        async (status) => {
+          const { gateway, matches, processor } = makeGateway();
+
+          await gateway.handleMatchEvent(
+            authedSocket(SERVER_A),
+            event({ messageId: "m1" }),
+          );
+
+          endMatch(matches, status);
+
+          await expect(
+            gateway.handleMatchEvent(
+              authedSocket(SERVER_A),
+              event({ messageId: "m2", name, data: { steam_id: "player-1" } }),
+            ),
+          ).resolves.toBe("m2");
+
+          expect(processor.process).toHaveBeenCalledTimes(1);
+        },
+      );
+    });
 
     it("keeps refusing result changes on a connection whose ended binding is cached", async () => {
       const { gateway, matches, processor, matchLookups } = makeGateway();
