@@ -1,6 +1,12 @@
 import { ChatService } from "./chat.service";
 import { ChatLobbyType } from "./enums/ChatLobbyTypes";
 import { ExpireChatAttachmentJobName } from "./enums/ChatVideoQueues";
+import { Logger } from "@nestjs/common";
+import { ModuleRef } from "@nestjs/core";
+import { Test } from "@nestjs/testing";
+import { getQueuesProcessors } from "../utilities/QueueProcessors";
+import { ExpireChatAttachment } from "./jobs/ExpireChatAttachment";
+import { ExpireChatVideoDraft } from "./jobs/ExpireChatVideoDraft";
 import { ExpireSentChatVideoMedia } from "./jobs/ExpireSentChatVideoMedia";
 
 // Approved retention: Organizer Chat 90 days, Team Chat 30 days. Every other
@@ -280,30 +286,47 @@ describe("chat message retention", () => {
       ).rejects.toThrow("unable to remove expired chat attachment");
     });
 
-    it("the queue worker routes attachment jobs to the attachment cleanup", async () => {
-      const chat = {
-        cleanupExpiredChatAttachment: jest.fn(),
-        cleanupExpiredSentVideoMedia: jest.fn(),
-      };
-      const worker = new ExpireSentChatVideoMedia(chat as any);
+    // Jobs are dispatched by name to the class of that name. Before
+    // ExpireChatAttachment existed, this job threw "Nest could not find given
+    // element" and no attachment file was ever removed.
+    it("an ExpireChatAttachment job reaches the attachment cleanup and removes that attachment", async () => {
+      const moduleRef = await Test.createTestingModule({
+        providers: [
+          { provide: ChatService, useValue: service },
+          ExpireChatAttachment,
+          ExpireChatVideoDraft,
+          ExpireSentChatVideoMedia,
+        ],
+      }).compile();
+      const processors = getQueuesProcessors("ChatVideo") as Array<
+        new (logger: Logger, moduleRef: ModuleRef) => {
+          process(job: unknown): Promise<void>;
+        }
+      >;
+      const worker = new processors[0](
+        { error: jest.fn() } as unknown as Logger,
+        moduleRef.get(ModuleRef),
+      );
+      const cleanupSentVideo = jest
+        .spyOn(service, "cleanupExpiredSentVideoMedia")
+        .mockResolvedValue(undefined);
+      redis.get.mockResolvedValue("0123456789abcdef");
+
       await worker.process({
         name: ExpireChatAttachmentJobName,
         data: { attachmentId: "0123456789abcdef", objectKey: upload },
-      } as any);
-      expect(chat.cleanupExpiredChatAttachment).toHaveBeenCalledWith(
-        "0123456789abcdef",
-        upload,
-      );
-      expect(chat.cleanupExpiredSentVideoMedia).not.toHaveBeenCalled();
+      });
+
+      expect(s3.remove).toHaveBeenCalledWith(upload);
+      expect(redis.del).toHaveBeenCalledWith("chat_attachment:0123456789abcdef");
+      expect(cleanupSentVideo).not.toHaveBeenCalled();
 
       await worker.process({
         name: "ExpireSentChatVideoMedia",
         data: { mediaId: "m", objectKey: "chat-video/m.mp4" },
-      } as any);
-      expect(chat.cleanupExpiredSentVideoMedia).toHaveBeenCalledWith(
-        "m",
-        "chat-video/m.mp4",
-      );
+      });
+      expect(cleanupSentVideo).toHaveBeenCalledWith("m", "chat-video/m.mp4");
+      expect(s3.remove).toHaveBeenCalledTimes(1);
     });
   });
 });
