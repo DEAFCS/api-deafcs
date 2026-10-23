@@ -803,10 +803,12 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
     const detachCall = client.query.mock.calls.find((call) =>
       /WITH owned_brackets/i.test(call[0]),
     );
-    // Cancelling keeps matches with demos or clips linked to their bracket.
+    // Cancelling keeps every played match linked to its bracket (Live, a
+    // result, rounds, stats, demos or clips), the rule the reset uses.
     expect(detachCall[1]).toEqual([tournamentId, true]);
-    expect(detachCall[0]).toMatch(/public\.match_map_demos d/i);
-    expect(detachCall[0]).toMatch(/public\.match_clips c/i);
+    expect(detachCall[0]).toMatch(
+      /\$2::boolean AND public\.match_has_played_data\(tb\.match_id\)/i,
+    );
     expect(client.query).toHaveBeenCalledWith(
       expect.stringMatching(/^\s*DELETE FROM public\.matches/i),
       [["match-1"]],
@@ -837,7 +839,7 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
 
   // A match delete silently takes its demo and clip rows (match_map_demos
   // .match_id is ON DELETE CASCADE), so nothing but this check stops one.
-  it("locks the matches and their maps, then re-checks demos and clips, before the delete", async () => {
+  it("locks the matches and their maps, then re-checks played data, before the delete", async () => {
     configureMatchRows(["match-1"]);
 
     await controller.tournament_events({
@@ -859,13 +861,12 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
     expect(lockMaps).toBeLessThan(check);
     expect(check).toBeLessThan(deleteMatches);
     expect(client.query.mock.calls[check][0]).toMatch(
-      /public\.match_map_demos/i,
+      /public\.match_has_played_data\(id\)/i,
     );
-    expect(client.query.mock.calls[check][0]).toMatch(/public\.match_clips/i);
     expect(client.query.mock.calls[check][1]).toEqual([["match-1"]]);
   });
 
-  it("rolls back when a match gained demos or clips during the cancel, so the retry keeps it", async () => {
+  it("rolls back when a match gained played data during the cancel, so the retry keeps it", async () => {
     configureMatchRows(["match-1"], ["match-1"], true);
 
     await expect(
@@ -875,7 +876,7 @@ describe("TournamentsController tournament_events (Cancelled)", () => {
         new: { id: tournamentId, status: "Cancelled" },
       } as any),
     ).rejects.toThrow(
-      "a cancelled tournament's match gained demos or clips, retrying",
+      "a cancelled tournament's match gained played data, retrying",
     );
 
     expect(queryIndex(/^\s*DELETE FROM public\.matches/i)).toBe(-1);

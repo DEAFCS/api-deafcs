@@ -15,7 +15,7 @@ const fakeS3 = (
       options.stuck?.includes(key) ? false : stored.delete(key),
     ),
     has: jest.fn(async (key: string) => stored.has(key)),
-    removePrefix: jest.fn(async (prefix: string) => {
+    removePrefixStrictly: jest.fn(async (prefix: string) => {
       if (options.failingPrefixes?.includes(prefix)) {
         throw new Error("minio unavailable");
       }
@@ -91,7 +91,7 @@ describe("removeDeletedFiles", () => {
     });
 
     expect(s3.remove).not.toHaveBeenCalled();
-    expect(s3.removePrefix).not.toHaveBeenCalled();
+    expect(s3.removePrefixStrictly).not.toHaveBeenCalled();
     expect(s3.stored.size).toBe(2);
   });
 });

@@ -214,7 +214,7 @@ describe("ClipsService clip deletion", () => {
         stuck.includes(key) ? false : objects.delete(key),
       ),
       has: jest.fn(async (key: string) => objects.has(key)),
-      removePrefix: jest.fn(),
+      removePrefixStrictly: jest.fn(),
     };
     const service = new ClipsService(
       { log: jest.fn(), warn: jest.fn(), error: jest.fn() } as any,
@@ -241,7 +241,7 @@ describe("ClipsService clip deletion", () => {
     expect(objects.has("clips/system/job-1.jpg")).toBe(false);
     // Only the exact keys: job-10 shares the job-1 prefix.
     expect(objects.has("clips/system/job-10.mp4")).toBe(true);
-    expect(s3.removePrefix).not.toHaveBeenCalled();
+    expect(s3.removePrefixStrictly).not.toHaveBeenCalled();
     expect(hasura.mutation).toHaveBeenCalledWith({
       delete_match_clips_by_pk: { __args: { id: "clip-1" }, id: true },
     });
@@ -315,7 +315,7 @@ describe("ClipsService.removeDeletedFiles", () => {
         stuck.includes(key) ? false : stored.delete(key),
       ),
       has: jest.fn(async (key: string) => stored.has(key)),
-      removePrefix: jest.fn(),
+      removePrefixStrictly: jest.fn(),
     };
     const batchQueue = {
       add: queueFails

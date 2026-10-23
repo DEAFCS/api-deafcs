@@ -13,7 +13,7 @@ const flakyS3 = (objects: string[], recoversAfter: number) => {
       down() ? false : stored.delete(key),
     ),
     has: jest.fn(async (key: string) => stored.has(key)),
-    removePrefix: jest.fn(async (prefix: string) => {
+    removePrefixStrictly: jest.fn(async (prefix: string) => {
       if (down()) {
         throw new Error("minio unavailable");
       }

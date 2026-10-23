@@ -246,13 +246,14 @@ export class S3ScanService {
       };
     }
 
-    const bytesFreed = targetKeys.reduce(
+    const removed = new Set(await this.s3.removeKeys(targetKeys));
+    const deleted = removed.size;
+    const bytesFreed = [...removed].reduce(
       (sum, key) => sum + (orphanSizes.get(key) ?? 0),
       0,
     );
-    const deleted = await this.s3.removeKeys(targetKeys);
 
-    result.orphans = result.orphans.filter((o) => !targets.has(o.key));
+    result.orphans = result.orphans.filter((o) => !removed.has(o.key));
     result.orphan_objects = result.orphans.length;
     result.orphan_bytes = result.orphans.reduce((sum, o) => sum + o.size, 0);
     await this.persistResult(result);

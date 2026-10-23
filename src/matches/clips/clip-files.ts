@@ -52,7 +52,7 @@ export async function removeDeletedFiles(
       continue;
     }
     try {
-      await s3.removePrefix(prefix);
+      await s3.removePrefixStrictly(prefix);
     } catch {
       left.prefixes.push(prefix);
     }
