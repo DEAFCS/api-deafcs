@@ -109,7 +109,8 @@ export class TournamentsController {
     // NULL) rather than left in place for an FK cascade, then the matches
     // themselves are deleted -- the same atomic helper deleteTournament uses.
     // DEAFCS: cancelling deletes no demo, clip or thumbnail (upstream purged
-    // them). A match with demos or clips stays linked to its bracket, so only
+    // them). A played match (public.match_has_played_data: Live or a result,
+    // rounds, stats, demos or clips) stays linked to its bracket, so only
     // deleting the tournament removes it and its files; normal retention
     // applies until then. Unplayed matches own no files, so nothing is purged.
     if (status === "Cancelled" && data.old.status !== "Cancelled") {
@@ -1156,17 +1157,7 @@ export class TournamentsController {
          WHERE ts.tournament_id = $1
            AND tb.match_id IS NOT NULL
            AND NOT (
-             $2::boolean AND (
-               EXISTS (
-                 SELECT 1 FROM public.match_map_demos d
-                 WHERE d.match_id = tb.match_id
-               )
-               OR EXISTS (
-                 SELECT 1 FROM public.match_clips c
-                 JOIN public.match_maps mm ON mm.id = c.match_map_id
-                 WHERE mm.match_id = tb.match_id
-               )
-             )
+             $2::boolean AND public.match_has_played_data(tb.match_id)
            )
          FOR UPDATE
        ),
@@ -1218,21 +1209,18 @@ export class TournamentsController {
       [matchIds],
     );
 
+    // Same rule as Reset Tournament Match and league season deletes: a match
+    // that went Live, scored or got a demo or clip between the detach and
+    // these locks rolls the cancel back, and the retry keeps it.
     if (keepPlayed) {
       const played = await client.query<{ played: boolean }>(
-        `SELECT EXISTS (
-                  SELECT 1 FROM public.match_map_demos
-                   WHERE match_id = ANY($1::uuid[])
-                ) OR EXISTS (
-                  SELECT 1 FROM public.match_clips c
-                    JOIN public.match_maps mm ON mm.id = c.match_map_id
-                   WHERE mm.match_id = ANY($1::uuid[])
-                ) AS played`,
+        `SELECT COALESCE(bool_or(public.match_has_played_data(id)), false) AS played
+           FROM unnest($1::uuid[]) AS id`,
         [matchIds],
       );
       if (played.rows[0]?.played) {
         throw Error(
-          "a cancelled tournament's match gained demos or clips, retrying",
+          "a cancelled tournament's match gained played data, retrying",
         );
       }
     }
