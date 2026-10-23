@@ -1942,6 +1942,33 @@ describe("read-side views and aggregations (SQL-driven)", () => {
           // correct row versions -- exactly mirroring both production's
           // only sanctioned path for removing a league-owned tournament and
           // hasura/tests/leagues/cleanup.sql's own teardown convention.
+          //
+          // DEAFCS: that trigger now refuses a season with played matches
+          // (deleting them would orphan their demo and clip files), and this
+          // test's match was played. Like cleanup.sql, the test's own match
+          // goes first: detached from its bracket, then deleted, the way
+          // deleting a tournament removes its matches.
+          await postgres.transaction(async (client) => {
+            const { rows } = await client.query<{ match_id: string }>(
+              `WITH owned AS (
+                 SELECT id, match_id FROM tournament_brackets
+                 WHERE tournament_stage_id = ANY($1::uuid[])
+                   AND match_id IS NOT NULL
+                 FOR UPDATE
+               ),
+               detached AS (
+                 UPDATE tournament_brackets tb SET match_id = NULL
+                 FROM owned WHERE tb.id = owned.id
+                 RETURNING owned.match_id
+               )
+               SELECT DISTINCT match_id FROM detached`,
+              [leagueTournament.stageIds],
+            );
+            await client.query(
+              "DELETE FROM matches WHERE id = ANY($1::uuid[])",
+              [rows.map((row) => row.match_id)],
+            );
+          });
           await postgres.query("DELETE FROM league_seasons WHERE id = $1", [
             leagueTournament.leagueSeasonId,
           ]);

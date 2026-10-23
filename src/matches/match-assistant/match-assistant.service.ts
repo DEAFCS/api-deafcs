@@ -523,8 +523,9 @@ export class MatchAssistantService {
       },
     });
 
-    const onDemandOnly =
-      MatchAssistantService.ON_DEMAND_ONLY_SOURCES.includes(match.source);
+    const onDemandOnly = MatchAssistantService.ON_DEMAND_ONLY_SOURCES.includes(
+      match.source,
+    );
 
     if (!onDemandOnly && match.options.prefer_dedicated_server) {
       try {
@@ -1689,7 +1690,14 @@ export class MatchAssistantService {
     );
   }
 
-  public async stopOnDemandServer(matchId: string, remove = false) {
+  // DEAFCS: with createdBefore (when the change that removed the server
+  // happened), a graceful stop leaves alone any Job created after it: that is
+  // the match's next server under the same Job name, not the one removed.
+  public async stopOnDemandServer(
+    matchId: string,
+    remove = false,
+    createdBefore?: string,
+  ) {
     this.logger.log(`[${matchId}] stopping match servers`);
 
     try {
@@ -1703,7 +1711,12 @@ export class MatchAssistantService {
       // candidate name is stopped, not just the first.
       for (const jobName of await this.getMatchServerJobIds(matchId)) {
         if (!remove) {
-          await this.signalOnDemandServerStop(matchId, jobName);
+          await this.signalOnDemandServerStop(
+            matchId,
+            jobName,
+            undefined,
+            createdBefore,
+          );
           continue;
         }
 
@@ -2562,6 +2575,20 @@ export class MatchAssistantService {
     return error?.code?.toString() === "409";
   }
 
+  // Hasura's created_at is UTC and may come without a zone.
+  private static isCreatedAfter(job: V1Job, createdBefore?: string) {
+    const created = job.metadata?.creationTimestamp;
+    if (!createdBefore || !created) {
+      return false;
+    }
+    const since = new Date(
+      /[zZ]|[+-]\d\d:?\d\d$/.test(createdBefore)
+        ? createdBefore
+        : `${createdBefore}Z`,
+    ).getTime();
+    return !Number.isNaN(since) && new Date(created).getTime() > since;
+  }
+
   private static isOwnedBy(pod: V1Pod, jobUid?: string) {
     return (
       !jobUid ||
@@ -2593,6 +2620,7 @@ export class MatchAssistantService {
     matchId: string,
     jobName: string,
     jobUid?: string,
+    createdBefore?: string,
   ) {
     const kc = new KubeConfig();
     kc.loadFromDefault();
@@ -2607,6 +2635,13 @@ export class MatchAssistantService {
       MatchAssistantService.isJobFinished(job) ||
       (jobUid && job.metadata?.uid !== jobUid)
     ) {
+      return;
+    }
+
+    if (MatchAssistantService.isCreatedAfter(job, createdBefore)) {
+      this.logger.log(
+        `[${matchId}] ${jobName} started after the server was removed; leaving it running`,
+      );
       return;
     }
 

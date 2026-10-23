@@ -11,6 +11,9 @@ import {
 // a reported result unwinds every downstream bracket (slot clearing, match
 // deletion, unfinishing), restores the source match, and rolls a finished
 // tournament back to Live with its auto trophies revoked.
+// DEAFCS: a reset only deletes downstream matches that are genuinely
+// unplayed; once a later match has been played (result, statistics, demos or
+// clips) the reset is refused and nothing changes.
 describe("tournament match reset (SQL-driven)", () => {
   let db: SqlTestDb;
   let postgres: PostgresService;
@@ -50,6 +53,21 @@ describe("tournament match reset (SQL-driven)", () => {
     expect(await tfx.tournamentStatus(t.id)).toBe("Finished");
     return t;
   };
+
+  // Both semifinals won; the final is scheduled but not played yet.
+  const semisPlayedCup = async () => {
+    const t = await tfx.launch(SE4, 4);
+    await tfx.playRound(t.stageIds[0], 1);
+    const final = (await tfx.getBrackets(t.stageIds[0])).find(
+      (b) => b.round === 2,
+    )!;
+    expect(final.match_id).not.toBeNull();
+    expect(final.finished).toBe(false);
+    return t;
+  };
+
+  const PLAYED_DOWNSTREAM =
+    "A later match in this bracket has already been played, so this match cannot be reset.";
 
   const resetMatch = (
     matchId: string,
@@ -95,8 +113,8 @@ describe("tournament match reset (SQL-driven)", () => {
     expect(preview[1]).toMatchObject({ is_source: false, will_delete_match: true });
   });
 
-  it("resetting a semifinal unwinds the final and reopens the source match", async () => {
-    const t = await playedOutCup();
+  it("resetting a semifinal unwinds the unplayed final and reopens the source match", async () => {
+    const t = await semisPlayedCup();
     let brackets = await tfx.getBrackets(t.stageIds[0]);
     const semi1 = brackets.find((b) => b.round === 1 && b.match_number === 1)!;
     const semi2 = brackets.find((b) => b.round === 1 && b.match_number === 2)!;
@@ -140,10 +158,11 @@ describe("tournament match reset (SQL-driven)", () => {
       ),
     ).toBeGreaterThan(0);
 
-    const semi = (await tfx.getBrackets(t.stageIds[0])).find(
-      (b) => b.round === 1,
+    // The final has nothing downstream, so resetting it is allowed.
+    const final = (await tfx.getBrackets(t.stageIds[0])).find(
+      (b) => b.round === 2,
     )!;
-    await resetMatch(semi.match_id!);
+    await resetMatch(final.match_id!);
 
     expect(await tfx.tournamentStatus(t.id)).toBe("Live");
     const [{ c }] = await postgres.query<Array<{ c: string }>>(
@@ -154,7 +173,7 @@ describe("tournament match reset (SQL-driven)", () => {
   });
 
   it("resetting with a corrected winner repropagates the bracket", async () => {
-    const t = await playedOutCup();
+    const t = await semisPlayedCup();
     let brackets = await tfx.getBrackets(t.stageIds[0]);
     const semi1 = brackets.find((b) => b.round === 1 && b.match_number === 1)!;
     // The team wrongly eliminated: semifinal 1's slot-2 team.
@@ -189,7 +208,7 @@ describe("tournament match reset (SQL-driven)", () => {
   });
 
   it("reset to Scheduled applies the provided schedule", async () => {
-    const t = await playedOutCup();
+    const t = await semisPlayedCup();
     const semi = (await tfx.getBrackets(t.stageIds[0])).find(
       (b) => b.round === 1 && b.match_number === 1,
     )!;
@@ -205,6 +224,181 @@ describe("tournament match reset (SQL-driven)", () => {
     expect(source.status).toBe("Scheduled");
     expect(new Date(source.scheduled_at).toISOString()).toBe(when);
     expect(source.winning_lineup_id).toBeNull();
+  });
+
+  // A map on the given match with a demo, a clip, or both.
+  const addMapWith = async (
+    matchId: string,
+    what: { demo?: boolean; clip?: boolean },
+  ) => {
+    const [map] = await postgres.query<Array<{ id: string }>>(
+      `INSERT INTO match_maps (match_id, map_id, "order")
+       SELECT $1, id, 9 FROM maps ORDER BY name LIMIT 1 RETURNING id`,
+      [matchId],
+    );
+    if (what.demo) {
+      await postgres.query(
+        `INSERT INTO match_map_demos (file, match_id, match_map_id, size)
+         VALUES ($1, $2, $3, 1)`,
+        [`demos/${matchId}/9.dem`, matchId, map.id],
+      );
+    }
+    if (what.clip) {
+      await postgres.query(
+        `INSERT INTO match_clips (match_map_id, file) VALUES ($1, $2)`,
+        [map.id, `clips/system/${matchId}.mp4`],
+      );
+    }
+    return map.id;
+  };
+
+  const matchRow = async (matchId: string) => {
+    const [row] = await postgres.query<
+      Array<{ status: string; winning_lineup_id: string | null }>
+    >("SELECT status, winning_lineup_id FROM matches WHERE id = $1", [matchId]);
+    return row;
+  };
+
+  describe("refused once a later match has been played", () => {
+    it("after the final was played: refused, and nothing changes", async () => {
+      const t = await playedOutCup();
+      const before = await tfx.getBrackets(t.stageIds[0]);
+      const semi = before.find((b) => b.round === 1 && b.match_number === 1)!;
+      const final = before.find((b) => b.round === 2)!;
+      const finalBefore = await matchRow(final.match_id!);
+
+      await expect(resetMatch(semi.match_id!)).rejects.toThrow(
+        PLAYED_DOWNSTREAM,
+      );
+
+      expect(await tfx.getBrackets(t.stageIds[0])).toEqual(before);
+      expect(await matchRow(final.match_id!)).toEqual(finalBefore);
+      expect((await matchRow(semi.match_id!)).status).toBe("Finished");
+      expect(await tfx.tournamentStatus(t.id)).toBe("Finished");
+    });
+
+    it.each([
+      ["a demo", { demo: true }],
+      ["a clip", { clip: true }],
+    ])(
+      "when the unplayed final already has %s: refused, and it stays",
+      async (_label, what) => {
+        const t = await semisPlayedCup();
+        const brackets = await tfx.getBrackets(t.stageIds[0]);
+        const semi = brackets.find((b) => b.round === 1)!;
+        const final = brackets.find((b) => b.round === 2)!;
+        await addMapWith(final.match_id!, what);
+
+        await expect(resetMatch(semi.match_id!)).rejects.toThrow(
+          PLAYED_DOWNSTREAM,
+        );
+        expect(await matchRow(final.match_id!)).toBeDefined();
+        const [{ c }] = await postgres.query<Array<{ c: string }>>(
+          `SELECT (SELECT count(*) FROM match_map_demos WHERE match_id = $1)
+                + (SELECT count(*) FROM match_clips c
+                     JOIN match_maps mm ON mm.id = c.match_map_id
+                    WHERE mm.match_id = $1) AS c`,
+          [final.match_id],
+        );
+        expect(Number(c)).toBe(1);
+      },
+    );
+
+    // The reset locks the downstream matches and maps before checking, so a
+    // demo still being written waits it out instead of being deleted under it.
+    it("a demo written during the reset makes the reset wait, then refuses it", async () => {
+      const t = await semisPlayedCup();
+      const brackets = await tfx.getBrackets(t.stageIds[0]);
+      const semi = brackets.find((b) => b.round === 1)!;
+      const final = brackets.find((b) => b.round === 2)!;
+      const mapId = await addMapWith(final.match_id!, {});
+
+      await postgres.transaction(async (upload) => {
+        await upload.query(
+          `INSERT INTO match_map_demos (file, match_id, match_map_id, size)
+           VALUES ($1, $2, $3, 1)`,
+          [`demos/${final.match_id}/9.dem`, final.match_id, mapId],
+        );
+        // Still uncommitted: the reset cannot take its locks.
+        await expect(
+          postgres.transaction(async (reset) => {
+            await reset.query(`SET LOCAL lock_timeout = '300ms'`);
+            await reset.query(
+              "SELECT * FROM reset_tournament_match($1, NULL, 'WaitingForCheckIn', NULL)",
+              [semi.match_id],
+            );
+          }),
+        ).rejects.toThrow(/lock timeout/i);
+      });
+
+      // Committed: the reset sees it and refuses.
+      await expect(resetMatch(semi.match_id!)).rejects.toThrow(
+        PLAYED_DOWNSTREAM,
+      );
+      expect(await matchRow(final.match_id!)).toBeDefined();
+    });
+
+    // The source match is reset, never deleted: its own demo and clip stay.
+    it("resetting a played semifinal keeps its own demo and clip", async () => {
+      const t = await semisPlayedCup();
+      const semi = (await tfx.getBrackets(t.stageIds[0])).find(
+        (b) => b.round === 1,
+      )!;
+      await addMapWith(semi.match_id!, { demo: true, clip: true });
+
+      await resetMatch(semi.match_id!);
+
+      expect((await matchRow(semi.match_id!)).status).toBe("WaitingForCheckIn");
+      const [{ d, c }] = await postgres.query<Array<{ d: string; c: string }>>(
+        `SELECT (SELECT count(*) FROM match_map_demos WHERE match_id = $1) AS d,
+                (SELECT count(*) FROM match_clips c
+                   JOIN match_maps mm ON mm.id = c.match_map_id
+                  WHERE mm.match_id = $1) AS c`,
+        [semi.match_id],
+      );
+      expect(Number(d)).toBe(1);
+      expect(Number(c)).toBe(1);
+    });
+
+    it("match_has_played_data: results, start, demos and clips count; a fresh match does not", async () => {
+      const t = await semisPlayedCup();
+      const final = (await tfx.getBrackets(t.stageIds[0])).find(
+        (b) => b.round === 2,
+      )!;
+      const played = async () =>
+        (
+          await postgres.query<Array<{ p: boolean }>>(
+            "SELECT public.match_has_played_data($1) AS p",
+            [final.match_id],
+          )
+        )[0].p;
+
+      expect(await played()).toBe(false);
+
+      await postgres.query(
+        "UPDATE matches SET started_at = now() WHERE id = $1",
+        [final.match_id],
+      );
+      expect(await played()).toBe(true);
+      await postgres.query(
+        "UPDATE matches SET started_at = NULL WHERE id = $1",
+        [final.match_id],
+      );
+      expect(await played()).toBe(false);
+
+      const mapId = await addMapWith(final.match_id!, { clip: true });
+      expect(await played()).toBe(true);
+      await postgres.query("DELETE FROM match_clips WHERE match_map_id = $1", [
+        mapId,
+      ]);
+      expect(await played()).toBe(false);
+      await postgres.query(
+        `INSERT INTO match_map_demos (file, match_id, match_map_id, size)
+         VALUES ('demos/x/9.dem', $1, $2, 1)`,
+        [final.match_id, mapId],
+      );
+      expect(await played()).toBe(true);
+    });
   });
 
   // 22 teams in a 32-slot bracket: ten round-1 byes are pruned and their seeds
@@ -327,38 +521,21 @@ describe("tournament match reset (SQL-driven)", () => {
       expect(after.match_id).not.toBeNull();
     });
 
-    it("a deep reset after full playout keeps the bye seat and replays to a finish", async () => {
-      const { t, stage, m5, feederMatchId } = await launchAndPlayRoundOne();
+    // DEAFCS: four played matches downstream (R2M5 -> R3 -> R4 -> final), so
+    // the reset is refused rather than deleting them.
+    it("a deep reset after full playout is refused and keeps the bracket as played", async () => {
+      const { t, stage, feederMatchId } = await launchAndPlayRoundOne();
       for (let round = 2; round <= 5; round++) {
         await tfx.playRound(stage, round);
       }
       expect(await tfx.tournamentStatus(t.id)).toBe("Finished");
+      const before = await tfx.getBrackets(stage);
 
-      // Feeder -> R2M5 -> R3 -> R4 -> final: four downstream matches deleted.
-      const deleted = await resetMatch(feederMatchId);
-      expect(deleted.length).toBe(4);
-      expect(await tfx.tournamentStatus(t.id)).toBe("Live");
-
-      const after = await getRoundTwoMatchFive(stage);
-      expect(after.tournament_team_id_1).toBe(m5.tournament_team_id_1);
-      expect(after.tournament_team_id_2).toBeNull();
-
-      // The sibling round-2 winner outside the chain keeps its round-3 seat.
-      const [parent] = await postgres.query<
-        Array<{
-          tournament_team_id_1: string | null;
-          tournament_team_id_2: string | null;
-        }>
-      >(
-        `SELECT tournament_team_id_1, tournament_team_id_2 FROM tournament_brackets
-         WHERE id = (SELECT parent_bracket_id FROM tournament_brackets WHERE id = $1)`,
-        [m5.id],
+      await expect(resetMatch(feederMatchId)).rejects.toThrow(
+        PLAYED_DOWNSTREAM,
       );
-      expect(parent.tournament_team_id_1).toBeNull();
-      expect(parent.tournament_team_id_2).not.toBeNull();
 
-      await tfx.winMatch(feederMatchId);
-      await sweep(stage);
+      expect(await tfx.getBrackets(stage)).toEqual(before);
       expect(await tfx.tournamentStatus(t.id)).toBe("Finished");
       const [{ c }] = await postgres.query<Array<{ c: string }>>(
         "SELECT count(*) AS c FROM tournament_trophies WHERE tournament_id = $1",
@@ -509,7 +686,29 @@ describe("tournament match reset (SQL-driven)", () => {
       expect(await tfx.tournamentStatus(t.id)).toBe("Finished");
     });
 
-    it("resetting the WB final unwinds the grand final and the LB final drop", async () => {
+    it("resetting the WB final is refused once the LB final has been played", async () => {
+      const t = await tfx.launch(DE4, 4);
+      const stage = t.stageIds[0];
+
+      const wbR1 = await getWbRoundOne(stage);
+      await tfx.winMatch(wbR1[0].match_id!);
+      await tfx.winMatch(wbR1[1].match_id!);
+      const lbR1 = await getDe(stage, "LB", 1);
+      await tfx.winMatch(lbR1.match_id!);
+      const wbFinal = await getDe(stage, "WB", 2);
+      await tfx.winMatch(wbFinal.match_id!);
+      await tfx.winMatch((await getDe(stage, "LB", 2)).match_id!);
+
+      const gfBefore = await getDe(stage, "WB", 3);
+      expect(gfBefore.match_id).not.toBeNull();
+
+      await expect(resetMatch(wbFinal.match_id!)).rejects.toThrow(
+        PLAYED_DOWNSTREAM,
+      );
+      expect(await getDe(stage, "WB", 3)).toEqual(gfBefore);
+    });
+
+    it("resetting the WB final unwinds the unplayed LB final and the grand final seat", async () => {
       const t = await tfx.launch(DE4, 4);
       const stage = t.stageIds[0];
 
@@ -522,18 +721,18 @@ describe("tournament match reset (SQL-driven)", () => {
       await tfx.winMatch(wbFinal.match_id!);
 
       // WB final loser owns LB final slot 1; the LB r1 winner keeps slot 2.
+      // The LB final is scheduled but not played.
       const lbFinalBefore = await getDe(stage, "LB", 2);
       expect(lbFinalBefore.tournament_team_id_1).toBe(wbFinal.tournament_team_id_2);
       expect(lbFinalBefore.tournament_team_id_2).toBe(lbR1.tournament_team_id_1);
-      await tfx.winMatch(lbFinalBefore.match_id!);
+      expect(lbFinalBefore.match_id).not.toBeNull();
 
       const gfBefore = await getDe(stage, "WB", 3);
       expect(gfBefore.tournament_team_id_1).toBe(wbFinal.tournament_team_id_1);
-      expect(gfBefore.tournament_team_id_2).toBe(wbFinal.tournament_team_id_2);
-      expect(gfBefore.match_id).not.toBeNull();
+      expect(gfBefore.match_id).toBeNull();
 
       const deleted = await resetMatch(wbFinal.match_id!);
-      expect(deleted.length).toBe(2); // LB final + grand final
+      expect(deleted.length).toBe(1); // the unplayed LB final
 
       const gf = await getDe(stage, "WB", 3);
       const lbFinal = await getDe(stage, "LB", 2);

@@ -1,8 +1,10 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { PostgresService } from "src/postgres/postgres.service";
 import { MatchAssistantService } from "../match-assistant/match-assistant.service";
+import { GameStreamerService } from "../game-streamer/game-streamer.service";
 import { isRoleAbove } from "src/utilities/isRoleAbove";
 import { e_player_roles_enum } from "generated";
+import { isPreMatchRecoveryStaff } from "./pre-match-recovery-staff";
 
 type KeyValue = string | KeyValues;
 type KeyValues = Array<[string, KeyValue]>;
@@ -105,12 +107,11 @@ export class MatchRecoveryService {
     "Paused",
   ];
 
-  public static readonly RESTARTABLE_STATUSES = [
-    "WaitingForCheckIn",
-    "Veto",
-    "WaitingForServer",
-    "Live",
-  ];
+  // DEAFCS: upstream also restarts WaitingForCheckIn, Veto and Canceled
+  // matches. Going back to check-in from Veto would re-run a region veto over
+  // its old picks, and leaving Canceled deletes a vetoed match's maps. Those
+  // are canceled and started again the usual way.
+  public static readonly RESTARTABLE_STATUSES = ["WaitingForServer", "Live"];
 
   // The game server's MatchOptions.ExpectedPlayerCount: it refuses a restore
   // until this many players are in, and benched substitutes don't count.
@@ -132,6 +133,7 @@ export class MatchRecoveryService {
     private readonly logger: Logger,
     private readonly postgres: PostgresService,
     private readonly matchAssistant: MatchAssistantService,
+    private readonly gameStreamer: GameStreamerService,
   ) {}
 
   public async getRestoreRounds(
@@ -287,37 +289,51 @@ export class MatchRecoveryService {
     return { success: true };
   }
 
-  // Cancel, then reopen check-in: what an organizer does by hand with Cancel
-  // and Start, in one step. Leaving Canceled clears a map veto; a map that was
-  // still being played is put back to the start, or the next server would
+  // Back to check-in on a new server. A map that was still being played is put
+  // back to the start (its rounds only soft-deleted), or the next server would
   // offer to restore its old rounds.
-  public async restartMatch(matchId: string) {
+  //
+  // DEAFCS: one status change, straight to WaitingForCheckIn. Upstream goes
+  // through Canceled, and leaving Canceled clears a map veto by deleting every
+  // map: a finished map's stats go with it, a map with a demo fails the whole
+  // restart, and the two match_events (Canceled, then WaitingForCheckIn) can be
+  // handled in either order. Without the Canceled step the veto, the maps, the
+  // finished maps' stats and demos stay, and no Canceled side effect runs (no
+  // ELO run, no matchmaking or Discord cleanup). What Canceled did that a
+  // restart still needs is done here: the on-demand server drains like an
+  // ended match's (tau_matches), and the livestream stops.
+  public async restartMatch(matchId: string, viewer: RecoveryViewer) {
     const match = await this.getMatch(matchId);
 
     if (match.source && match.source !== "5stack") {
       throw Error("only matches played on 5stack servers can be restarted");
     }
 
-    const canceled = match.status === "Canceled";
-
-    if (canceled && match.winning_lineup_id) {
-      throw Error("this match already has a result");
-    }
-
-    if (
-      !canceled &&
-      !MatchRecoveryService.RESTARTABLE_STATUSES.includes(match.status)
-    ) {
+    if (!MatchRecoveryService.RESTARTABLE_STATUSES.includes(match.status)) {
       throw Error(`a ${match.status} match can't be restarted`);
     }
 
+    let serverId: string | null = null;
+
     await this.postgres.transaction(async (client) => {
-      if (!canceled) {
-        await client.query(
-          "UPDATE matches SET status = 'Canceled' WHERE id = $1",
-          [matchId],
+      // The match can end or change server while this runs.
+      const {
+        rows: [locked],
+      } = await client.query<{ status: string; server_id: string | null }>(
+        "SELECT status, server_id::text AS server_id FROM matches WHERE id = $1 FOR UPDATE",
+        [matchId],
+      );
+
+      if (
+        !locked ||
+        !MatchRecoveryService.RESTARTABLE_STATUSES.includes(locked.status)
+      ) {
+        throw Error(
+          `a ${locked?.status ?? "missing"} match can't be restarted`,
         );
       }
+
+      serverId = locked.server_id;
 
       const { rows: maps } = await client.query<{ id: string }>(
         `SELECT id FROM match_maps WHERE match_id = $1 AND status = ANY($2)`,
@@ -335,9 +351,26 @@ export class MatchRecoveryService {
         );
       }
 
-      // Canceled stamped cancels_at with now, and only auto-cancel re-arms it
-      // on the way back to check-in. Dropping the server frees its reservation,
-      // so the get_match below tells a dedicated server to drop the old game.
+      // tau_matches' Canceled case: the old pod is stopped at once (match_events
+      // sees the server removed), and the server goes back into rotation only
+      // once the pod is gone (reconcileDrainingOnDemandServers). Only the
+      // server in server_id: one an assignment still in flight has reserved
+      // keeps its reservation, so the server_id it writes next stays valid.
+      await client.query(
+        `UPDATE servers
+            SET reserved_by_match_id = NULL,
+                draining_match_id = CASE WHEN is_dedicated OR type != 'Ranked'
+                    THEN draining_match_id ELSE $1 END,
+                draining_check_at = CASE WHEN is_dedicated OR type != 'Ranked'
+                    THEN draining_check_at ELSE now() END
+          WHERE id = $2
+            AND reserved_by_match_id = $1`,
+        [matchId, serverId],
+      );
+
+      // Only auto-cancel re-arms cancels_at on the way back to check-in.
+      // Dropping the server frees its reservation, so the get_match below
+      // tells a dedicated server to drop the old game.
       await client.query(
         `UPDATE matches
             SET status = 'WaitingForCheckIn', server_id = NULL, cancels_at = NULL
@@ -346,11 +379,21 @@ export class MatchRecoveryService {
       );
     });
 
-    if (match.server_id) {
-      await this.matchAssistant.refreshServerMatch(match.server_id);
+    if (serverId) {
+      await this.matchAssistant.refreshServerMatch(serverId);
     }
 
-    this.logger.log(`[${matchId}] organizer restarted the match`);
+    try {
+      await this.gameStreamer.stopLiveIfRunning(matchId);
+    } catch (error) {
+      this.logger.warn(
+        `[${matchId}] unable to stop the livestream after a restart: ${(error as Error)?.message}`,
+      );
+    }
+
+    this.logger.log(
+      `[${matchId}] restarted the match from check-in ${this.actor(viewer)}`,
+    );
 
     return { success: true };
   }
@@ -394,6 +437,45 @@ export class MatchRecoveryService {
 
     this.logger.log(
       `[${matchId}] organizer restarted map ${match.match_map_id} from warmup ${this.actor(viewer)}`,
+    );
+
+    return { success: true };
+  }
+
+  // A veto rewound after a server was booted releases it; a dedicated server
+  // keeps running, so it is told to reload and drop the old maps.
+  //
+  // DEAFCS: Reset Veto only, i.e. upstream's Redo the Veto (step 1). Undo the
+  // Last Step and Fix a Mis-pick (later steps) are not offered, and Give 30s
+  // More (extendVetoClock) is not ported.
+  public async rewindMapVeto(
+    matchId: string,
+    step: number,
+    expectedPicks: number | undefined,
+    viewer: RecoveryViewer,
+  ) {
+    if (!(await isPreMatchRecoveryStaff(this.postgres, matchId, viewer))) {
+      throw Error("only staff can reset the veto");
+    }
+
+    if (step !== 1) {
+      throw Error("only the whole veto can be reset");
+    }
+
+    const [{ server_id }] = await this.postgres.query<
+      Array<{ server_id: string | null }>
+    >("SELECT rewind_map_veto($1, $2, $3)::text AS server_id", [
+      matchId,
+      step,
+      expectedPicks ?? null,
+    ]);
+
+    if (server_id) {
+      await this.matchAssistant.refreshServerMatch(server_id);
+    }
+
+    this.logger.log(
+      `[${matchId}] organizer reset the veto ${this.actor(viewer)}`,
     );
 
     return { success: true };

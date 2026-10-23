@@ -557,10 +557,15 @@ export class DemoMetadataService {
     if (!demo) {
       return;
     }
+    // DEAFCS: upstream logged a failed removal and deleted the row anyway,
+    // leaving a file that nothing counts or tracks. The row now stays, so the
+    // demo is still counted and the next delete (or CleanDemos run) retries.
+    let removed = true;
     if (!DemoMetadataService.isExternalDemoUrl(demo.file)) {
       try {
         await this.s3.removePrefix(demo.file);
       } catch (error) {
+        removed = false;
         this.logger.warn(
           `[demo-delete] failed to remove .dem ${demo.file}: ${(error as Error)?.message}`,
         );
@@ -570,10 +575,14 @@ export class DemoMetadataService {
       try {
         await this.s3.removePrefix(demo.playback_file);
       } catch (error) {
+        removed = false;
         this.logger.warn(
           `[demo-delete] failed to remove playback blob ${demo.playback_file}: ${(error as Error)?.message}`,
         );
       }
+    }
+    if (!removed) {
+      throw new Error(`unable to remove the files of demo ${matchMapDemoId}`);
     }
     await this.hasura.mutation({
       delete_match_map_demos_by_pk: {

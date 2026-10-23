@@ -20,6 +20,13 @@ export default class ObjectiveEvent extends MatchEventProcessor<{
             round: this.data.round,
             player_steam_id: this.data.player_steam_id,
           },
+          // A game server redelivers an event whose ack it missed (an API
+          // restart mid-match). The row is already stored, so the replay is
+          // acknowledged instead of failing on the primary key forever.
+          on_conflict: {
+            constraint: "player_objectives_pkey",
+            update_columns: [],
+          },
         },
         __typename: true,
       },

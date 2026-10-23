@@ -66,10 +66,24 @@ describe("match recovery (SQL-driven)", () => {
           sent.push(round);
           return "";
         },
-        refreshServerMatch: async (): Promise<void> => undefined,
+        refreshServerMatch: async (serverId: string): Promise<void> => {
+          refreshed.push(serverId);
+        },
         restartServerMap: async (): Promise<string> => "",
       } as never,
+      {
+        stopLiveIfRunning: async (matchId: string): Promise<void> => {
+          streamsStopped.push(matchId);
+        },
+      } as never,
     );
+
+  let refreshed: Array<string> = [];
+  let streamsStopped: Array<string> = [];
+  beforeEach(() => {
+    refreshed = [];
+    streamsStopped = [];
+  });
 
   const admin = {
     steam_id: "76561199419999999",
@@ -206,7 +220,7 @@ describe("match recovery (SQL-driven)", () => {
   it("restarts a live match from check-in with the map in progress back at the start", async () => {
     const { match, mapId, finishedMapId } = await liveMatch();
 
-    await service().restartMatch(match.id);
+    await service().restartMatch(match.id, admin);
 
     const [after] = await postgres.query<
       Array<{ status: string; winning_lineup_id: string | null }>
@@ -254,7 +268,7 @@ describe("match recovery (SQL-driven)", () => {
       [match.options_id],
     );
 
-    await service().restartMatch(match.id);
+    await service().restartMatch(match.id, admin);
 
     const [after] = await postgres.query<
       Array<{
@@ -279,13 +293,356 @@ describe("match recovery (SQL-driven)", () => {
       [mapId],
     );
 
-    await service().restartMatch(match.id);
+    await service().restartMatch(match.id, admin);
 
     const [map] = await postgres.query<Array<{ status: string }>>(
       "SELECT status FROM match_maps WHERE id = $1",
       [mapId],
     );
     expect(map.status).toBe("Scheduled");
+  });
+
+  // DEAFCS: Restart Match goes straight back to check-in. Upstream's
+  // Canceled -> WaitingForCheckIn leaves Canceled, and with a map veto
+  // tbu_matches then deletes every map: the played maps' stats go with them
+  // (ON DELETE CASCADE), and a map with a demo stops it (ON DELETE RESTRICT).
+  describe("Restart Match keeps what was played", () => {
+    beforeAll(async () => {
+      await postgres.query(
+        `CREATE TABLE IF NOT EXISTS test_match_status_log (
+           match_id uuid, old_status text, new_status text, at serial)`,
+      );
+      await postgres.query(
+        `CREATE OR REPLACE FUNCTION test_log_match_status() RETURNS trigger
+           LANGUAGE plpgsql AS $$
+         BEGIN
+           INSERT INTO test_match_status_log (match_id, old_status, new_status)
+           VALUES (NEW.id, OLD.status, NEW.status);
+           RETURN NEW;
+         END $$`,
+      );
+      await postgres.query(
+        `CREATE OR REPLACE TRIGGER zz_test_log_match_status
+           AFTER UPDATE OF status ON matches FOR EACH ROW
+           WHEN (OLD.status IS DISTINCT FROM NEW.status)
+           EXECUTE FUNCTION test_log_match_status()`,
+      );
+    });
+
+    afterAll(async () => {
+      await postgres.query(
+        "DROP TRIGGER IF EXISTS zz_test_log_match_status ON matches",
+      );
+    });
+
+    // A veto match on map `liveOrder`: the maps before it are finished, each
+    // with a round, a kill and a demo; the live map has a round and a kill.
+    const vetoMatch = async (bestOf: number, liveOrder: number) => {
+      const match = await fx.match({ type: "Duel", bestOf, mapVeto: true });
+      const maps = await postgres.query<Array<{ id: string }>>(
+        "SELECT id FROM maps WHERE id IN (SELECT map_id FROM _map_pool WHERE map_pool_id = (SELECT map_pool_id FROM match_options WHERE id = $1)) ORDER BY name",
+        [match.options_id],
+      );
+      expect(maps.length).toBeGreaterThan(bestOf);
+
+      // The veto that was played: its trigger only takes picks during a veto.
+      await postgres.transaction(async (client) => {
+        await client.query("SET LOCAL session_replication_role = replica");
+        await client.query(
+          `INSERT INTO match_map_veto_picks (match_id, type, match_lineup_id, map_id)
+           VALUES ($1, 'Ban', $2, $3)`,
+          [match.id, match.lineup_1_id, maps[bestOf].id],
+        );
+      });
+
+      const mapIds: Array<string> = [];
+      for (let order = 1; order <= bestOf; order++) {
+        const [map] = await postgres.query<Array<{ id: string }>>(
+          `INSERT INTO match_maps (match_id, map_id, "order", status, lineup_1_side, lineup_2_side)
+           VALUES ($1, $2, $3, $4, 'CT', 'TERRORIST') RETURNING id`,
+          [
+            match.id,
+            maps[order - 1].id,
+            order,
+            order < liveOrder
+              ? "Finished"
+              : order === liveOrder
+                ? "Live"
+                : "Scheduled",
+          ],
+        );
+        mapIds.push(map.id);
+      }
+      await postgres.query("UPDATE matches SET status = 'Live' WHERE id = $1", [
+        match.id,
+      ]);
+
+      const [vexa, osk] = [steamId(157864), steamId(235177)];
+      await postgres.query(
+        "INSERT INTO players (steam_id, name) VALUES ($1, 'vexa'), ($2, 'osk')",
+        [vexa, osk],
+      );
+      for (const mapId of mapIds.slice(0, liveOrder)) {
+        await postgres.query(
+          `INSERT INTO match_map_rounds
+             (match_map_id, round, lineup_1_score, lineup_2_score, lineup_1_money, lineup_2_money,
+              "time", lineup_1_timeouts_available, lineup_2_timeouts_available,
+              lineup_1_side, lineup_2_side, winning_side)
+           VALUES ($1, 1, 1, 0, 800, 800, now(), 3, 3, 'CT', 'TERRORIST', 'CT')`,
+          [mapId],
+        );
+        await fx.kill({ matchId: match.id, mapId }, vexa, osk, { round: 1 });
+      }
+      for (const mapId of mapIds.slice(0, liveOrder - 1)) {
+        await postgres.query(
+          `INSERT INTO match_map_demos (match_id, match_map_id, file, size)
+           VALUES ($1, $2, 'map.dem', 1)`,
+          [match.id, mapId],
+        );
+      }
+
+      return { match, mapIds };
+    };
+
+    const kept = async (matchId: string) => {
+      const [row] = await postgres.query<
+        Array<{
+          maps: Array<string>;
+          picks: number;
+          demos: number;
+          rounds: number;
+          kills: number;
+          undone_rounds: number;
+          undone_kills: number;
+        }>
+      >(
+        `SELECT
+           (SELECT array_agg(status ORDER BY "order") FROM match_maps WHERE match_id = $1) AS maps,
+           (SELECT count(*)::int FROM match_map_veto_picks WHERE match_id = $1) AS picks,
+           (SELECT count(*)::int FROM match_map_demos WHERE match_id = $1) AS demos,
+           (SELECT count(*)::int FROM match_map_rounds r JOIN match_maps mm ON mm.id = r.match_map_id
+             WHERE mm.match_id = $1 AND r.deleted_at IS NULL) AS rounds,
+           (SELECT count(*)::int FROM player_kills WHERE match_id = $1 AND deleted_at IS NULL) AS kills,
+           (SELECT count(*)::int FROM match_map_rounds r JOIN match_maps mm ON mm.id = r.match_map_id
+             WHERE mm.match_id = $1 AND r.deleted_at IS NOT NULL) AS undone_rounds,
+           (SELECT count(*)::int FROM player_kills WHERE match_id = $1 AND deleted_at IS NOT NULL) AS undone_kills`,
+        [matchId],
+      );
+      return row;
+    };
+
+    it("keeps a best of 1's vetoed map and its undone rounds", async () => {
+      const { match, mapIds } = await vetoMatch(1, 1);
+
+      await service().restartMatch(match.id, admin);
+
+      expect(await kept(match.id)).toEqual({
+        maps: ["Scheduled"],
+        picks: 1,
+        demos: 0,
+        rounds: 0,
+        kills: 0,
+        undone_rounds: 1,
+        undone_kills: 1,
+      });
+      const [map] = await postgres.query<Array<{ id: string }>>(
+        "SELECT id FROM match_maps WHERE match_id = $1",
+        [match.id],
+      );
+      expect(map.id).toBe(mapIds[0]);
+    });
+
+    it("keeps a best of 3's finished map with its stats and demo", async () => {
+      const { match } = await vetoMatch(3, 2);
+
+      await service().restartMatch(match.id, admin);
+
+      expect(await kept(match.id)).toEqual({
+        maps: ["Finished", "Scheduled", "Scheduled"],
+        picks: 1,
+        demos: 1,
+        rounds: 1,
+        kills: 1,
+        undone_rounds: 1,
+        undone_kills: 1,
+      });
+    });
+
+    it("changes the status once, straight back to check-in", async () => {
+      const { match } = await vetoMatch(3, 2);
+      await postgres.query("DELETE FROM test_match_status_log");
+
+      await service().restartMatch(match.id, admin);
+
+      expect(
+        await postgres.query(
+          "SELECT old_status, new_status FROM test_match_status_log WHERE match_id = $1 ORDER BY at",
+          [match.id],
+        ),
+      ).toEqual([{ old_status: "Live", new_status: "WaitingForCheckIn" }]);
+    });
+
+    it("goes Live again on the same maps once both teams check in", async () => {
+      const { match, mapIds } = await vetoMatch(3, 2);
+      await service().restartMatch(match.id, admin);
+
+      // What checkIntoMatch writes once both lineups are ready.
+      await postgres.query("UPDATE matches SET status = 'Live' WHERE id = $1", [
+        match.id,
+      ]);
+
+      const [after] = await postgres.query<
+        Array<{ status: string; current: string }>
+      >(
+        "SELECT status, get_current_match_map(m)::text AS current FROM matches m WHERE id = $1",
+        [match.id],
+      );
+      expect(after).toEqual({ status: "Live", current: mapIds[1] });
+    });
+
+    const onServer = async (matchId: string, dedicated: boolean) => {
+      await postgres.query(
+        `INSERT INTO game_server_nodes (id, region, enabled, enabled_for_match_making, status)
+         VALUES ('restart-node', 'TestA', true, true, 'Online')
+         ON CONFLICT (id) DO NOTHING`,
+      );
+      const [server] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO servers (host, label, rcon_password, port, tv_port, enabled, connected, region, type, is_dedicated, game_server_node_id)
+         VALUES ('127.0.0.1', $1, '\\x00'::bytea, $2, $2 + 1, true, true, 'TestA', 'Ranked', $3,
+                 CASE WHEN $3 THEN NULL ELSE 'restart-node' END)
+         RETURNING id::text AS id`,
+        [
+          `restart-${matchId}`,
+          30000 + Math.floor(Math.random() * 20000),
+          dedicated,
+        ],
+      );
+      await postgres.query(
+        "UPDATE servers SET reserved_by_match_id = $1 WHERE id = $2",
+        [matchId, server.id],
+      );
+      await postgres.query("UPDATE matches SET server_id = $2 WHERE id = $1", [
+        matchId,
+        server.id,
+      ]);
+      return server.id;
+    };
+
+    const serverRow = async (serverId: string) => {
+      const [row] = await postgres.query<
+        Array<{
+          reserved_by_match_id: string | null;
+          draining_match_id: string | null;
+          check_due: boolean | null;
+        }>
+      >(
+        `SELECT reserved_by_match_id::text, draining_match_id::text,
+                draining_check_at <= now() AS check_due
+           FROM servers WHERE id = $1`,
+        [serverId],
+      );
+      return row;
+    };
+
+    it("drains the old on-demand server like an ended match's", async () => {
+      const { match } = await vetoMatch(3, 2);
+      const serverId = await onServer(match.id, false);
+
+      await service().restartMatch(match.id, admin);
+
+      expect(await serverRow(serverId)).toEqual({
+        reserved_by_match_id: null,
+        draining_match_id: match.id,
+        check_due: true,
+      });
+      expect(refreshed).toEqual([serverId]);
+      expect(streamsStopped).toEqual([match.id]);
+    });
+
+    it("frees a dedicated server and tells it to drop the game", async () => {
+      const { match } = await vetoMatch(3, 2);
+      const serverId = await onServer(match.id, true);
+
+      await service().restartMatch(match.id, admin);
+
+      expect(await serverRow(serverId)).toEqual({
+        reserved_by_match_id: null,
+        draining_match_id: null,
+        check_due: null,
+      });
+      expect(refreshed).toEqual([serverId]);
+    });
+
+    it("leaves a server alone that is already another match's", async () => {
+      const { match } = await vetoMatch(3, 2);
+      const serverId = await onServer(match.id, false);
+      const other = await fx.match();
+      await postgres.query(
+        "UPDATE servers SET reserved_by_match_id = $1 WHERE id = $2",
+        [other.id, serverId],
+      );
+
+      await service().restartMatch(match.id, admin);
+
+      expect(await serverRow(serverId)).toEqual({
+        reserved_by_match_id: other.id,
+        draining_match_id: null,
+        check_due: null,
+      });
+    });
+
+    // assignOnDemandServer reserves the server, boots it, and only then writes
+    // server_id. A restart in between leaves that reservation alone, so the
+    // server_id written after it still points at a server the match holds.
+    it("keeps the server an assignment in flight has reserved", async () => {
+      const { match } = await vetoMatch(3, 2);
+      const serverId = await onServer(match.id, false);
+      await postgres.query(
+        "UPDATE matches SET status = 'WaitingForServer', server_id = NULL WHERE id = $1",
+        [match.id],
+      );
+      await postgres.query(
+        "UPDATE servers SET reserved_by_match_id = $1 WHERE id = $2",
+        [match.id, serverId],
+      );
+
+      await service().restartMatch(match.id, admin);
+
+      expect(await serverRow(serverId)).toEqual({
+        reserved_by_match_id: match.id,
+        draining_match_id: null,
+        check_due: null,
+      });
+      await postgres.query("UPDATE matches SET server_id = $2 WHERE id = $1", [
+        match.id,
+        serverId,
+      ]);
+      const [after] = await postgres.query<
+        Array<{ status: string; server_id: string }>
+      >("SELECT status, server_id::text FROM matches WHERE id = $1", [
+        match.id,
+      ]);
+      expect(after).toEqual({
+        status: "WaitingForCheckIn",
+        server_id: serverId,
+      });
+    });
+
+    it.each(["Canceled", "Veto", "WaitingForCheckIn", "Finished"])(
+      "refuses a %s match and changes nothing",
+      async (status) => {
+        const { match } = await vetoMatch(3, 2);
+        await postgres.query("UPDATE matches SET status = $2 WHERE id = $1", [
+          match.id,
+          status,
+        ]);
+        const before = await kept(match.id);
+
+        await expect(service().restartMatch(match.id, admin)).rejects.toThrow();
+
+        expect(await kept(match.id)).toEqual(before);
+      },
+    );
   });
 
   describe("putting a map back to a round", () => {
@@ -486,7 +843,7 @@ describe("match recovery (SQL-driven)", () => {
     it("does the same when the whole match is restarted", async () => {
       const { match, mapId } = await fiveRounds();
 
-      await service().restartMatch(match.id);
+      await service().restartMatch(match.id, admin);
 
       expect(await state(mapId)).toMatchObject({
         rounds: { live: [], undone: [1, 2, 3, 4, 5] },

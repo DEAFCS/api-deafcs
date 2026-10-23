@@ -22,6 +22,7 @@ jest.mock("@kubernetes/client-node", () => ({
 }));
 
 import { MatchAssistantService } from "../src/matches/match-assistant/match-assistant.service";
+import { MatchRecoveryService } from "../src/matches/match-recovery/match-recovery.service";
 import { MatchesController } from "../src/matches/matches.controller";
 import { PostgresService } from "../src/postgres/postgres.service";
 import { Fixtures } from "./utils/fixtures";
@@ -405,25 +406,27 @@ describe("on-demand servers drain after their match (SQL-driven)", () => {
     });
   });
 
-  it("a Restore Round restart drains the old server, checked at once", async () => {
+  it("a Restart Match drains the old server, checked at once", async () => {
     const serverId = await onDemandServer();
     const matchId = await liveMatchOn(serverId);
     runningOn = [serverId];
 
-    // MatchRecoveryService.restartMatch (feat/match-recovery-upstream): one
-    // transaction, Live -> Canceled -> WaitingForCheckIn without a server.
-    await postgres.transaction(async (client) => {
-      await client.query(
-        "UPDATE matches SET status = 'Canceled' WHERE id = $1",
-        [matchId],
-      );
-      await client.query(
-        `UPDATE matches
-            SET status = 'WaitingForCheckIn', server_id = NULL, cancels_at = NULL
-          WHERE id = $1`,
-        [matchId],
-      );
+    // DEAFCS: one transaction, Live -> WaitingForCheckIn without a server; the
+    // drain is set by restartMatch itself (no Canceled step for tau_matches).
+    await new MatchRecoveryService(
+      { log: jest.fn(), warn: jest.fn() } as any,
+      postgres,
+      { refreshServerMatch: jest.fn() } as any,
+      { stopLiveIfRunning: jest.fn() } as any,
+    ).restartMatch(matchId, {
+      steam_id: "76561199419999999",
+      role: "administrator",
     });
+
+    const [match] = await postgres.query<
+      Array<{ status: string; server_id: string | null }>
+    >("SELECT status, server_id::text FROM matches WHERE id = $1", [matchId]);
+    expect(match).toEqual({ status: "WaitingForCheckIn", server_id: null });
 
     const row = await serverRow(serverId);
     expect(row.reserved_by_match_id).toBeNull();
@@ -538,6 +541,53 @@ describe("on-demand servers drain after their match (SQL-driven)", () => {
       expect((await serverRow(second)).reserved_by_match_id).toBe(
         final.match_id,
       );
+    });
+
+    // DEAFCS: a Restart Match of a tournament match leaves the bracket as it
+    // was, and the replay on a new server still decides it.
+    it("a Restart Match keeps the bracket; the replay on a new server advances it", async () => {
+      const t = await tfx.launch(SE4, 4);
+      const stageId = t.stageIds[0];
+      const [semi] = await postgres.query<Array<{ match_id: string }>>(
+        `SELECT match_id FROM tournament_brackets
+          WHERE tournament_stage_id = $1 AND round = 1
+          ORDER BY match_number LIMIT 1`,
+        [stageId],
+      );
+      const first = await onDemandServer();
+      await assign(semi.match_id, first);
+      await goLive(semi.match_id);
+      runningOn = [first];
+      const brackets = await tfx.getBrackets(stageId);
+
+      await new MatchRecoveryService(
+        { log: jest.fn(), warn: jest.fn() } as any,
+        postgres,
+        { refreshServerMatch: jest.fn() } as any,
+        { stopLiveIfRunning: jest.fn() } as any,
+      ).restartMatch(semi.match_id, {
+        steam_id: "76561199419999999",
+        role: "administrator",
+      });
+
+      expect(await tfx.getBrackets(stageId)).toEqual(brackets);
+      expect(await tfx.tournamentStatus(t.id)).toBe("Live");
+      expect((await serverRow(first)).draining_match_id).toBe(semi.match_id);
+
+      const second = await onDemandServer();
+      expect(await assignable()).toEqual([second]);
+      await assign(semi.match_id, second);
+      await goLive(semi.match_id);
+      await tfx.winMatch(semi.match_id);
+
+      const [advanced] = (await tfx.getBrackets(stageId)).filter(
+        (bracket) => bracket.round === 2,
+      );
+      expect(
+        [advanced.tournament_team_id_1, advanced.tournament_team_id_2].filter(
+          Boolean,
+        ),
+      ).toHaveLength(1);
     });
   });
 });

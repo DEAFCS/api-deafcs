@@ -23,6 +23,13 @@ export default class FlashEvent extends MatchEventProcessor<{
             duration: this.data.duration,
             team_flash: this.data.team_flash,
           },
+          // A game server redelivers an event whose ack it missed (an API
+          // restart mid-match). The row is already stored, so the replay is
+          // acknowledged instead of failing on the primary key forever.
+          on_conflict: {
+            constraint: "player_flashes_pkey",
+            update_columns: [],
+          },
         },
         __typename: true,
       },

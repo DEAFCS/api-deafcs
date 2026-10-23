@@ -139,6 +139,7 @@ describe("match recovery (Hasura actions and permissions)", () => {
         { log: jest.fn(), warn: jest.fn() } as never,
         postgres,
         matchAssistant as never,
+        { stopLiveIfRunning: async (): Promise<void> => undefined } as never,
       ),
     );
 
@@ -379,8 +380,13 @@ describe("match recovery (Hasura actions and permissions)", () => {
     );
   });
 
-  it.each([...ROLES, "guest"])(
-    "keeps Restart Match switched off for %s",
+  // DEAFCS: Restart Match is administrators only for now.
+  it("shows Restart Match to administrators", async () => {
+    expect(await fields("administrator")).toContain("restartMatch");
+  });
+
+  it.each([...ROLES.filter((role) => role !== "administrator"), "guest"])(
+    "keeps Restart Match from %s",
     async (role) => {
       expect(await fields(role)).not.toContain("restartMatch");
     },
@@ -1003,6 +1009,283 @@ describe("match recovery (Hasura actions and permissions)", () => {
 
   // DEAFCS: a server's real address (host, port, GOTV port) only for
   // administrators; public servers keep their join links.
+  // Reset Veto: upstream's rewindMapVeto (5Stack API 9f4c954, #686) at step 1.
+  // DEAFCS: for staff only, also while playing: administrators and match
+  // organizers on every match, tournament organizers on their own
+  // tournaments' matches. No Undo/Fix a Mis-pick (later steps), no Give 30s
+  // More (extendVetoClock).
+  describe("Reset Veto", () => {
+    let plainMatchId: string;
+    let cupMatchId: string;
+    let cupLineupId: string;
+    let listedUser: string;
+
+    const picks = async (id: string) => {
+      const [{ count }] = await postgres.query<Array<{ count: number }>>(
+        "SELECT COUNT(*)::int AS count FROM match_map_veto_picks WHERE match_id = $1",
+        [id],
+      );
+      return count;
+    };
+
+    const ban = async (id: string) => {
+      await postgres.query(
+        `INSERT INTO match_map_veto_picks (match_id, type, match_lineup_id, map_id)
+         SELECT m.id, 'Ban', get_map_veto_picking_lineup_id(m), mp.map_id
+           FROM matches m
+           JOIN match_options mo ON mo.id = m.match_options_id
+           JOIN _map_pool mp ON mp.map_pool_id = mo.map_pool_id
+          WHERE m.id = $1
+            AND mp.map_id NOT IN (SELECT map_id FROM match_map_veto_picks WHERE match_id = m.id)
+          LIMIT 1`,
+        [id],
+      );
+    };
+
+    const rewind = (steam: string, role: string, id: string, step = 1) =>
+      graphql(
+        `
+          mutation ($id: uuid!, $step: Int!) {
+            rewindMapVeto(match_id: $id, step: $step) {
+              success
+            }
+          }
+        `,
+        role,
+        steam,
+        { id, step },
+      );
+
+    // The reset's error, or null.
+    const reset = async (steam: string, role: string, id: string) =>
+      (await rewind(steam, role, id)).errors?.[0].message ?? null;
+
+    const vetoMatch = async () => {
+      const { poolId } = await fx.mapPool(7);
+      const match = await fx.match({
+        bestOf: 3,
+        mapVeto: true,
+        mapPoolId: poolId,
+      });
+      await postgres.query(
+        "UPDATE matches SET status = 'Live', organizer_steam_id = $2 WHERE id = $1",
+        [match.id, people.matchOwner],
+      );
+      return match;
+    };
+
+    beforeAll(async () => {
+      const plain = await vetoMatch();
+      plainMatchId = plain.id;
+      await postgres.query(
+        `INSERT INTO match_lineup_players (match_lineup_id, steam_id)
+         VALUES ($1, $2)`,
+        [plain.lineup_1_id, people.teamPlayer],
+      );
+
+      const cup = await vetoMatch();
+      cupMatchId = cup.id;
+      cupLineupId = cup.lineup_1_id;
+      const [tournament] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO tournaments (name, start, organizer_steam_id, match_options_id, status)
+         VALUES ($1, now() + interval '1 day', $2, $3, 'Setup') RETURNING id`,
+        [fx.nextName("veto-cup"), people.tournament_organizer, cup.options_id],
+      );
+      const [stage] = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO tournament_stages (tournament_id, type, "order", min_teams, max_teams)
+         VALUES ($1, 'SingleElimination', 1, 4, 8) RETURNING id`,
+        [tournament.id],
+      );
+      await postgres.query(
+        `INSERT INTO tournament_brackets (tournament_stage_id, match_id, round)
+         VALUES ($1, $2, 1)`,
+        [stage.id, cupMatchId],
+      );
+      // Listed as the cup's organizer, but without the role.
+      listedUser = await fx.player("listed-user");
+      await postgres.query(
+        "INSERT INTO tournament_organizers (tournament_id, steam_id) VALUES ($1, $2)",
+        [tournament.id, listedUser],
+      );
+    });
+
+    beforeEach(async () => {
+      for (const id of [plainMatchId, cupMatchId]) {
+        await postgres.query(
+          "DELETE FROM match_map_veto_picks WHERE match_id = $1",
+          [id],
+        );
+        await ban(id);
+        await ban(id);
+      }
+    });
+
+    it("hides it from guests", async () => {
+      const guest = await fields("guest");
+      expect(guest).not.toContain("rewindMapVeto");
+      expect(guest).not.toContain("resetCaptainPick");
+    });
+
+    it.each(ROLES)(
+      "lets a signed-in %s call it, and offers no Give 30s More",
+      async (role) => {
+        const names = await fields(role);
+        expect(names).toContain("rewindMapVeto");
+        expect(names).toContain("resetCaptainPick");
+        expect(names).not.toContain("extendVetoClock");
+      },
+    );
+
+    it.each(["administrator", "match_organizer"])(
+      "lets a %s on any match",
+      async (role) => {
+        for (const id of [plainMatchId, cupMatchId]) {
+          expect(await reset(people[role], role, id)).toBeNull();
+          expect(await picks(id)).toBe(0);
+        }
+      },
+    );
+
+    it("resets the whole veto only, never a single step", async () => {
+      const { errors } = await rewind(
+        people.administrator,
+        "administrator",
+        plainMatchId,
+        2,
+      );
+      expect(errors?.[0].message).toBe("only the whole veto can be reset");
+      expect(await picks(plainMatchId)).toBe(2);
+    });
+
+    it("lets a tournament_organizer on its own tournament's match only", async () => {
+      expect(
+        await reset(
+          people.tournament_organizer,
+          "tournament_organizer",
+          cupMatchId,
+        ),
+      ).toBeNull();
+      expect(await picks(cupMatchId)).toBe(0);
+
+      expect(
+        await reset(
+          people.tournament_organizer,
+          "tournament_organizer",
+          plainMatchId,
+        ),
+      ).toBe("you are not a match organizer");
+      expect(await picks(plainMatchId)).toBe(2);
+    });
+
+    it("refuses the match's owner, who organizes it but is not staff", async () => {
+      expect(await reset(people.matchOwner, "user", plainMatchId)).toBe(
+        "only staff can reset the veto",
+      );
+      expect(await picks(plainMatchId)).toBe(2);
+    });
+
+    it("refuses someone listed as the cup's organizer without the role", async () => {
+      expect(await reset(listedUser, "user", cupMatchId)).toBe(
+        "only staff can reset the veto",
+      );
+      expect(await picks(cupMatchId)).toBe(2);
+    });
+
+    it.each(["user", "verified_user", "streamer", "moderator"])(
+      "refuses a %s",
+      async (role) => {
+        expect(await reset(people[role], role, plainMatchId)).toBe(
+          "you are not a match organizer",
+        );
+        expect(await picks(plainMatchId)).toBe(2);
+      },
+    );
+
+    it("refuses a moderator who owns the match", async () => {
+      await postgres.query(
+        "UPDATE matches SET organizer_steam_id = $2 WHERE id = $1",
+        [plainMatchId, people.moderator],
+      );
+      try {
+        expect(await reset(people.moderator, "moderator", plainMatchId)).toBe(
+          "only staff can reset the veto",
+        );
+        expect(await picks(plainMatchId)).toBe(2);
+      } finally {
+        await postgres.query(
+          "UPDATE matches SET organizer_steam_id = $2 WHERE id = $1",
+          [plainMatchId, people.matchOwner],
+        );
+      }
+    });
+
+    // DEAFCS: upstream lets every match organizer delete veto picks directly,
+    // which also deletes the picked maps (tbd_match_map_veto_picks) and their
+    // rounds and stats. Only administrators keep that.
+    it("lets no organizer below administrator delete veto picks directly", async () => {
+      for (const [steam, role] of [
+        [people.matchOwner, "user"],
+        [people.moderator, "moderator"],
+        [people.match_organizer, "match_organizer"],
+        [people.tournament_organizer, "tournament_organizer"],
+      ]) {
+        const { data, errors } = await graphql(
+          `
+            mutation ($id: uuid!) {
+              delete_match_map_veto_picks(where: { match_id: { _eq: $id } }) {
+                affected_rows
+              }
+            }
+          `,
+          role,
+          steam,
+          { id: plainMatchId },
+        );
+        expect(data?.delete_match_map_veto_picks).toBeUndefined();
+        expect(errors?.[0].message).toMatch(/not found in type/);
+      }
+      expect(await picks(plainMatchId)).toBe(2);
+    });
+
+    it("lets staff who play in the match", async () => {
+      await postgres.query(
+        `INSERT INTO match_lineup_players (match_lineup_id, steam_id)
+         VALUES ($1, $2)`,
+        [cupLineupId, people.teamPlayer],
+      );
+      await postgres.query(
+        `INSERT INTO tournament_organizers (tournament_id, steam_id)
+         SELECT ts.tournament_id, $2
+           FROM tournament_brackets tb
+           JOIN tournament_stages ts ON ts.id = tb.tournament_stage_id
+          WHERE tb.match_id = $1`,
+        [cupMatchId, people.teamPlayer],
+      );
+      try {
+        for (const [role, id] of [
+          ["match_organizer", plainMatchId],
+          ["tournament_organizer", cupMatchId],
+        ]) {
+          await postgres.query(
+            "UPDATE players SET role = $2 WHERE steam_id = $1",
+            [people.teamPlayer, role],
+          );
+          expect(await reset(people.teamPlayer, role, id)).toBeNull();
+          expect(await picks(id)).toBe(0);
+        }
+      } finally {
+        await postgres.query(
+          "UPDATE players SET role = 'moderator' WHERE steam_id = $1",
+          [people.teamPlayer],
+        );
+        await postgres.query(
+          "DELETE FROM tournament_organizers WHERE steam_id = $1",
+          [people.teamPlayer],
+        );
+      }
+    });
+  });
+
   describe("server addresses", () => {
     let publicServerId: string;
 
@@ -1121,5 +1404,97 @@ describe("match recovery (Hasura actions and permissions)", () => {
       expect(errors).toBeUndefined();
       expect(data!.match_map_rounds).toEqual([{ round: 1 }, { round: 2 }]);
     }
+  });
+
+  describe("Restart Match", () => {
+    const restart = (id: string, steam: string, role: string) =>
+      graphql(
+        `
+          mutation ($id: uuid!) {
+            restartMatch(match_id: $id) {
+              success
+            }
+          }
+        `,
+        role,
+        steam,
+        { id },
+      );
+
+    const vetoedBestOf3 = async () => {
+      const match = await fx.match({ type: "Duel", bestOf: 3, mapVeto: true });
+      const maps = await postgres.query<Array<{ id: string }>>(
+        `INSERT INTO match_maps (match_id, map_id, "order", status, lineup_1_side, lineup_2_side)
+         SELECT $1, p.map_id, row_number() OVER (ORDER BY p.map_id),
+                CASE row_number() OVER (ORDER BY p.map_id) WHEN 1 THEN 'Finished' WHEN 2 THEN 'Live' ELSE 'Scheduled' END,
+                'CT', 'TERRORIST'
+           FROM (SELECT map_id FROM _map_pool
+                  WHERE map_pool_id = (SELECT map_pool_id FROM match_options WHERE id = $2)
+                  ORDER BY map_id LIMIT 3) p
+         RETURNING id`,
+        [match.id, match.options_id],
+      );
+      await postgres.query(
+        "UPDATE matches SET status = 'Live', organizer_steam_id = $2 WHERE id = $1",
+        [match.id, people.matchOwner],
+      );
+      const [finished] = await postgres.query<Array<{ id: string }>>(
+        "SELECT id FROM match_maps WHERE match_id = $1 AND status = 'Finished'",
+        [match.id],
+      );
+      await postgres.query(
+        `INSERT INTO match_map_demos (match_id, match_map_id, file, size)
+         VALUES ($1, $2, 'map1.dem', 1)`,
+        [match.id, finished.id],
+      );
+      return { id: match.id, maps: maps.length };
+    };
+
+    it.each([
+      "matchOwner",
+      "match_organizer",
+      "tournament_organizer",
+      "moderator",
+    ])("refuses a %s, and the match stays Live", async (who) => {
+      const match = await vetoedBestOf3();
+      const role = who === "matchOwner" ? "user" : who;
+
+      const { data, errors } = await restart(match.id, people[who], role);
+
+      expect(data?.restartMatch).toBeUndefined();
+      expect(errors?.[0].message).toMatch(/restartMatch/);
+      const [row] = await postgres.query<Array<{ status: string }>>(
+        "SELECT status FROM matches WHERE id = $1",
+        [match.id],
+      );
+      expect(row.status).toBe("Live");
+    });
+
+    it("lets an administrator restart a vetoed best of 3 with a demo", async () => {
+      const match = await vetoedBestOf3();
+
+      const { data, errors } = await restart(
+        match.id,
+        people.administrator,
+        "administrator",
+      );
+
+      expect(errors).toBeUndefined();
+      expect(data!.restartMatch).toEqual({ success: true });
+      const [row] = await postgres.query<
+        Array<{ status: string; maps: Array<string>; demos: number }>
+      >(
+        `SELECT m.status,
+                (SELECT array_agg(status ORDER BY "order") FROM match_maps WHERE match_id = m.id) AS maps,
+                (SELECT count(*)::int FROM match_map_demos WHERE match_id = m.id) AS demos
+           FROM matches m WHERE m.id = $1`,
+        [match.id],
+      );
+      expect(row).toEqual({
+        status: "WaitingForCheckIn",
+        maps: ["Finished", "Scheduled", "Scheduled"],
+        demos: 1,
+      });
+    });
   });
 });

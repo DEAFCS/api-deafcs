@@ -30,9 +30,12 @@ describe("MatchesController after a tournament reset", () => {
     reserved_by_match_id: string | null;
     game_server_node_id: string | null;
   } | null;
+  // The match's status now; by default the status the event moved it to.
+  let currentStatus: string | undefined;
 
   beforeEach(() => {
     server = null;
+    currentStatus = undefined;
 
     hasura = {
       query: jest.fn(async (query: Record<string, unknown>) => {
@@ -40,6 +43,7 @@ describe("MatchesController after a tournament reset", () => {
           return {
             matches_by_pk: {
               id: MATCH_ID,
+              status: currentStatus,
               options: { prefer_dedicated_server: false },
               server,
             },
@@ -102,15 +106,20 @@ describe("MatchesController after a tournament reset", () => {
       .mockResolvedValue(undefined);
   });
 
+  const EVENT_AT = "2026-10-21T21:44:27.123456";
+
   const updated = (
     old: Record<string, unknown>,
     next: Record<string, unknown>,
-  ) =>
-    controller.match_events({
+  ) => {
+    currentStatus ??= (next.status ?? old.status) as string;
+    return controller.match_events({
       op: "UPDATE",
       old: { id: MATCH_ID, source: "5stack", ...old },
       new: { id: MATCH_ID, source: "5stack", ...old, ...next },
+      created_at: EVENT_AT,
     } as any);
+  };
 
   describe("ResetTournamentMatch", () => {
     const sql = () => postgres.query.mock.calls.map(([query]) => query);
@@ -173,6 +182,89 @@ describe("MatchesController after a tournament reset", () => {
 
       expect(postgres.query).not.toHaveBeenCalled();
     });
+
+    // DEAFCS: a reset never deletes a played downstream match.
+    describe("a downstream match the reset would delete", () => {
+      const PLAYED =
+        "A later match in this bracket has already been played, so this match cannot be reset.";
+
+      const downstream = (played: boolean) =>
+        postgres.query.mockImplementation(async (query: string) => {
+          if (query.includes("preview_tournament_match_reset")) {
+            return [
+              {
+                match_id: MATCH_ID,
+                will_delete_match: false,
+                match_status: "Finished",
+              },
+              {
+                match_id: "final-1",
+                will_delete_match: true,
+                match_status: "Finished",
+              },
+            ];
+          }
+          if (query.includes("match_has_played_data")) {
+            return [{ played }];
+          }
+          return [];
+        });
+
+      it("refuses the reset when it was played, before touching the bracket", async () => {
+        downstream(true);
+
+        await expect(
+          controller.ResetTournamentMatch({
+            user: { steam_id: "1" } as any,
+            match_id: MATCH_ID,
+          }),
+        ).rejects.toThrow(PLAYED);
+
+        const check = postgres.query.mock.calls.find(([query]) =>
+          query.includes("match_has_played_data"),
+        );
+        // Only the matches the reset would delete, not the source match.
+        expect(check[1]).toEqual([["final-1"]]);
+        expect(
+          sql().some((query) => query.includes("reset_tournament_match(")),
+        ).toBe(false);
+      });
+
+      it("refuses the preview too, so the organizer sees why", async () => {
+        downstream(true);
+
+        await expect(
+          controller.PreviewTournamentMatchReset({
+            user: { steam_id: "1" } as any,
+            match_id: MATCH_ID,
+          }),
+        ).rejects.toThrow(PLAYED);
+      });
+
+      it("resets when it is genuinely unplayed", async () => {
+        downstream(false);
+
+        await controller.ResetTournamentMatch({
+          user: { steam_id: "1" } as any,
+          match_id: MATCH_ID,
+        });
+
+        expect(
+          sql().some((query) => query.includes("reset_tournament_match(")),
+        ).toBe(true);
+      });
+
+      it("skips the check when the reset deletes nothing", async () => {
+        await controller.ResetTournamentMatch({
+          user: { steam_id: "1" } as any,
+          match_id: MATCH_ID,
+        });
+
+        expect(
+          sql().some((query) => query.includes("match_has_played_data")),
+        ).toBe(false);
+      });
+    });
   });
 
   describe("match_events", () => {
@@ -182,7 +274,11 @@ describe("MatchesController after a tournament reset", () => {
         { server_id: null },
       );
 
-      expect(matchAssistant.stopOnDemandServer).toHaveBeenCalledWith(MATCH_ID);
+      expect(matchAssistant.stopOnDemandServer).toHaveBeenCalledWith(
+        MATCH_ID,
+        false,
+        EVENT_AT,
+      );
       expect(matchAssistant.assignServer).not.toHaveBeenCalled();
       // No match-end handling for a match that is starting over.
       expect(scheduledMatchesQueue.add).not.toHaveBeenCalled();
@@ -236,6 +332,35 @@ describe("MatchesController after a tournament reset", () => {
         [StopOnDemandServer.name, { matchId: MATCH_ID }, { delay: 115_000 }],
       ]);
       expect(matchAssistant.stopOnDemandServer).not.toHaveBeenCalled();
+    });
+
+    // DEAFCS Restart Match: one event, Live on its server -> WaitingForCheckIn
+    // without one. The old server stops; nothing of a match end runs (the
+    // matchmaking, Discord, stream and ELO stubs here would throw if it did).
+    it("stops the old server once and runs no match end for a Restart Match", async () => {
+      await expect(
+        updated(
+          { status: "Live", server_id: OLD_SERVER_ID },
+          { status: "WaitingForCheckIn", server_id: null },
+        ),
+      ).resolves.toBeUndefined();
+
+      expect(matchAssistant.stopOnDemandServer).toHaveBeenCalledTimes(1);
+      expect(matchAssistant.stopOnDemandServer).toHaveBeenCalledWith(
+        MATCH_ID,
+        false,
+        EVENT_AT,
+      );
+      expect(matchAssistant.assignServer).not.toHaveBeenCalled();
+      expect(scheduledMatchesQueue.add).not.toHaveBeenCalled();
+      expect(
+        hasura.mutation.mock.calls.some(
+          ([mutation]) => "update_matches_by_pk" in mutation,
+        ),
+      ).toBe(false);
+      expect(
+        (controller as any).tournamentVoice.createMatchVoiceChannels,
+      ).toHaveBeenCalledWith(MATCH_ID);
     });
 
     it("queues no stop of its own for the reset status change", async () => {
@@ -316,6 +441,8 @@ describe("MatchesController after a tournament reset", () => {
 
           expect(matchAssistant.stopOnDemandServer).toHaveBeenCalledWith(
             MATCH_ID,
+            false,
+            EVENT_AT,
           );
         },
       );
@@ -354,6 +481,40 @@ describe("MatchesController after a tournament reset", () => {
       expect(matchAssistant.reserveDedicatedServer).toHaveBeenCalledWith(
         MATCH_ID,
       );
+      expect(matchAssistant.assignServer).not.toHaveBeenCalled();
+    });
+
+    // DEAFCS: a Live event delivered late or retried, after Restart Match,
+    // Reset Veto or a cancel moved the match on, must not boot a server.
+    it.each(["WaitingForCheckIn", "Veto", "Canceled"])(
+      "assigns nothing for a late Live event once the match is %s",
+      async (now) => {
+        currentStatus = now;
+        await updated(
+          { status: "Live", server_id: null },
+          { server_id: SERVER_ID },
+        );
+
+        expect(matchAssistant.assignServer).not.toHaveBeenCalled();
+        expect(matchAssistant.reserveDedicatedServer).not.toHaveBeenCalled();
+      },
+    );
+
+    it("reserves nothing for a late Live event once the match is back in check-in", async () => {
+      server = {
+        id: SERVER_ID,
+        is_dedicated: true,
+        reserved_by_match_id: null,
+        game_server_node_id: null,
+      };
+      currentStatus = "WaitingForCheckIn";
+
+      await updated(
+        { status: "WaitingForCheckIn", server_id: SERVER_ID },
+        { status: "Live" },
+      );
+
+      expect(matchAssistant.reserveDedicatedServer).not.toHaveBeenCalled();
       expect(matchAssistant.assignServer).not.toHaveBeenCalled();
     });
   });

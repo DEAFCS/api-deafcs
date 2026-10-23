@@ -6,10 +6,13 @@ import { NotificationsService } from "../../../notifications/notifications.servi
 import { PostgresService } from "../../../postgres/postgres.service";
 import { DisconnectBudgetService } from "../../disconnect-budget/disconnect-budget.service";
 
+import type { players_on_conflict } from "../../../../generated";
+
 @Injectable({ scope: Scope.REQUEST })
 export default abstract class MatchEventProcessor<T> {
   protected data: T;
   protected matchId: string;
+  protected messageId?: string;
 
   constructor(
     protected readonly logger: Logger,
@@ -21,10 +24,26 @@ export default abstract class MatchEventProcessor<T> {
     protected readonly disconnectBudget: DisconnectBudgetService,
   ) {}
 
-  public setData(matchId: string, data: T) {
+  public setData(matchId: string, data: T, messageId?: string) {
     this.data = data;
     this.matchId = matchId.trim();
+    this.messageId = messageId;
   }
 
   public abstract process(): Promise<void>;
+
+  // Upstream bf9edfa: only refresh unregistered names in this match.
+  protected playerNameConflict(): players_on_conflict {
+    return {
+      constraint: "players_steam_id_key",
+      update_columns: ["name"],
+      where: {
+        _or: [
+          { name_registered: { _is_null: true } },
+          { name_registered: { _eq: false } },
+        ],
+        player_lineup: { lineup: { match_id: { _eq: this.matchId } } },
+      },
+    };
+  }
 }

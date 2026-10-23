@@ -28,6 +28,9 @@ type TeamRosterRow = {
   role?: string;
 };
 
+// Match rows deleted in a transaction, and the clip files they owned.
+type DeletedTournamentMatches = { matchIds: string[]; clipKeys: string[] };
+
 @Controller("tournaments")
 export class TournamentsController {
   constructor(
@@ -101,18 +104,20 @@ export class TournamentsController {
       });
     }
 
-    // Cancelling resets the bracket: drop the matches (and their demos) so
-    // they can be regenerated. The bracket rows are first detached (their
-    // match_id set to NULL) rather than left in place for an FK cascade, then
-    // the matches themselves are deleted -- the same atomic helper
-    // deleteTournament uses. S3 cleanup runs afterward, best-effort.
+    // Cancelling resets the bracket: drop the matches so they can be
+    // regenerated. The bracket rows are first detached (their match_id set to
+    // NULL) rather than left in place for an FK cascade, then the matches
+    // themselves are deleted -- the same atomic helper deleteTournament uses.
+    // DEAFCS: cancelling deletes no demo, clip or thumbnail (upstream purged
+    // them). A match with demos or clips stays linked to its bracket, so only
+    // deleting the tournament removes it and its files; normal retention
+    // applies until then. Unplayed matches own no files, so nothing is purged.
     if (status === "Cancelled" && data.old.status !== "Cancelled") {
-      const deletedMatchIds = await this.postgres.transaction((client) =>
-        this.deleteTournamentMatchRows(client, tournamentId),
+      const deleted = await this.postgres.transaction((client) =>
+        this.deleteTournamentMatchRows(client, tournamentId, true),
       );
-      await this.purgeMatchAssets(tournamentId, deletedMatchIds);
       this.logger.log(
-        `[${tournamentId}] tournament cancelled, cleaned up assets across ${deletedMatchIds.length} matches`,
+        `[${tournamentId}] tournament cancelled, removed ${deleted.matchIds.length} unplayed matches`,
       );
     }
   }
@@ -366,10 +371,13 @@ export class TournamentsController {
     // Everything else tournament- or match-owned is left to the existing FK
     // cascades. Reusable/unscoped award definitions in `awards` are untouched,
     // and no Hasura mutation is called from inside this callback.
-    let deletedMatchIds: string[] = [];
+    let deletedMatches: DeletedTournamentMatches = {
+      matchIds: [],
+      clipKeys: [],
+    };
     await this.postgres.transaction(async (client) => {
       await this.awards.deleteTournamentAwardRecords(client, tournament_id);
-      deletedMatchIds = await this.deleteTournamentMatchRows(
+      deletedMatches = await this.deleteTournamentMatchRows(
         client,
         tournament_id,
       );
@@ -389,15 +397,16 @@ export class TournamentsController {
     // database row is already gone as part of the transaction (matches
     // cascades into match_maps -> match_clips, player stat tables,
     // event_match_links, etc.; match_map_demos was deleted explicitly).
-    // clips.deleteClipsForMatch / demoMetadata.deleteDemosForMatch still look
-    // up their own rows via Hasura first, but those lookups now find nothing,
-    // so only their S3 prefix sweeps do real work here -- no
-    // delete_matches_by_pk (or any other DB delete) is issued after commit.
+    // demoMetadata.deleteDemosForMatch still looks up its own rows via Hasura
+    // first, but that lookup now finds nothing, so only its S3 prefix sweep
+    // does real work here; clip files go by the keys read inside the
+    // transaction -- no delete_matches_by_pk (or any other DB delete) is
+    // issued after commit.
     // A failure here must not be reported as a failed tournament deletion.
-    await this.purgeMatchAssets(tournament_id, deletedMatchIds);
+    await this.purgeMatchAssets(tournament_id, deletedMatches);
 
     this.logger.log(
-      `[${tournament_id}] tournament deleted, cleaned up assets across ${deletedMatchIds.length} matches`,
+      `[${tournament_id}] tournament deleted, cleaned up assets across ${deletedMatches.matchIds.length} matches`,
     );
 
     return {
@@ -1109,10 +1118,12 @@ export class TournamentsController {
   //     previously produced "tuple to be deleted was already modified by an
   //     operation triggered by the current command" when matches were left
   //     for the tournament cascade (via the bracket trigger) to clean up.
-  //  3. match_map_demos -- match_map_demos.match_id references matches(id)
-  //     ON DELETE RESTRICT (as does match_map_demos.match_map_id against
-  //     match_maps(id)), so demo rows must go before the match delete or it
-  //     fails outright.
+  //  3. match_map_demos -- deleted explicitly before the matches.
+  //     DEAFCS: match_map_demos.match_id is ON DELETE CASCADE (only
+  //     match_map_id against match_maps(id) is RESTRICT), so a match delete
+  //     does NOT fail on demos: it silently takes their rows, and their files
+  //     stay in storage. Verified on the production schema and in
+  //     test/tournament-deletion.spec.ts.
   //  4. matches -- everything else a match owns (match_maps and, through it,
   //     match_clips; per-round/per-player stat tables; event_match_links;
   //     match_player_disconnects; ...) is ON DELETE CASCADE from matches(id)
@@ -1125,10 +1136,18 @@ export class TournamentsController {
   // Ids are deduplicated by the `SELECT DISTINCT` in the detach query, so a
   // match referenced by more than one of this tournament's own bracket rows
   // is only processed once.
+  // DEAFCS: the matches and their maps are locked before anything is read
+  // or deleted, so no demo, clip or render lands in between. With
+  // keepPlayed (cancelling), a match with demos or clips is not detached or
+  // deleted; since a match delete silently takes its demo and clip rows
+  // (see 3.), they are re-checked under that lock, and a demo or clip that
+  // landed since the detach rolls the cancel back, and the event retry then
+  // keeps that match.
   private async deleteTournamentMatchRows(
     client: PoolClient,
     tournamentId: string,
-  ): Promise<string[]> {
+    keepPlayed = false,
+  ): Promise<DeletedTournamentMatches> {
     const detached = await client.query<{ match_id: string }>(
       `WITH owned_brackets AS (
          SELECT tb.id, tb.match_id
@@ -1136,6 +1155,19 @@ export class TournamentsController {
          JOIN public.tournament_stages ts ON ts.id = tb.tournament_stage_id
          WHERE ts.tournament_id = $1
            AND tb.match_id IS NOT NULL
+           AND NOT (
+             $2::boolean AND (
+               EXISTS (
+                 SELECT 1 FROM public.match_map_demos d
+                 WHERE d.match_id = tb.match_id
+               )
+               OR EXISTS (
+                 SELECT 1 FROM public.match_clips c
+                 JOIN public.match_maps mm ON mm.id = c.match_map_id
+                 WHERE mm.match_id = tb.match_id
+               )
+             )
+           )
          FOR UPDATE
        ),
        detached AS (
@@ -1146,12 +1178,12 @@ export class TournamentsController {
          RETURNING ob.match_id
        )
        SELECT DISTINCT match_id FROM detached`,
-      [tournamentId],
+      [tournamentId, keepPlayed],
     );
 
     const candidateIds = detached.rows.map((row) => row.match_id);
     if (candidateIds.length === 0) {
-      return [];
+      return { matchIds: [], clipKeys: [] };
     }
 
     // Re-check *before* deleting anything match-owned: this tournament's own
@@ -1170,39 +1202,125 @@ export class TournamentsController {
     );
     const matchIds = deletable.rows.map((row) => row.id);
     if (matchIds.length === 0) {
-      return [];
+      return { matchIds: [], clipKeys: [] };
     }
 
+    // A demo, clip or render insert takes a key-share lock on its match or
+    // map, so with these locked one still in flight waits for this
+    // transaction (and then fails on the deleted row), and one already
+    // committed is seen by the reads below.
     await client.query(
-      `DELETE FROM public.match_map_demos WHERE match_id = ANY($1::uuid[])`,
+      `SELECT 1 FROM public.matches WHERE id = ANY($1::uuid[]) FOR UPDATE`,
       [matchIds],
     );
+    await client.query(
+      `SELECT 1 FROM public.match_maps WHERE match_id = ANY($1::uuid[]) FOR UPDATE`,
+      [matchIds],
+    );
+
+    if (keepPlayed) {
+      const played = await client.query<{ played: boolean }>(
+        `SELECT EXISTS (
+                  SELECT 1 FROM public.match_map_demos
+                   WHERE match_id = ANY($1::uuid[])
+                ) OR EXISTS (
+                  SELECT 1 FROM public.match_clips c
+                    JOIN public.match_maps mm ON mm.id = c.match_map_id
+                   WHERE mm.match_id = ANY($1::uuid[])
+                ) AS played`,
+        [matchIds],
+      );
+      if (played.rows[0]?.played) {
+        throw Error(
+          "a cancelled tournament's match gained demos or clips, retrying",
+        );
+      }
+    }
+
+    // DEAFCS: deleting the matches cascades their match_clips rows, and the
+    // purge after commit can no longer look them up, so every clip's stored
+    // keys are read here first.
+    const clips = await client.query<{
+      file: string | null;
+      thumbnail_url: string | null;
+    }>(
+      `SELECT c.file, c.thumbnail_url
+         FROM public.match_clips c
+         JOIN public.match_maps mm ON mm.id = c.match_map_id
+        WHERE mm.match_id = ANY($1::uuid[])`,
+      [matchIds],
+    );
+    const clipKeys = clips.rows
+      .flatMap((clip) => [clip.file, clip.thumbnail_url])
+      .filter((key): key is string => !!key);
+
+    // DEAFCS: a render with no clip row yet (in flight, or failed after its
+    // poster frame) has files only its keys name (ClipsService.GetClipS3Key
+    // and GetClipThumbnailS3Key). Its row goes with the maps, so its keys are
+    // read here too; an upload that lands later removes its own files.
+    const renders = await client.query<{ key: string }>(
+      `SELECT 'clips/' || COALESCE(j.user_steam_id::text, 'system') || '/'
+              || j.id || ext.suffix AS key
+         FROM public.clip_render_jobs j
+         JOIN public.match_maps mm ON mm.id = j.match_map_id
+        CROSS JOIN (VALUES ('.mp4'), ('.jpg')) AS ext(suffix)
+        WHERE mm.match_id = ANY($1::uuid[])
+          AND j.clip_id IS NULL`,
+      [matchIds],
+    );
+    clipKeys.push(...renders.rows.map((row) => row.key));
+
+    if (!keepPlayed) {
+      await client.query(
+        `DELETE FROM public.match_map_demos WHERE match_id = ANY($1::uuid[])`,
+        [matchIds],
+      );
+    }
 
     await client.query(`DELETE FROM public.matches WHERE id = ANY($1::uuid[])`, [
       matchIds,
     ]);
 
-    return matchIds;
+    return { matchIds, clipKeys };
   }
 
-  // External S3 cleanup only, run after the owning transaction has already
-  // committed (or, for the Cancelled-event path, after its own match-row
-  // transaction commits). Each match is best-effort: one failure is logged
+  // External S3 cleanup only, run after deleteTournament's transaction has
+  // already committed. Each match is best-effort: one failure is logged
   // and does not stop the rest, and never throws back to the caller.
+  // DEAFCS: the rows are gone, so whatever MinIO refuses (clip keys read in
+  // the transaction, demo folders whose sweep failed) is handed to
+  // clips.removeDeletedFiles, which retries in the background.
   private async purgeMatchAssets(
     tournamentId: string,
-    matchIds: string[],
+    deleted: DeletedTournamentMatches,
   ): Promise<void> {
-    for (const matchId of matchIds) {
+    if (deleted.matchIds.length === 0) {
+      return;
+    }
+
+    const demoPrefixes: string[] = [];
+    for (const matchId of deleted.matchIds) {
       try {
-        await this.clips.deleteClipsForMatch(matchId);
         await this.demoMetadata.deleteDemosForMatch(matchId);
       } catch (error) {
+        demoPrefixes.push(`demos/${matchId}/`);
         this.logger.error(
           `[${tournamentId}] failed to purge S3 assets for match ${matchId}`,
           error,
         );
       }
+    }
+
+    try {
+      await this.clips.removeDeletedFiles({
+        keys: deleted.clipKeys,
+        prefixes: demoPrefixes,
+      });
+    } catch (error) {
+      this.logger.error(
+        `[${tournamentId}] failed to purge clip files of ${deleted.matchIds.length} matches`,
+        error,
+      );
     }
   }
   private async requireHistoricalRegistration(tournamentId: string) {

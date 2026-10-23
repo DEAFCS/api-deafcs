@@ -830,7 +830,14 @@ export class MatchesController {
     ) {
       try {
         if (!(await this.isReplacedByOwnOnDemandServer(data, matchId))) {
-          await this.matchAssistant.stopOnDemandServer(matchId);
+          // DEAFCS: only the server this change removed. A retried or late
+          // event (Restart Match, Reset Veto, a reassignment) must not stop
+          // the new server the match got since under the same Job name.
+          await this.matchAssistant.stopOnDemandServer(
+            matchId,
+            false,
+            data.created_at,
+          );
         }
       } catch (error) {
         this.logger.error(
@@ -846,6 +853,7 @@ export class MatchesController {
           id: matchId,
         },
         id: true,
+        status: true,
         options: {
           prefer_dedicated_server: true,
         },
@@ -862,11 +870,17 @@ export class MatchesController {
       throw Error("unable to find match");
     }
 
+    // DEAFCS: only while the match is still in the status this event says.
+    // A late or retried Live event (Hasura fetches events in batches and
+    // retries failed ones) would otherwise assign and boot a server for a
+    // match that Restart Match, Reset Veto or a cancel has moved on since,
+    // and push it to WaitingForServer past its check-in.
     if (
-      (status === "Live" &&
+      match.status === status &&
+      ((status === "Live" &&
         (!match.server || data.old.status !== "WaitingForServer")) ||
-      (status === "WaitingForServer" &&
-        data.old.server_id !== data.new.server_id)
+        (status === "WaitingForServer" &&
+          data.old.server_id !== data.new.server_id))
     ) {
       if (match.server) {
         if (match.server.reserved_by_match_id === matchId) {
@@ -2342,9 +2356,38 @@ export class MatchesController {
       throw Error("cannot reset while an affected downstream match is live");
     }
 
+    await this.assertDownstreamUnplayed(rows);
+
     return {
       impacts: rows,
     };
+  }
+
+  // DEAFCS: a reset deletes its downstream matches, and deleting a played one
+  // takes its results, statistics, demo and clip rows and leaves the files in
+  // storage. Refused here so the preview already says so; reset_tournament_match
+  // makes the same check under lock, which is what actually protects them.
+  public static readonly PLAYED_DOWNSTREAM_RESET_MESSAGE =
+    "A later match in this bracket has already been played, so this match cannot be reset.";
+
+  private async assertDownstreamUnplayed(
+    rows: Array<{ match_id: string | null; will_delete_match: boolean }>,
+  ) {
+    const deletedIds = rows
+      .filter((row) => row.will_delete_match && row.match_id)
+      .map((row) => row.match_id);
+    if (deletedIds.length === 0) {
+      return;
+    }
+
+    const [row] = await this.postgres.query<Array<{ played: boolean }>>(
+      `SELECT COALESCE(bool_or(public.match_has_played_data(id)), false) AS played
+         FROM unnest($1::uuid[]) AS id`,
+      [deletedIds],
+    );
+    if (row?.played) {
+      throw Error(MatchesController.PLAYED_DOWNSTREAM_RESET_MESSAGE);
+    }
   }
 
   @HasuraAction()
@@ -2362,9 +2405,13 @@ export class MatchesController {
     }
 
     const previewRows = await this.postgres.query<
-      { will_delete_match: boolean; match_status: string | null }[]
+      {
+        match_id: string | null;
+        will_delete_match: boolean;
+        match_status: string | null;
+      }[]
     >(
-      `SELECT will_delete_match, match_status FROM preview_tournament_match_reset($1::uuid)`,
+      `SELECT match_id, will_delete_match, match_status FROM preview_tournament_match_reset($1::uuid)`,
       [match_id],
     );
 
@@ -2381,6 +2428,8 @@ export class MatchesController {
     if (hasBlockingMatch) {
       throw Error("cannot reset while an affected downstream match is live");
     }
+
+    await this.assertDownstreamUnplayed(previewRows);
 
     const resolvedScheduledAt =
       scheduled_at && scheduled_at.trim().length > 0 ? scheduled_at : null;
@@ -2453,9 +2502,7 @@ export class MatchesController {
     const resolvedScheduledAt =
       scheduled_at && scheduled_at.trim().length > 0 ? scheduled_at : null;
 
-    const [created] = await this.postgres.query<
-      Array<{ match_id: string }>
-    >(
+    const [created] = await this.postgres.query<Array<{ match_id: string }>>(
       `SELECT recreate_tournament_bracket_match($1::uuid, $2::timestamptz) AS match_id`,
       [bracket_id, resolvedScheduledAt],
     );

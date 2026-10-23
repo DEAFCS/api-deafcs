@@ -709,6 +709,12 @@ type Mutation {
 }
 
 type Mutation {
+  restartMatch(
+    match_id: uuid!
+  ): SuccessOutput
+}
+
+type Mutation {
   restartMatchMap(
     match_id: uuid!
   ): SuccessOutput
@@ -731,6 +737,21 @@ type Mutation {
   restoreMatchRound(
     match_id: uuid!
     round: Int!
+  ): SuccessOutput
+}
+
+type Mutation {
+  rewindMapVeto(
+    match_id: uuid!
+    step: Int!
+    expected_picks: Int
+  ): SuccessOutput
+}
+
+type Mutation {
+  resetCaptainPick(
+    match_id: uuid!
+    expected_picks: Int
   ): SuccessOutput
 }
 

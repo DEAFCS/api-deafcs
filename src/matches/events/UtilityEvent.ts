@@ -24,6 +24,13 @@ export default class UtilityEvent extends MatchEventProcessor<{
             attacker_location_coordinates:
               this.data.attacker_location_coordinates,
           },
+          // A game server redelivers an event whose ack it missed (an API
+          // restart mid-match). The row is already stored, so the replay is
+          // acknowledged instead of failing on the primary key forever.
+          on_conflict: {
+            constraint: "player_utility_pkey",
+            update_columns: [],
+          },
         },
         __typename: true,
       },

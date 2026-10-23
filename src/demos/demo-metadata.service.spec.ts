@@ -322,3 +322,55 @@ describe("DemoMetadataService.ensureParsedById", () => {
     );
   });
 });
+
+describe("DemoMetadataService.deleteDemo", () => {
+  const ROW = {
+    id: "demo-1",
+    match_id: "match-1",
+    match_map_id: "map-1",
+    file: "demos/match-1/map-1/1-de_inferno.dem",
+    playback_file: "demos/match-1/map-1/playback/playback.v11.1.json.gz",
+  };
+
+  function make(removePrefix: jest.Mock) {
+    const mutation = jest.fn(async () => ({}));
+    const service = new DemoMetadataService(
+      new Logger("DemoMetadataTest"),
+      {
+        query: jest.fn(async () => ({ match_map_demos_by_pk: ROW })),
+        mutation,
+      } as never,
+      null as never,
+      { removePrefix } as never,
+      null as never,
+      null as never,
+      null as never,
+    );
+    return { service, mutation };
+  }
+
+  it("removes the demo and its playback blob, then the row", async () => {
+    const removePrefix = jest.fn(async () => 1);
+    const { service, mutation } = make(removePrefix);
+
+    await service.deleteDemo("demo-1");
+
+    expect(removePrefix).toHaveBeenCalledWith(ROW.file);
+    expect(removePrefix).toHaveBeenCalledWith(ROW.playback_file);
+    expect(mutation).toHaveBeenCalledTimes(1);
+  });
+
+  // A row deleted over a file that stayed leaves storage nothing counts.
+  it("keeps the row when a file could not be removed", async () => {
+    const removePrefix = jest
+      .fn()
+      .mockResolvedValueOnce(1)
+      .mockRejectedValueOnce(new Error("minio unavailable"));
+    const { service, mutation } = make(removePrefix);
+
+    await expect(service.deleteDemo("demo-1")).rejects.toThrow(
+      "unable to remove the files of demo demo-1",
+    );
+    expect(mutation).not.toHaveBeenCalled();
+  });
+});

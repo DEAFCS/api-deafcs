@@ -168,6 +168,7 @@ const setup = (
     benchedSub?: boolean;
     affiliated?: boolean;
     liveMaps?: Array<{ id: string }>;
+    lockedStatus?: string;
     restoreResponse?: string | undefined;
     serverResponse?: string | undefined;
   } = {},
@@ -202,6 +203,17 @@ const setup = (
           if (sql.includes("SELECT id FROM match_maps")) {
             return { rows: options.liveMaps ?? [] };
           }
+          if (sql.includes("FOR UPDATE")) {
+            const match = options.match ?? matchRow();
+            return {
+              rows: [
+                {
+                  status: options.lockedStatus ?? match.status,
+                  server_id: match.server_id,
+                },
+              ],
+            };
+          }
           return { rows: [] };
         },
       }),
@@ -223,14 +235,19 @@ const setup = (
     ),
   };
 
+  const gameStreamer = {
+    stopLiveIfRunning: jest.fn(async (): Promise<void> => undefined),
+  };
+
   const logger = { log: jest.fn(), warn: jest.fn() };
   const service = new MatchRecoveryService(
     logger as never,
     postgres as never,
     matchAssistant as never,
+    gameStreamer as never,
   );
 
-  return { service, postgres, matchAssistant, logger };
+  return { service, postgres, matchAssistant, gameStreamer, logger };
 };
 
 describe("MatchRecoveryService", () => {
@@ -688,44 +705,53 @@ describe("MatchRecoveryService", () => {
   });
 
   describe("restartMatch", () => {
-    it("cancels a live match, puts the map in progress back to the start, then reopens check-in", async () => {
-      const { service, postgres, matchAssistant } = setup({
-        liveMaps: [{ id: MAP_ID }],
-      });
+    // DEAFCS: no Canceled step (see restartMatch).
+    it("puts the map in progress back to the start, drains the server, then reopens check-in", async () => {
+      const { service, postgres, matchAssistant, gameStreamer, logger } = setup(
+        { liveMaps: [{ id: MAP_ID }] },
+      );
 
-      await service.restartMatch("match-1");
+      await service.restartMatch("match-1", VIEWER);
 
       expect(postgres.statements).toEqual([
-        "UPDATE matches SET status = 'Canceled' WHERE id = $1",
+        "SELECT status, server_id::text AS server_id FROM matches WHERE id = $1 FOR UPDATE",
         "SELECT id FROM match_maps WHERE match_id = $1 AND status = ANY($2)",
         "SELECT reset_match_map_to_round($1, 0)",
         "UPDATE match_maps SET status = 'Scheduled', started_at = NULL WHERE id = ANY($1)",
+        expect.stringMatching(
+          /^UPDATE servers SET reserved_by_match_id = NULL, draining_match_id = .* WHERE id = \$2 AND reserved_by_match_id = \$1$/,
+        ),
         "UPDATE matches SET status = 'WaitingForCheckIn', server_id = NULL, cancels_at = NULL WHERE id = $1",
       ]);
+      expect(
+        postgres.statements.some((sql) => sql.includes("'Canceled'")),
+      ).toBe(false);
       expect(matchAssistant.refreshServerMatch).toHaveBeenCalledWith(
         "server-1",
       );
+      expect(gameStreamer.stopLiveIfRunning).toHaveBeenCalledWith("match-1");
+      expect(logger.log).toHaveBeenCalledWith(
+        `[match-1] restarted the match from check-in (by ${VIEWER.steam_id}, ${VIEWER.role})`,
+      );
     });
 
-    it("reopens a canceled match without touching maps nobody is playing", async () => {
-      const { service, postgres, matchAssistant } = setup({
-        match: matchRow({ status: "Canceled", server_id: null }),
+    it("still restarts when the livestream can't be stopped", async () => {
+      const { service, gameStreamer, logger } = setup();
+      gameStreamer.stopLiveIfRunning.mockRejectedValue(new Error("down"));
+
+      await expect(service.restartMatch("match-1", VIEWER)).resolves.toEqual({
+        success: true,
       });
-
-      await service.restartMatch("match-1");
-
-      expect(postgres.statements).toEqual([
-        "SELECT id FROM match_maps WHERE match_id = $1 AND status = ANY($2)",
-        "UPDATE matches SET status = 'WaitingForCheckIn', server_id = NULL, cancels_at = NULL WHERE id = $1",
-      ]);
-      expect(matchAssistant.refreshServerMatch).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalled();
     });
 
     it.each([
       [matchRow({ status: "Finished" }), "a Finished match can't be restarted"],
+      [matchRow({ status: "Canceled" }), "a Canceled match can't be restarted"],
+      [matchRow({ status: "Veto" }), "a Veto match can't be restarted"],
       [
-        matchRow({ status: "Canceled", winning_lineup_id: LINEUP_1 }),
-        "this match already has a result",
+        matchRow({ status: "WaitingForCheckIn" }),
+        "a WaitingForCheckIn match can't be restarted",
       ],
       [
         matchRow({ source: "faceit" }),
@@ -734,8 +760,22 @@ describe("MatchRecoveryService", () => {
     ])("refuses %#", async (match, message) => {
       const { service, postgres } = setup({ match });
 
-      await expect(service.restartMatch("match-1")).rejects.toThrow(message);
+      await expect(service.restartMatch("match-1", VIEWER)).rejects.toThrow(
+        message,
+      );
       expect(postgres.transaction).not.toHaveBeenCalled();
+    });
+
+    it("changes nothing when the match ended while it was being restarted", async () => {
+      const { service, postgres, matchAssistant } = setup({
+        lockedStatus: "Finished",
+      });
+
+      await expect(service.restartMatch("match-1", VIEWER)).rejects.toThrow(
+        "a Finished match can't be restarted",
+      );
+      expect(postgres.statements).toHaveLength(1);
+      expect(matchAssistant.refreshServerMatch).not.toHaveBeenCalled();
     });
   });
 
@@ -924,6 +964,125 @@ describe("MatchRecoveryService", () => {
       );
       expect(matchAssistant.restartServerMap).not.toHaveBeenCalled();
       expect(resets(postgres)).toEqual([]);
+    });
+  });
+
+  // Reset Veto: upstream's rewindMapVeto (5Stack API 9f4c954, #686) at step 1.
+  // DEAFCS passes the viewer, and only staff may (see "who may reset the veto").
+  const STAFF = { steam_id: VIEWER.steam_id, role: "match_organizer" } as const;
+
+  // The query the service answers with: rewind_map_veto's released server, and
+  // whether a tournament organizer organizes this match's tournament.
+  const answer = (
+    postgres: ReturnType<typeof setup>["postgres"],
+    { serverId = null as string | null, own = false } = {},
+  ) => {
+    const query = postgres.query.getMockImplementation()!;
+    postgres.query.mockImplementation((async (sql: string) =>
+      sql.includes("rewind_map_veto")
+        ? [{ server_id: serverId }]
+        : sql.includes("AS own")
+          ? [{ own }]
+          : query(sql)) as never);
+  };
+
+  const vetoCalls = (postgres: ReturnType<typeof setup>["postgres"]) =>
+    postgres.query.mock.calls.filter(([sql]) => /rewind_map_veto/.test(sql));
+
+  describe("rewindMapVeto (Reset Veto)", () => {
+    it("tells the released server to drop the old maps", async () => {
+      const { service, postgres, matchAssistant } = setup();
+      answer(postgres, { serverId: "server-1" });
+
+      await service.rewindMapVeto("match-1", 1, 9, STAFF);
+
+      expect(postgres.query).toHaveBeenCalledWith(
+        expect.stringContaining("rewind_map_veto($1, $2, $3)"),
+        ["match-1", 1, 9],
+      );
+      expect(matchAssistant.refreshServerMatch).toHaveBeenCalledWith(
+        "server-1",
+      );
+    });
+
+    it("leaves servers alone while the veto is still running", async () => {
+      const { service, postgres, matchAssistant } = setup();
+      answer(postgres);
+
+      await service.rewindMapVeto("match-1", 1, undefined, STAFF);
+
+      expect(postgres.query).toHaveBeenCalledWith(
+        expect.stringContaining("rewind_map_veto($1, $2, $3)"),
+        ["match-1", 1, null],
+      );
+      expect(matchAssistant.refreshServerMatch).not.toHaveBeenCalled();
+    });
+
+    it("logs who reset it", async () => {
+      const { service, postgres, logger } = setup();
+      answer(postgres);
+
+      await service.rewindMapVeto("match-1", 1, 4, STAFF);
+
+      expect(logger.log).toHaveBeenCalledWith(
+        `[match-1] organizer reset the veto (by ${VIEWER.steam_id}, match_organizer)`,
+      );
+    });
+
+    // DEAFCS: Undo the Last Step and Fix a Mis-pick are not offered.
+    it.each([2, 3, 9, 0])("refuses step %s", async (step) => {
+      const { service, postgres, matchAssistant } = setup();
+      answer(postgres);
+
+      await expect(
+        service.rewindMapVeto("match-1", step, 9, STAFF),
+      ).rejects.toThrow("only the whole veto can be reset");
+      expect(vetoCalls(postgres)).toEqual([]);
+      expect(matchAssistant.refreshServerMatch).not.toHaveBeenCalled();
+    });
+
+    it("has no Give 30s More", () => {
+      expect((setup().service as any).extendVetoClock).toBeUndefined();
+    });
+  });
+
+  // DEAFCS: administrators and match organizers on every match, tournament
+  // organizers on their own tournaments' matches, also while playing in it.
+  // Never a match's owner (role user) or a moderator.
+  describe("who may reset the veto", () => {
+    const tryReset = async (role: string, own: boolean) => {
+      const { service, postgres } = setup({ affiliated: true });
+      answer(postgres, { own });
+      const viewer = { steam_id: VIEWER.steam_id, role } as never;
+      const [result] = await Promise.allSettled([
+        service.rewindMapVeto("match-1", 1, 3, viewer),
+      ]);
+      return { result, calls: vetoCalls(postgres).length };
+    };
+
+    it.each([
+      ["administrator", false],
+      ["match_organizer", false],
+      ["tournament_organizer", true],
+    ])("lets a %s, even playing in it", async (role, own) => {
+      const { result, calls } = await tryReset(role, own);
+      expect(result.status).toBe("fulfilled");
+      expect(calls).toBe(1);
+    });
+
+    it.each([
+      ["tournament_organizer", false],
+      ["moderator", true],
+      ["streamer", true],
+      ["verified_user", true],
+      ["user", true],
+    ])("refuses a %s (own tournament: %s)", async (role, own) => {
+      const { result, calls } = await tryReset(role, own);
+      expect(result.status).toBe("rejected");
+      expect((result as PromiseRejectedResult).reason.message).toBe(
+        "only staff can reset the veto",
+      );
+      expect(calls).toBe(0);
     });
   });
 });

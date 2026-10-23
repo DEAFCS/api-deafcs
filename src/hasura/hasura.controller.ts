@@ -102,6 +102,7 @@ export class HasuraController {
         op: event.op,
         old: event.data.old || {},
         new: event.data.new || {},
+        created_at: request.body.created_at,
       })();
     } catch (error) {
       this.logger.error(`unable to complete event ${trigger.name}`, {

@@ -20,6 +20,12 @@ import {
   TERMINAL_STATUSES,
   resolveInClusterApiBase,
 } from "./clips.constants";
+import {
+  DeletedFiles,
+  removeClipFiles,
+  removeDeletedFiles,
+} from "./clip-files";
+import { RemoveDeletedFiles } from "./jobs/RemoveDeletedFiles";
 const STATUS_HISTORY_CAP = 50;
 const LAST_TICK_FOR_MALFORMED = Number.MAX_SAFE_INTEGER;
 
@@ -28,6 +34,7 @@ type ClipSegmentSpec = ClipSpec["segments"][number];
 @Injectable()
 export class ClipsService {
   private static readonly CLIP_VIEW_TTL_SECONDS = 6 * 60 * 60;
+  public static readonly REMOVE_DELETED_FILES_ATTEMPTS = 10;
 
   constructor(
     private readonly logger: Logger,
@@ -1317,6 +1324,7 @@ export class ClipsService {
         id: true,
         user_steam_id: true,
         file: true,
+        thumbnail_url: true,
       },
     });
     if (!row) {
@@ -1326,9 +1334,9 @@ export class ClipsService {
       throw new Error("you can only delete your own clips");
     }
 
-    const ownerSteamId = String(row.user_steam_id ?? userSteamId);
-
-    await this.s3.removePrefix(`clips/${ownerSteamId}/${clipId}`);
+    if (!(await removeClipFiles(this.s3, row))) {
+      throw new Error("unable to remove the clip files, try again");
+    }
 
     await this.hasura.mutation({
       delete_match_clips_by_pk: {
@@ -1345,18 +1353,50 @@ export class ClipsService {
           where: { match_map: { match_id: { _eq: matchId } } },
         },
         id: true,
-        user_steam_id: true,
+        file: true,
+        thumbnail_url: true,
       },
     });
 
     for (const clip of match_clips) {
-      await this.s3.removePrefix(`clips/${clip.user_steam_id}/${clip.id}`);
+      if (!(await removeClipFiles(this.s3, clip))) {
+        throw new Error(`unable to remove the files of clip ${clip.id}`);
+      }
       await this.hasura.mutation({
         delete_match_clips_by_pk: {
           __args: { id: clip.id },
           __typename: true,
         },
       });
+    }
+  }
+
+  // DEAFCS: for files whose rows were deleted in a transaction that has already
+  // committed (permanent tournament delete). Nothing else knows about them, so
+  // what cannot be removed now goes to RemoveDeletedFiles, which retries for
+  // about 8.5 hours and keeps a job that still fails (removeOnFail: false).
+  public async removeDeletedFiles(files: DeletedFiles): Promise<void> {
+    const left = await removeDeletedFiles(this.s3, files);
+    const remaining = [...left.keys, ...left.prefixes];
+    if (remaining.length === 0) {
+      return;
+    }
+
+    this.logger.warn(
+      `[remove-deleted-files] ${remaining.length} file(s) could not be removed, retrying in the background`,
+    );
+
+    try {
+      await this.batchQueue.add(RemoveDeletedFiles.name, left, {
+        attempts: ClipsService.REMOVE_DELETED_FILES_ATTEMPTS,
+        backoff: { type: "exponential", delay: 60 * 1000 },
+        removeOnFail: false,
+      });
+    } catch (error) {
+      this.logger.error(
+        `[remove-deleted-files] could not queue a retry, still stored: ${remaining.join(", ")}`,
+        error,
+      );
     }
   }
 
@@ -1711,7 +1751,55 @@ export class ClipsService {
 
     await this.s3.put(key, fileStream, "image/jpeg");
 
+    // DEAFCS: the render (and its match) can be deleted while the upload
+    // runs. Checked again after the upload: a render still there now is one
+    // a tournament delete reads before it commits, and so removes this file
+    // with the rest; a render already gone leaves the file to us.
+    if (!(await this.renderJobExists(jobId))) {
+      await this.s3.remove(key);
+      throw new Error(`clip render ${jobId} not found`);
+    }
+
     return { key };
+  }
+
+  // DEAFCS: the clip row failed to land, so nothing records the files just
+  // uploaded. The usual cause is the match (with its maps and this render)
+  // deleted during the upload: the insert waits for that delete, then fails
+  // on the gone map, after the delete's own cleanup already ran. Removed
+  // unless a clip row does point at them (an insert that landed but whose
+  // answer was lost), so a live clip is never touched.
+  private async removeUnrecordedClipFiles(file: string, thumbnail: string) {
+    try {
+      const { match_clips } = await this.hasura.query({
+        match_clips: {
+          __args: {
+            where: { file: { _eq: file } },
+            limit: 1,
+          },
+          id: true,
+        },
+      });
+      if (match_clips.length > 0) {
+        return;
+      }
+      await removeClipFiles(this.s3, { file, thumbnail_url: thumbnail });
+    } catch (error) {
+      this.logger.error(
+        `[clip] could not remove unrecorded clip files ${file}, ${thumbnail}`,
+        error,
+      );
+    }
+  }
+
+  private async renderJobExists(jobId: string): Promise<boolean> {
+    const { clip_render_jobs_by_pk } = await this.hasura.query({
+      clip_render_jobs_by_pk: {
+        __args: { id: jobId },
+        id: true,
+      },
+    });
+    return !!clip_render_jobs_by_pk;
   }
 
   public async finalizeClipUpload(
@@ -1840,29 +1928,37 @@ export class ClipsService {
       spec,
     );
 
-    const { insert_match_clips_one } = await this.hasura.mutation({
-      insert_match_clips_one: {
-        __args: {
-          object: {
-            ...(userSteamId ? { user_steam_id: userSteamId } : {}),
-            target_steam_id: targetSteamId,
-            match_map_id: row.match_map_id,
-            match_map_demo_id: row.match_map_demo_id ?? null,
-            title,
-            duration_ms: durationMs,
-            file: key,
-            thumbnail_url: thumbnailUrl,
-            kills_count: killsCount,
-            round,
-            visibility,
-            size: videoSize + thumbnailSize,
+    let clipId: string;
+    try {
+      const { insert_match_clips_one } = await this.hasura.mutation({
+        insert_match_clips_one: {
+          __args: {
+            object: {
+              ...(userSteamId ? { user_steam_id: userSteamId } : {}),
+              target_steam_id: targetSteamId,
+              match_map_id: row.match_map_id,
+              match_map_demo_id: row.match_map_demo_id ?? null,
+              title,
+              duration_ms: durationMs,
+              file: key,
+              thumbnail_url: thumbnailUrl,
+              kills_count: killsCount,
+              round,
+              visibility,
+              size: videoSize + thumbnailSize,
+            },
           },
+          id: true,
         },
-        id: true,
-      },
-    });
-    const clipId = insert_match_clips_one?.id;
-    if (!clipId) throw new Error("failed to insert match_clips row");
+      });
+      if (!insert_match_clips_one?.id) {
+        throw new Error("failed to insert match_clips row");
+      }
+      clipId = insert_match_clips_one.id;
+    } catch (error) {
+      await this.removeUnrecordedClipFiles(key, thumbnailKey);
+      throw error;
+    }
 
     await this.hasura.mutation({
       update_clip_render_jobs_by_pk: {
