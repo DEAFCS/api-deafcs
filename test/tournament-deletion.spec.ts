@@ -672,6 +672,12 @@ describe("tournament deletion (SQL-driven)", () => {
     const [live, started] = (await tfx.getBrackets(t.stageIds[0])).filter(
       (b) => b.round === 1,
     );
+    // A match needs a map to go Live; the map itself is not played data.
+    await postgres.query(
+      `INSERT INTO match_maps (match_id, map_id, "order")
+       SELECT $1, id, 1 FROM maps ORDER BY name LIMIT 1`,
+      [live.match_id],
+    );
     await postgres.query("UPDATE matches SET status = 'Live' WHERE id = $1", [
       live.match_id,
     ]);
