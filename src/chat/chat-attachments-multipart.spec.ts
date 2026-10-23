@@ -1,5 +1,9 @@
 import { Readable } from "stream";
 import { Logger } from "@nestjs/common";
+import { ModuleRef } from "@nestjs/core";
+import { Test } from "@nestjs/testing";
+import { getQueuesProcessors } from "../utilities/QueueProcessors";
+import { AbortChatAttachmentUpload } from "./jobs/AbortChatAttachmentUpload";
 import {
   AbortChatAttachmentUploadJobName,
   ChatAttachmentsService,
@@ -436,5 +440,38 @@ describe("chat attachment multipart upload", () => {
         service.expireUpload(data.id, data.objectKey, data.uploadId, true),
       ).resolves.toBeUndefined();
     });
+  });
+
+  // Queue jobs are dispatched by job name to the class of that name.
+  it("the abort job reaches its handler on the chat video queue", async () => {
+    const attachments = { expireUpload: jest.fn(async () => undefined) };
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        { provide: ChatAttachmentsService, useValue: attachments },
+        AbortChatAttachmentUpload,
+      ],
+    }).compile();
+    const processors = getQueuesProcessors("ChatVideo") as Array<
+      new (logger: Logger, moduleRef: ModuleRef) => {
+        process(job: unknown): Promise<void>;
+      }
+    >;
+    const processor = new processors[0](
+      { error: jest.fn() } as unknown as Logger,
+      moduleRef.get(ModuleRef),
+    );
+
+    await processor.process({
+      name: AbortChatAttachmentUploadJobName,
+      attemptsMade: 1,
+      data: { id: "id", objectKey: "key", uploadId: "upload" },
+    });
+
+    expect(attachments.expireUpload).toHaveBeenCalledWith(
+      "id",
+      "key",
+      "upload",
+      true,
+    );
   });
 });
