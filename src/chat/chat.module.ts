@@ -18,6 +18,9 @@ import { S3Module } from "../s3/s3.module";
 import { GiphyModule } from "../giphy/giphy.module";
 
 import { ChatVideoController } from "./chat-video.controller";
+import { ChatMediaController } from "./chat-media.controller";
+import { ChatAttachmentsService } from "./chat-attachments.service";
+import { AbortChatAttachmentUpload } from "./jobs/AbortChatAttachmentUpload";
 import { BullModule } from "@nestjs/bullmq";
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
 import { BullBoardModule } from "@bull-board/nestjs";
@@ -43,14 +46,16 @@ import { getQueuesProcessors } from "../utilities/QueueProcessors";
   ],
   providers: [
     ChatService,
+    ChatAttachmentsService,
     ChatGateway,
     ExpireChatVideoDraft,
     ExpireSentChatVideoMedia,
+    AbortChatAttachmentUpload,
     ...getQueuesProcessors("ChatVideo"),
     loggerFactory(),
   ],
   exports: [ChatService],
-  controllers: [ChatController, ChatVideoController],
+  controllers: [ChatController, ChatVideoController, ChatMediaController],
 })
 export class ChatModule implements NestModule {
   // The raw attachment upload: see configureAttachmentUpload.

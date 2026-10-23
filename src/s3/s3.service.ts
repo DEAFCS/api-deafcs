@@ -337,6 +337,27 @@ export class S3Service {
     });
   }
 
+  // Upstream streams the part through the aws-sdk; the minio client here only
+  // takes a whole body, so a part (at most 8 MiB) is held while it is sent.
+  public async uploadPart(
+    key: string,
+    uploadId: string,
+    partNumber: number,
+    body: Buffer,
+    bucket: string = this.bucket,
+  ): Promise<void> {
+    await this.client.uploadPart(
+      {
+        bucketName: bucket,
+        objectName: key,
+        uploadID: uploadId,
+        partNumber,
+        headers: {},
+      },
+      body,
+    );
+  }
+
   public async completeMultipartUpload(
     key: string,
     uploadId: string,
