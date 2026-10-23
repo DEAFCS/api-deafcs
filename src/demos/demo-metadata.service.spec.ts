@@ -341,7 +341,7 @@ describe("DemoMetadataService.deleteDemo", () => {
         mutation,
       } as never,
       null as never,
-      { removePrefix } as never,
+      { removePrefixStrictly: removePrefix } as never,
       null as never,
       null as never,
       null as never,
@@ -371,6 +371,25 @@ describe("DemoMetadataService.deleteDemo", () => {
     await expect(service.deleteDemo("demo-1")).rejects.toThrow(
       "unable to remove the files of demo demo-1",
     );
+    expect(mutation).not.toHaveBeenCalled();
+  });
+
+  // A refused key in the match's folder throws (strict sweep), so the demo
+  // rows stay and the caller retries instead of forgetting the file.
+  it("deleteDemosForMatch keeps the rows when the store refuses a key", async () => {
+    const removePrefix = jest
+      .fn()
+      .mockRejectedValue(
+        new Error(
+          "unable to remove 1 object(s) under demos/match-1/: AccessDenied",
+        ),
+      );
+    const { service, mutation } = make(removePrefix);
+
+    await expect(service.deleteDemosForMatch("match-1")).rejects.toThrow(
+      /AccessDenied/,
+    );
+    expect(removePrefix).toHaveBeenCalledWith("demos/match-1/");
     expect(mutation).not.toHaveBeenCalled();
   });
 });

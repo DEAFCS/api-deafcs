@@ -149,6 +149,26 @@ export class S3Service {
     prefix: string,
     bucket: string = this.bucket,
   ): Promise<number> {
+    return await this.sweepPrefix(prefix, bucket, false);
+  }
+
+  // DeleteObjects refuses keys inside a 200, so only a strict sweep notices.
+  // For a caller whose own row is the only record of the files: it must keep
+  // that row and try again rather than forget objects still being billed.
+  // DEAFCS: port of upstream 5stackgg/api removePrefixStrictly (#739, on the
+  // files-sdk S3Service of #405) onto this minio client.
+  public async removePrefixStrictly(
+    prefix: string,
+    bucket: string = this.bucket,
+  ): Promise<number> {
+    return await this.sweepPrefix(prefix, bucket, true);
+  }
+
+  private async sweepPrefix(
+    prefix: string,
+    bucket: string,
+    strict: boolean,
+  ): Promise<number> {
     const entries: Array<{ name: string; versionId?: string }> = [];
     const stream = this.client.listObjects(bucket, prefix, true, {
       IncludeVersion: true,
@@ -169,23 +189,75 @@ export class S3Service {
     let removed = 0;
     for (let i = 0; i < entries.length; i += 1000) {
       const batch = entries.slice(i, i + 1000);
-      await this.client.removeObjects(bucket, batch);
-      removed += batch.length;
+      const errors = S3Service.deleteErrors(
+        await this.client.removeObjects(bucket, batch),
+      );
+
+      const [failure] = errors;
+
+      if (failure) {
+        const message =
+          `unable to remove ${errors.length} object(s) under ${prefix}: ${failure.Code} ${failure.Message ?? ""}`.trim();
+
+        if (strict) {
+          throw new Error(message);
+        }
+
+        this.logger.warn(message);
+      }
+
+      removed += batch.length - errors.length;
     }
     return removed;
   }
 
+  // Answers with the keys that are gone, so a caller can keep track of one
+  // the store refused (upstream removeKeys contract). DEAFCS: plain keys only,
+  // the bucket is not versioned.
   public async removeKeys(
     keys: string[],
     bucket: string = this.bucket,
-  ): Promise<number> {
-    let removed = 0;
+  ): Promise<string[]> {
+    const failed = new Set<string>();
+
     for (let i = 0; i < keys.length; i += 1000) {
       const batch = keys.slice(i, i + 1000);
-      await this.client.removeObjects(bucket, batch);
-      removed += batch.length;
+      try {
+        const errors = S3Service.deleteErrors(
+          await this.client.removeObjects(bucket, batch),
+        );
+        for (const error of errors) {
+          failed.add(error.Key);
+          this.logger.error(
+            `unable to remove ${error.Key}: ${error.Code} ${error.Message ?? ""}`.trim(),
+          );
+        }
+      } catch (error) {
+        for (const key of batch) {
+          failed.add(key);
+        }
+        this.logger.error(
+          `unable to remove ${batch.length} object(s): ${(error as Error)?.message}`,
+        );
+      }
     }
-    return removed;
+
+    return keys.filter((key) => !failed.has(key));
+  }
+
+  // minio's removeObjects resolves with the <Error> entries of the
+  // DeleteObjects response (declared as { Error }, parsed as the entry itself).
+  private static deleteErrors(
+    results: unknown[],
+  ): Array<{ Key?: string; Code?: string; Message?: string }> {
+    return (results ?? [])
+      .map((result) => (result as { Error?: object })?.Error ?? result)
+      .filter(
+        (error): error is { Key?: string; Code?: string; Message?: string } =>
+          !!error &&
+          typeof error === "object" &&
+          ("Key" in error || "Code" in error),
+      );
   }
 
   public async remove(

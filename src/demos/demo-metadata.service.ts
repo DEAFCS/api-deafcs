@@ -563,7 +563,7 @@ export class DemoMetadataService {
     let removed = true;
     if (!DemoMetadataService.isExternalDemoUrl(demo.file)) {
       try {
-        await this.s3.removePrefix(demo.file);
+        await this.s3.removePrefixStrictly(demo.file);
       } catch (error) {
         removed = false;
         this.logger.warn(
@@ -573,7 +573,7 @@ export class DemoMetadataService {
     }
     if (demo.playback_file) {
       try {
-        await this.s3.removePrefix(demo.playback_file);
+        await this.s3.removePrefixStrictly(demo.playback_file);
       } catch (error) {
         removed = false;
         this.logger.warn(
@@ -592,8 +592,11 @@ export class DemoMetadataService {
     });
   }
 
+  // DEAFCS: strict (upstream sweeps leniently). Every caller deletes the match
+  // rows only after this returns, or hands the folder to RemoveDeletedFiles
+  // when it throws, so a key the store refuses is never forgotten.
   public async deleteDemosForMatch(matchId: string): Promise<void> {
-    const removed = await this.s3.removePrefix(`demos/${matchId}/`);
+    const removed = await this.s3.removePrefixStrictly(`demos/${matchId}/`);
     if (removed > 0) {
       this.logger.log(
         `[demo-delete] swept ${removed} object(s) under demos/${matchId}/`,
