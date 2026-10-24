@@ -43,6 +43,17 @@ BEGIN
             USING ERRCODE = '22000';
     END IF;
 
+    -- The one exception: the first calculation of a match that ended in the
+    -- last hour before the boundary (see elo_late_first_calculation), flagged
+    -- by generate_player_elo_for_match for that match in this transaction.
+    IF TG_OP = 'INSERT'
+       AND NEW.created_at < _lock
+       AND NEW.created_at >= _lock - interval '1 hour'
+       AND current_setting('deafcs.elo_late_first_calculation', true) = NEW.match_id::text
+    THEN
+        RETURN NEW;
+    END IF;
+
     IF TG_OP IN ('INSERT', 'UPDATE') AND NEW.created_at < _lock THEN
         RAISE EXCEPTION 'ELO history before % is locked: no rating can be added for match %', _lock, NEW.match_id
             USING ERRCODE = '22000';

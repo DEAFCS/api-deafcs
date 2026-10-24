@@ -124,13 +124,17 @@ describe("ELO v2 + history lock (SQL-driven)", () => {
         [match.id],
       );
     }
+    // Two statements, like the other ELO suites: setting the winner lets
+    // tbu_matches stamp ended_at = now(), so the end time is set after it.
     await postgres.query(
       `UPDATE matches
-          SET winning_lineup_id = ${winner === "one" ? "lineup_1_id" : "lineup_2_id"},
-              ended_at = ${at}
+          SET winning_lineup_id = ${winner === "one" ? "lineup_1_id" : "lineup_2_id"}
         WHERE id = $1`,
       [match.id],
     );
+    await postgres.query(`UPDATE matches SET ended_at = ${at} WHERE id = $1`, [
+      match.id,
+    ]);
     return match;
   };
 
@@ -378,7 +382,11 @@ describe("ELO v2 + history lock (SQL-driven)", () => {
 
       await activate();
       await postgres.query(
-        "UPDATE matches SET winning_lineup_id = lineup_1_id, ended_at = now() + interval '30 minutes' WHERE id = $1",
+        "UPDATE matches SET winning_lineup_id = lineup_1_id WHERE id = $1",
+        [m.id],
+      );
+      await postgres.query(
+        "UPDATE matches SET ended_at = now() + interval '30 minutes' WHERE id = $1",
         [m.id],
       );
       await generate(m.id);
@@ -403,7 +411,11 @@ describe("ELO v2 + history lock (SQL-driven)", () => {
 
       await activate();
       await postgres.query(
-        "UPDATE matches SET started_at = now() + interval '1 minute', winning_lineup_id = lineup_1_id, ended_at = now() + interval '40 minutes' WHERE id = $1",
+        "UPDATE matches SET started_at = now() + interval '1 minute', winning_lineup_id = lineup_1_id WHERE id = $1",
+        [m.id],
+      );
+      await postgres.query(
+        "UPDATE matches SET ended_at = now() + interval '40 minutes' WHERE id = $1",
         [m.id],
       );
       await generate(m.id);
@@ -632,12 +644,15 @@ describe("ELO v2 + history lock (SQL-driven)", () => {
     it("keeps a no-show penalty after the boundary and re-bases it on the rebuilt rating", async () => {
       const one = await fx.players(5);
       const two = await fx.players(5);
-      await activate();
-      const a = await played({ one, two, at: "now() + interval '1 hour'" });
+      // In the past: the no-show penalty reads the rating "before now".
+      await postgres.query(
+        "SELECT lock_elo_history('test', 2::smallint, NULL, now() - interval '1 day')",
+      );
+      const a = await played({ one, two, at: "now() - interval '2 hours'" });
       await generate(a.id);
       const canceled = await fx.match({ type: "Competitive", bestOf: 1 });
       await postgres.query(
-        "UPDATE matches SET ended_at = now() + interval '2 hours' WHERE id = $1",
+        "UPDATE matches SET ended_at = now() - interval '1 hour' WHERE id = $1",
         [canceled.id],
       );
       await postgres.query("SELECT apply_no_show_elo_penalty($1, $2)", [
@@ -662,6 +677,267 @@ describe("ELO v2 + history lock (SQL-driven)", () => {
       await expect(
         postgres.query("SELECT recompute_elo_after_lock()"),
       ).rejects.toThrow(/not locked/);
+    });
+  });
+
+  // The approved schedule: Season 1 runs until Season 2 starts on 1 January
+  // 2027 (seasons.starts_at, already in production). Here Season 1 is
+  // [now - 20 days, now - 1 day), ELO v2 was activated 10 days ago, and
+  // Season 2 starts 1 day ago. Its seasons row is inserted after Season 1's
+  // matches, which is how the clock reaching 1 January looks to the database.
+  describe("Season 2 transition", () => {
+    const ts = async (sql: string) =>
+      (
+        await postgres.query<Array<{ t: string }>>(`SELECT (${sql})::text AS t`)
+      )[0].t;
+    const startOf = async (steam: string, matchId: string) => {
+      const [row] = await postgres.query<
+        Array<{ start: number; season_id: string; elo_version: number }>
+      >(
+        `SELECT (current - change)::int AS start, season_id, elo_version
+           FROM player_elo WHERE match_id = $1 AND steam_id = $2`,
+        [matchId, steam],
+      );
+      return row;
+    };
+    const startSeason2 = async () =>
+      fx.season(await ts("now() - interval '1 day'"));
+    const season2Id = async () =>
+      (
+        await postgres.query<Array<{ id: string }>>(
+          "SELECT id FROM seasons ORDER BY starts_at DESC LIMIT 1",
+        )
+      )[0].id;
+
+    const setup = async () => {
+      await fx.enableSeasons();
+      await fx.season(
+        await ts("now() - interval '20 days'"),
+        await ts("now() - interval '1 day'"),
+      );
+      const one = await fx.players(5);
+      const two = await fx.players(5);
+      const [d1, d2] = await fx.players(2);
+      // Season 1, before v2 (version 1).
+      const old5 = await played({ one, two, at: "now() - interval '15 days'" });
+      const oldDuel = await played({
+        type: "Duel",
+        one: [d1],
+        two: [d2],
+        at: "now() - interval '15 days'",
+      });
+      await generate(old5.id);
+      await generate(oldDuel.id);
+      await postgres.query(
+        "SELECT lock_elo_history('test v2 activation', 2::smallint, NULL, now() - interval '10 days')",
+      );
+      // Season 1, after v2.
+      const s1v2 = await played({
+        one,
+        two,
+        at: "now() - interval '5 days'",
+        startedAt: "now() - interval '5 days 1 hour'",
+      });
+      const s1Duel = await played({
+        type: "Duel",
+        one: [d1],
+        two: [d2],
+        at: "now() - interval '5 days'",
+      });
+      await generate(s1v2.id);
+      await generate(s1Duel.id);
+      return { one, two, d1, d2, old5, s1v2 };
+    };
+
+    it("activating v2 during Season 1 keeps every rating; Season 1 v2 matches continue from it", async () => {
+      const { one, old5, s1v2 } = await setup();
+      const after = await startOf(one[0], s1v2.id);
+      expect(after.start).toBe((await rows(old5.id))[one[0]].current);
+      expect(after.elo_version).toBe(2);
+    });
+
+    it("Season 2's start locks all of Season 1 automatically; every mode starts at 5,000 (v2 for 5v5, version 1 for Duel and Wingman)", async () => {
+      const { one, two, d1, d2, s1v2 } = await setup();
+      const season1 = await allElo();
+      await startSeason2();
+      const [{ same }] = await postgres.query<Array<{ same: boolean }>>(
+        "SELECT elo_history_locked_before() = (SELECT max(starts_at) FROM seasons) AS same",
+      );
+      expect(same).toBe(true);
+
+      // Season 1 after v2 is permanent now too.
+      await expect(
+        postgres.query(
+          "UPDATE player_elo SET current = current + 1 WHERE match_id = $1",
+          [s1v2.id],
+        ),
+      ).rejects.toThrow(/is locked/);
+      await expect(
+        postgres.query("UPDATE matches SET elo_voided = true WHERE id = $1", [
+          s1v2.id,
+        ]),
+      ).rejects.toThrow(/locked ELO history/);
+      expect(await generate(s1v2.id)).toEqual([
+        { generate_player_elo_for_match: 0 },
+      ]);
+
+      const s2 = await played({ one, two, at: "now() - interval '12 hours'" });
+      const s2Duel = await played({
+        type: "Duel",
+        one: [d1],
+        two: [d2],
+        at: "now() - interval '12 hours'",
+      });
+      const wing = await fx.players(4);
+      const s2Wing = await played({
+        type: "Wingman",
+        one: wing.slice(0, 2),
+        two: wing.slice(2),
+        at: "now() - interval '11 hours'",
+      });
+      await generate(s2.id);
+      await generate(s2Duel.id);
+      await generate(s2Wing.id);
+
+      const season2 = await season2Id();
+      for (const steam of [...one, ...two]) {
+        expect(await startOf(steam, s2.id)).toEqual({
+          start: 5000,
+          season_id: season2,
+          elo_version: 2,
+        });
+      }
+      for (const steam of [d1, d2]) {
+        expect(await startOf(steam, s2Duel.id)).toEqual({
+          start: 5000,
+          season_id: season2,
+          elo_version: 1,
+        });
+      }
+      expect((await startOf(wing[0], s2Wing.id)).elo_version).toBe(1);
+      const kept = (await allElo()).filter((r) =>
+        season1.some((b) => b.match_id === r.match_id),
+      );
+      expect(kept).toEqual(season1);
+    });
+
+    it("Void and Recalculate in Season 2 rebuild Season 2 only, never Season 1 or pre-v2 history", async () => {
+      const { one, two } = await setup();
+      const season1 = await allElo();
+      await startSeason2();
+      const a = await played({ one, two, at: "now() - interval '12 hours'" });
+      const b = await played({
+        one,
+        two,
+        winner: "two",
+        at: "now() - interval '6 hours'",
+      });
+      await generate(a.id);
+      await generate(b.id);
+
+      await postgres.query(
+        "UPDATE matches SET elo_voided = true WHERE id = $1",
+        [a.id],
+      );
+      const [{ rebuilt }] = await postgres.query<Array<{ rebuilt: number }>>(
+        "SELECT recompute_elo_after_lock() AS rebuilt",
+      );
+      expect(rebuilt).toBe(2);
+      for (const steam of [...one, ...two]) {
+        expect((await rows(a.id))[steam].change).toBe(0);
+        expect((await startOf(steam, b.id)).start).toBe(5000);
+      }
+      const kept = (await allElo()).filter((r) =>
+        season1.some((s) => s.match_id === r.match_id),
+      );
+      expect(kept).toEqual(season1);
+      const once = await allElo();
+      await postgres.query("SELECT recompute_elo_after_lock()");
+      expect(await allElo()).toEqual(once);
+    });
+
+    it("a match started in Season 1 and finished after midnight counts for Season 2: v2, from 5,000", async () => {
+      const { one, two } = await setup();
+      const across = await fx.match({ type: "Competitive", bestOf: 1 });
+      for (const steam of one) await fx.lineupPlayer(across.lineup_1_id, steam);
+      for (const steam of two) await fx.lineupPlayer(across.lineup_2_id, steam);
+      await postgres.query(
+        "UPDATE matches SET started_at = now() - interval '1 day 30 minutes' WHERE id = $1",
+        [across.id],
+      );
+      await startSeason2();
+      await postgres.query(
+        "UPDATE matches SET winning_lineup_id = lineup_1_id WHERE id = $1",
+        [across.id],
+      );
+      await postgres.query(
+        "UPDATE matches SET ended_at = now() - interval '23 hours 20 minutes' WHERE id = $1",
+        [across.id],
+      );
+      await generate(across.id);
+      const season2 = await season2Id();
+      for (const steam of [...one, ...two]) {
+        expect(await startOf(steam, across.id)).toEqual({
+          start: 5000,
+          season_id: season2,
+          elo_version: 2,
+        });
+      }
+    });
+
+    it("a Season 1 match whose ELO job runs just after midnight still gets its first rating, then is locked", async () => {
+      const { one, two, s1v2 } = await setup();
+      const late = await played({
+        one,
+        two,
+        at: "now() - interval '1 day 10 minutes'",
+      });
+      await startSeason2();
+
+      expect(await generate(late.id)).toEqual([
+        { generate_player_elo_for_match: 10 },
+      ]);
+      const r = await startOf(one[0], late.id);
+      expect(r.start).toBe((await rows(s1v2.id))[one[0]].current);
+      expect(r.elo_version).toBe(2);
+      // That first calculation only: now it is locked like the rest of Season 1.
+      const first = await rows(late.id);
+      expect(await generate(late.id)).toEqual([
+        { generate_player_elo_for_match: 0 },
+      ]);
+      expect(await rows(late.id)).toEqual(first);
+      await expect(
+        postgres.query("UPDATE matches SET elo_voided = true WHERE id = $1", [
+          late.id,
+        ]),
+      ).rejects.toThrow(/locked ELO history/);
+      // A Season 1 match from earlier that never got ELO is not filled in later.
+      const older = await played({ one, two, at: "now() - interval '2 days'" });
+      expect(await generate(older.id)).toEqual([
+        { generate_player_elo_for_match: 0 },
+      ]);
+    });
+
+    it("a player who has not played in Season 2 counts as 5,000 there and keeps their Season 1 history", async () => {
+      const { two, s1v2 } = await setup();
+      const season1Rating = (await rows(s1v2.id))[two[0]].current;
+      expect(season1Rating).not.toBe(5000);
+      await startSeason2();
+      const fresh = await fx.players(5);
+      const m = await played({
+        one: fresh,
+        two,
+        at: "now() - interval '2 hours'",
+      });
+      await generate(m.id);
+      const [r] = await postgres.query<
+        Array<{ opponent_team_elo_avg: number }>
+      >(
+        "SELECT opponent_team_elo_avg::float8 FROM player_elo WHERE match_id = $1 AND steam_id = $2",
+        [m.id, fresh[0]],
+      );
+      expect(r.opponent_team_elo_avg).toBe(5000);
+      expect((await rows(s1v2.id))[two[0]].current).toBe(season1Rating);
     });
   });
 });

@@ -616,7 +616,11 @@ BEGIN
     -- rows takes the same transaction lock, so this never interleaves with a
     -- recompute.
     PERFORM pg_advisory_xact_lock(public.elo_write_lock_key());
-    IF public.match_elo_locked(_match_id) THEN
+    IF public.elo_late_first_calculation(_match_id) THEN
+        -- Its first rows may be written just before the boundary (the
+        -- player_elo guard checks this flag, for this match only).
+        PERFORM set_config('deafcs.elo_late_first_calculation', _match_id::text, true);
+    ELSIF public.match_elo_locked(_match_id) THEN
         RETURN 0;
     END IF;
 

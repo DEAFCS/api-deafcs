@@ -14,11 +14,48 @@
 -- SQL functions (not plpgsql) where other SQL functions call them: this
 -- directory loads before hasura/functions/match.
 
+-- The boundary. Once ELO history is locked at all (the v2 activation), every
+-- season that has started since closes the one before it automatically: at
+-- Season 2's start (seasons.starts_at, already scheduled) all of Season 1
+-- becomes permanent, with no manual step. Before any lock row exists nothing
+-- is locked, whatever the seasons. (Settings read inline: seasons_enabled()
+-- loads after this directory.)
 CREATE OR REPLACE FUNCTION public.elo_history_locked_before()
 RETURNS timestamptz
 LANGUAGE sql STABLE
 AS $$
-    SELECT max(locked_before) FROM public.elo_history_locks;
+    SELECT CASE
+        WHEN l.locked IS NULL THEN NULL
+        ELSE GREATEST(l.locked, COALESCE(s.started, l.locked))
+    END
+      FROM (SELECT max(locked_before) AS locked FROM public.elo_history_locks) l
+      LEFT JOIN LATERAL (
+          SELECT max(se.starts_at) AS started
+            FROM public.seasons se
+           WHERE se.starts_at <= now()
+             AND COALESCE(
+                 (SELECT st.value FROM public.settings st WHERE st.name = 'public.seasons_enabled'),
+                 'false'
+             ) = 'true'
+      ) s ON true;
+$$;
+
+-- A rated match that ended in the last hour before the boundary but whose
+-- ELO was never calculated (its job ran just after midnight, say) still gets
+-- that first calculation, once; its rows are locked like the rest. Anything
+-- else before the boundary stays as it is.
+CREATE OR REPLACE FUNCTION public.elo_late_first_calculation(_match_id uuid)
+RETURNS boolean
+LANGUAGE sql STABLE
+AS $$
+    SELECT public.elo_history_locked_before() IS NOT NULL
+       AND EXISTS (
+           SELECT 1 FROM public.matches m
+            WHERE m.id = _match_id
+              AND m.ended_at < public.elo_history_locked_before()
+              AND m.ended_at >= public.elo_history_locked_before() - interval '1 hour'
+       )
+       AND NOT EXISTS (SELECT 1 FROM public.player_elo pe WHERE pe.match_id = _match_id);
 $$;
 
 -- The 5v5 formula in effect at a moment: the latest lock at or before it, or

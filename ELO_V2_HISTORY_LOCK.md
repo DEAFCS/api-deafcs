@@ -48,7 +48,10 @@ Every `player_elo` row records the formula (`elo_version`) and scale
 ## The history lock
 
 Table `elo_history_locks` (migration `1891300000100_elo_history_lock`),
-append-only. The latest `locked_before` is the boundary. Enforced in the
+append-only. The boundary (`elo_history_locked_before()`) is the latest
+`locked_before`, or, once any lock exists, the start of the latest season that
+has begun if that is later: a new season closes the previous one by itself.
+Before the first lock nothing is locked. Enforced in the
 database (`hasura/triggers/elo_history_lock.sql`), so no job or admin action can
 bypass it:
 
@@ -98,27 +101,40 @@ Rollback of the code after activation: roll back WEB, API and the Hasura init
 image; the lock table and guards stay (the migration's `down.sql` refuses to
 drop a lock). Ratings are never touched by a rollback.
 
-## Season 2 (1 January 2027): needs a decision
+## Season 2 (1 January 2027): automatic, approved
 
-Production already has **Season 2 from 2027-01-01 00:00 UTC to 2027-07-01**
-(created 2026-08-18) and `public.seasons_enabled = true`. Each season has its
-own ELO stream, so at that moment **every mode (5v5, Wingman, Duel) restarts at
-5,000 automatically**, with no action. Season 1 rows, leaderboards (season
-selector) and awards stay. If the reset must wait for a separate approval,
-Season 2's start has to be moved before 1 January (an admin season edit,
-production data, needs GO).
+Production has **Season 2 from 2027-01-01 00:00 UTC to 2027-07-01** (created
+2026-08-18) and `public.seasons_enabled = true`. This is the approved schedule
+(Anders, 2026-10-24). Nothing has to be run at the transition:
 
-To do at the transition (with GO):
+- Each season has its own ELO stream (`season_for_timestamp(ended_at)`), so
+  every mode (5v5, Wingman, Duel) starts again at 5,000 for each player's first
+  Season 2 match. Season 1 rows, leaderboards (season selector) and awards stay.
+- ELO v2 continues for rated 5v5 (the formula comes from the lock rows, not the
+  season); Duel and Wingman keep version 1.
+- At 00:00 UTC the lock boundary moves to Season 2's start by itself: all of
+  Season 1 (before and after the v2 activation) becomes permanent. Void and
+  Recalculate in Season 2 rebuild Season 2 only.
+- A match that starts in Season 1 and ends after midnight belongs to Season 2
+  (season = end time, as before): v2 if it started after the activation, and
+  every player starts it at 5,000.
+- A Season 1 match that ended in the last hour before midnight but whose ELO
+  job runs after it still gets that first calculation, once; then it is locked.
+  An older Season 1 match without ELO is not filled in later.
+- A player who hasn't played in Season 2 counts as 5,000 in Season 2 team
+  averages; their Season 1 rows are unchanged.
 
-1. Confirm the Season 2 row and whether Wingman/Duel should reset too (they
-   will, with the current season system).
-2. Shortly after the start, once Season 1's last matches have their ELO:
-   `SELECT lock_elo_history('Season 1 closed', 2::smallint, <steam id>, '2027-01-01 00:00:00+00');`
-   That makes all of Season 1 permanent (until then, Season 1 matches after the
-   v2 activation stay recomputable).
-3. Matches that start in Season 1 and end after midnight belong to Season 2
-   (season = end time), as today.
-4. Check the Season 2 leaderboards and that new matches start from 5,000.
+Display note (existing behavior, not changed): `get_player_season_elo_by_type`
+falls back to the player's latest rating of any season while they have no
+Season 2 row, so their profile keeps showing their final Season 1 rating until
+their first Season 2 match (which itself starts at 5,000).
+
+Optional, with GO: an explicit marker row,
+`SELECT lock_elo_history('Season 1 closed', 2::smallint, <steam id>, '2027-01-01 00:00:00+00');`
+on or after 1 January. It changes nothing (the season start already locks
+Season 1) but records the transition in the lock table.
+
+Tested in `test/elo-v2-history-lock.spec.ts`, "Season 2 transition".
 
 ## Simulation (read-only, production data, 2026-10-24)
 
