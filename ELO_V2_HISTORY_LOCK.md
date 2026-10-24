@@ -124,10 +124,12 @@ Production has **Season 2 from 2027-01-01 00:00 UTC to 2027-07-01** (created
 - A player who hasn't played in Season 2 counts as 5,000 in Season 2 team
   averages; their Season 1 rows are unchanged.
 
-Display note (existing behavior, not changed): `get_player_season_elo_by_type`
-falls back to the player's latest rating of any season while they have no
-Season 2 row, so their profile keeps showing their final Season 1 rating until
-their first Season 2 match (which itself starts at 5,000).
+Active-season rating (changed, approved: "show 5,000"): `get_player_season_elo_by_type`
+returns 5,000 while a player has no row in the active season, so profile, web,
+matchmaking and draft balancing, friends and tournament ELO limits all show
+5,000 until their first Season 2 match. Season 1 rows stay readable by season.
+With no active season (seasons off, or between seasons) it is the player's
+latest rating, as before. Tested in `test/season-active-elo.spec.ts`.
 
 Optional, with GO: an explicit marker row,
 `SELECT lock_elo_history('Season 1 closed', 2::smallint, <steam id>, '2027-01-01 00:00:00+00');`
