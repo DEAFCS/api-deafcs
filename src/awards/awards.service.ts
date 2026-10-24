@@ -221,6 +221,22 @@ export class AwardsService {
     if (award.archived_at) {
       throw new BadRequestException("Archived awards cannot be granted");
     }
+    // DEAFCS: an award given outside any tournament, event, season or league
+    // is a Special award (Hall of Fame, Community Contributor, ...). MVP and
+    // placement medals stay tied to tournament/league results, and built-in
+    // awards (tournament placements, Player of the Month) have their own
+    // flows. 5Stack allows any award here.
+    if (
+      !input.tournament_id &&
+      !input.event_id &&
+      !input.elo_season_id &&
+      !input.league_season_id &&
+      (award.tier !== "special" || award.system_key)
+    ) {
+      throw new BadRequestException(
+        "Only Special awards can be granted outside a tournament",
+      );
+    }
     let tournamentTeamId: string | null = null;
     if (input.tournament_id) {
       tournamentTeamId = await this.resolveTournamentTeam(

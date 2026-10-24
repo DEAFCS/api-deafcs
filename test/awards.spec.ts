@@ -1107,6 +1107,64 @@ describe("awards (SQL-driven)", () => {
         expect(row.elo_season_id).toBe(season);
       });
 
+      it("grants a Special award to a player outside any tournament", async () => {
+        const awardId = await createAward("Hall of Fame");
+        const steam = await fx.player();
+
+        const granted = await controller.grantAward({
+          award_id: awardId,
+          player_steam_id: steam,
+          note: "Founding member",
+          user: user(await fx.player(), "administrator"),
+        });
+
+        const [row] = await postgres.query<
+          Array<{
+            source: string;
+            tournament_id: string | null;
+            placement: number | null;
+            player_steam_id: string;
+          }>
+        >(
+          `SELECT o.source, o.tournament_id, o.placement, r.player_steam_id
+             FROM award_recipients r
+             JOIN award_occurrences o ON o.id=r.occurrence_id
+            WHERE r.id=$1`,
+          [granted.id],
+        );
+        expect(row).toEqual({
+          source: "manual",
+          tournament_id: null,
+          placement: null,
+          player_steam_id: steam,
+        });
+      });
+
+      it.each(["mvp", "gold", "silver", "bronze"])(
+        "refuses a %s award outside a tournament",
+        async (tier) => {
+          const awardId = await createAward(`Loose ${tier}`, tier);
+
+          await expect(
+            controller.grantAward({
+              award_id: awardId,
+              player_steam_id: await fx.player(),
+              user: user(await fx.player(), "administrator"),
+            }),
+          ).rejects.toThrow("Only Special awards");
+        },
+      );
+
+      it("refuses a built-in award outside its own flow", async () => {
+        await expect(
+          controller.grantAward({
+            award_id: await systemAward("player_of_the_month"),
+            player_steam_id: await fx.player(),
+            user: user(await fx.player(), "administrator"),
+          }),
+        ).rejects.toThrow("Only Special awards");
+      });
+
       it("runs occurrence creation and recipient fan-out in one transaction", async () => {
         const transaction = jest.spyOn(postgres, "transaction");
         const awardId = await createAward("Transactional");
