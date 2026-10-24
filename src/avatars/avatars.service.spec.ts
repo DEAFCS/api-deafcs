@@ -3,8 +3,8 @@ import { AvatarsService } from "./avatars.service";
 import { User } from "../auth/types/User";
 import { e_player_roles_enum } from "generated";
 
-// General roster images are Administrator/Tournament Organizer only, no
-// self-service. Team-specific roster images additionally let a team's own
+// General roster images: the player themselves (5Stack), or Tournament
+// Organizer/Administrator for anyone (DEAFCS staff). Team-specific roster images additionally let a team's own
 // owner or a team_roster 'Admin' manage anyone on that team, and any
 // verified_user+ manage their own image regardless of team role (see
 // assertTeamRosterEditor / commit 06b62c7). Normal avatar editing is
@@ -84,19 +84,21 @@ describe("AvatarsService - roster image permissions", () => {
   });
 
   describe("uploadPlayerRosterImage / removePlayerRosterImage (general roster image)", () => {
-    it.each(DENIED_ROLES)(
-      "rejects role %s uploading their OWN general roster image (self-service removed)",
+    it.each(ALL_ROLES)(
+      "allows role %s to upload their OWN general roster image",
       async (role) => {
+        hasura.query.mockResolvedValueOnce({
+          players_by_pk: { roster_image_url: null },
+        });
         const caller = user(role);
-        await expect(
-          service.uploadPlayerRosterImage(
-            caller.steam_id,
-            caller,
-            Buffer.from(""),
-            "image/png",
-          ),
-        ).rejects.toBeInstanceOf(ForbiddenException);
-        expect(hasura.query).not.toHaveBeenCalled();
+        const path = await service.uploadPlayerRosterImage(
+          caller.steam_id,
+          caller,
+          Buffer.from("x"),
+          "image/png",
+        );
+        expect(path).toMatch(/^avatars\/roster-players\//);
+        expect(s3.put).toHaveBeenCalled();
       },
     );
 
@@ -139,13 +141,39 @@ describe("AvatarsService - roster image permissions", () => {
     );
 
     it.each(DENIED_ROLES)(
-      "rejects role %s removing a general roster image, including self",
+      "rejects role %s removing ANOTHER player's general roster image",
       async (role) => {
+        const caller = user(role, "76561190000000001");
+        await expect(
+          service.removePlayerRosterImage("76561190000000002", caller),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(hasura.query).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(ALL_ROLES)(
+      "allows role %s to remove their OWN general roster image",
+      async (role) => {
+        hasura.query.mockResolvedValueOnce({
+          players_by_pk: { roster_image_url: "avatars/roster-players/x.png" },
+        });
+        postgres.transaction.mockImplementationOnce(async (callback: any) =>
+          callback({
+            query: jest
+              .fn()
+              .mockResolvedValueOnce({
+                rows: [{ roster_image_url: "avatars/roster-players/x.png" }],
+              })
+              .mockResolvedValueOnce({ rows: [] })
+              .mockResolvedValueOnce({ rows: [{ referenced: false }] }),
+          }),
+        );
+
         const caller = user(role);
         await expect(
           service.removePlayerRosterImage(caller.steam_id, caller),
-        ).rejects.toBeInstanceOf(ForbiddenException);
-        expect(hasura.query).not.toHaveBeenCalled();
+        ).resolves.toBeUndefined();
+        expect(s3.remove).toHaveBeenCalledWith("avatars/roster-players/x.png");
       },
     );
 
