@@ -1155,14 +1155,25 @@ describe("awards (SQL-driven)", () => {
         },
       );
 
-      it("refuses a built-in award outside its own flow", async () => {
-        await expect(
-          controller.grantAward({
-            award_id: await systemAward("player_of_the_month"),
-            player_steam_id: await fx.player(),
-            user: user(await fx.player(), "administrator"),
-          }),
-        ).rejects.toThrow("Only Special awards");
+      it("grants Player of the Month directly, without a tournament", async () => {
+        const steam = await fx.player();
+        const granted = await controller.grantAward({
+          award_id: await systemAward("player_of_the_month"),
+          player_steam_id: steam,
+          user: user(await fx.player(), "administrator"),
+        });
+
+        const [row] = await postgres.query<
+          Array<{ tier: string; tournament_id: string | null }>
+        >(
+          `SELECT a.tier, o.tournament_id
+             FROM award_recipients r
+             JOIN award_occurrences o ON o.id=r.occurrence_id
+             JOIN awards a ON a.id=o.award_id
+            WHERE r.id=$1`,
+          [granted.id],
+        );
+        expect(row).toEqual({ tier: "special", tournament_id: null });
       });
 
       it("runs occurrence creation and recipient fan-out in one transaction", async () => {
