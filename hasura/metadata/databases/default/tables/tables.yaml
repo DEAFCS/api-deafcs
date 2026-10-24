@@ -151,6 +151,7 @@
 - "!include public_plugin_versions.yaml"
 - "!include public_push_notification_preferences.yaml"
 - "!include public_push_subscriptions.yaml"
+- "!include public_recent_ban_entries.yaml"
 - "!include public_seasons.yaml"
 - "!include public_server_regions.yaml"
 - "!include public_servers.yaml"

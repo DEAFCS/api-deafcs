@@ -1,0 +1,11 @@
+function:
+  name: recently_banned_players
+  schema: public
+configuration:
+  custom_root_fields: {}
+  exposed_as: query
+  session_argument: hasura_session
+# DEAFCS: Moderator and above (inherited by match_organizer,
+# tournament_organizer, administrator). 5Stack grants this to guest.
+permissions:
+  - role: moderator
