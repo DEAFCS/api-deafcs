@@ -156,6 +156,37 @@ export class PlayerEloRecomputeService {
     await this.cache.put(SUPPRESS_KEY, true, RUNNING_TTL_SECONDS);
 
     try {
+      // DEAFCS ELO history lock: once ELO history is locked (ELO v2
+      // activation, a season transition) only the matches after the boundary
+      // are rebuilt, from each player's last locked rating, in one
+      // transaction (recompute_elo_after_lock). The full rebuild below would
+      // rewrite locked history and is refused by the database anyway.
+      if (await this.historyLocked()) {
+        const [{ total }] = await this.postgres.query<Array<{ total: number }>>(
+          `SELECT count(*)::int AS total
+             FROM matches
+            WHERE ended_at >= elo_history_locked_before()
+              AND winning_lineup_id IS NOT NULL`,
+        );
+        status.total = total;
+        await this.saveStatus(status, RUNNING_TTL_SECONDS);
+        this.logger.log(
+          `[elo-recompute] rebuilding ELO after the history lock (${total} matches)`,
+        );
+        const [{ rebuilt }] = await this.postgres.transaction((client) =>
+          client
+            .query("SET LOCAL statement_timeout = 0")
+            .then(() =>
+              client.query<{ rebuilt: number }>(
+                "SELECT recompute_elo_after_lock() AS rebuilt",
+              ),
+            )
+            .then((result) => result.rows),
+        );
+        status.completed = rebuilt;
+        return;
+      }
+
       await this.postgres.query(`TRUNCATE TABLE player_elo`);
 
       const ids = await this.fetchAllMatchIds();
@@ -331,6 +362,14 @@ export class PlayerEloRecomputeService {
     ttl: number,
   ): Promise<void> {
     await this.cache.put(STATUS_KEY, status, ttl);
+  }
+
+  // True once an ELO history lock exists (see elo_history_lock.sql).
+  public async historyLocked(): Promise<boolean> {
+    const [row] = await this.postgres.query<Array<{ locked: boolean }>>(
+      "SELECT elo_history_locked_before() IS NOT NULL AS locked",
+    );
+    return row?.locked === true;
   }
 
   private async fetchAllMatchIds(): Promise<string[]> {

@@ -446,6 +446,15 @@ export class MatchesModule implements NestModule {
       return;
     }
 
+    // DEAFCS ELO history lock: never replay locked history (the database
+    // refuses the TRUNCATE too, which would otherwise fail at startup).
+    const [lock] = await this.postgres.query<Array<{ locked: boolean }>>(
+      "SELECT elo_history_locked_before() IS NOT NULL AS locked",
+    );
+    if (lock?.locked) {
+      return;
+    }
+
     await this.postgres.query(`TRUNCATE TABLE player_elo`);
 
     const matches = await this.hasuraService.query({

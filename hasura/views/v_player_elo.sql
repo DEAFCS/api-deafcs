@@ -28,7 +28,12 @@ SELECT
     pe.performance_multiplier,
     pe.map_wins,
     pe.map_losses,
-    pe.series_multiplier
+    pe.series_multiplier,
+    -- DEAFCS: which formula produced the row (1 original, 2 = 5v5 ELO v2)
+    -- and its expected-score scale (NULL on rows from before it was stored:
+    -- version 1, scale 4000).
+    pe.elo_version,
+    COALESCE(pe.scale_factor, 4000) AS scale_factor
 FROM
     player_elo pe
 JOIN

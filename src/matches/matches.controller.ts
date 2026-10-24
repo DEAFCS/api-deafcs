@@ -1495,6 +1495,20 @@ export class MatchesController {
       );
     }
 
+    // DEAFCS ELO history lock: ratings before the boundary are permanent
+    // (the database refuses this too, see hasura/triggers/elo_history_lock.sql).
+    const [lockState] = await this.postgres.query<
+      Array<{ locked: boolean; locked_before: string | null }>
+    >(
+      `SELECT match_elo_locked($1) AS locked, elo_history_locked_before()::text AS locked_before`,
+      [match_id],
+    );
+    if (lockState?.locked) {
+      throw Error(
+        `this match is part of the locked ELO history (before ${lockState.locked_before}); its ELO can no longer be voided`,
+      );
+    }
+
     const voided = await this.postgres.query<Array<{ id: string }>>(
       `UPDATE matches
           SET elo_voided = true, elo_voided_at = now(), elo_voided_by = $2

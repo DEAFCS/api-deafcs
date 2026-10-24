@@ -115,6 +115,29 @@ export class SeasonEloBackfillService {
     await this.eloRecompute.setSuppressEvents(true);
 
     try {
+      // DEAFCS ELO history lock: a season that reaches into the locked history
+      // can't be rebuilt from scratch (it would rewrite locked ratings; the
+      // database refuses it too). Its matches after the boundary are rebuilt
+      // by the ELO recompute instead.
+      const [lockCheck] = await this.postgres.query<
+        Array<{ blocked: boolean }>
+      >(
+        `SELECT EXISTS (
+           SELECT 1 FROM seasons s
+            WHERE s.id = $1
+              AND elo_history_locked_before() IS NOT NULL
+              AND s.starts_at < elo_history_locked_before()
+         ) AS blocked`,
+        [seasonId],
+      );
+      if (lockCheck?.blocked) {
+        status.canceled = true;
+        this.logger.warn(
+          `[season-backfill] season ${seasonId} starts before the ELO history lock; not rebuilt`,
+        );
+        return;
+      }
+
       // Clean slate for this season only — other seasons' ELO is independent and
       // stays untouched. Per-match recompute below re-inserts with season_id set.
       await this.postgres.query(

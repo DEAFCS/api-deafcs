@@ -22,6 +22,7 @@ select_permissions:
         - damage_percent
         - deaths
         - elo_change
+        - elo_version
         - expected_score
         - impact
         - k_factor
@@ -37,6 +38,7 @@ select_permissions:
         - player_name
         - player_steam_id
         - player_team_elo_avg
+        - scale_factor
         - season_id
         - series_multiplier
         - team_avg_kda

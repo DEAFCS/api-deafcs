@@ -185,8 +185,22 @@ DECLARE
     -- Who the match is rated over (see match_elo_participants): the team
     -- averages use the same set, so a substitute who sat out moves nothing.
     _participants BIGINT[];
+
+    -- DEAFCS ELO v2 (every rated 5v5 match, whatever its source: matchmaking,
+    -- tournament, league). Which formula a match uses is fixed per match
+    -- (public.match_elo_version: stamped when it started), never by when the
+    -- calculation runs. Duel and Wingman always use version 1.
+    _elo_version SMALLINT := 1;
+    _hltv_rating FLOAT;
 BEGIN
     SELECT "type" INTO match_type FROM match_options WHERE id = match_record.match_options_id;
+
+    IF get_match_type_min_players(match_type) = 5 THEN
+        _elo_version := public.match_elo_version(match_record);
+    END IF;
+    IF _elo_version >= 2 THEN
+        _scale_factor := 10000;
+    END IF;
 
     SELECT COALESCE(array_agg(mep.steam_id), ARRAY[]::BIGINT[]) INTO _participants
     FROM public.match_elo_participants(match_record.id) mep;
@@ -420,6 +434,23 @@ BEGIN
 
     _performance_multiplier := _impact;
 
+    -- ELO v2: Impact is the player's existing DEAFCS HLTV-style match rating
+    -- (v_player_match_rating: rounds-weighted over the maps, 2 decimals) and
+    -- PERF comes from it (public.elo_v2_performance_multiplier: 0.75 - 1.25,
+    -- neutral at 1.00, the mirror on a loss). No rating (no rounds or KAST
+    -- data, e.g. a forfeit) is neutral: PERF 1.00, Impact stored as NULL.
+    IF _elo_version >= 2 THEN
+        SELECT r.hltv_rating INTO _hltv_rating
+          FROM public.v_player_match_rating r
+         WHERE r.match_id = match_record.id
+           AND r.steam_id = player_record.steam_id;
+        _impact := _hltv_rating;
+        _performance_multiplier := public.elo_v2_performance_multiplier(
+            _hltv_rating,
+            match_record.winning_lineup_id = _player_lineup_id
+        );
+    END IF;
+
     -- Calculate the expected score from this player's OWN rating vs. the
     -- opponent team's average — not the player's team average. Using the
     -- team average made every teammate share one expected score, so a 6000
@@ -433,12 +464,16 @@ BEGIN
     -- - A difference of 2000 points means the stronger player is expected to win 3 times more often
     -- - A difference of 1000 points means the stronger player is expected to win 1.6 times more often
     -- This allows for a much wider range of ratings (0-50,000+) with 28,000 being expert level
-    _expected_score := 1.0 / (1.0 + POWER(10.0, (_opponent_team_elo_avg - _current_player_elo) / _scale_factor));
+    _expected_score := public.elo_expected_score(_current_player_elo, _opponent_team_elo_avg, _scale_factor);
 
     -- Determine the actual score based on match result
     -- 1.0 for a win, 0.0 for a loss.
     IF match_record.winning_lineup_id = _player_lineup_id THEN
         _actual_score := 1.0;
+    ELSIF _elo_version >= 2 THEN
+        -- ELO v2: PERF already holds the loss mirror (2 - win PERF), so a
+        -- strong game loses less (1.50 -> 0.75).
+        _actual_score := 0.0;
     ELSE
         _actual_score := 0.0;
         -- On losses, invert and scale the performance multiplier to protect good performers
@@ -493,7 +528,9 @@ BEGIN
         'map_wins', _player_map_wins,
         'map_losses', _player_map_losses,
         'series_multiplier', _series_multiplier,
-        'elo_penalty', _elo_penalty
+        'elo_penalty', _elo_penalty,
+        'elo_version', _elo_version,
+        'scale_factor', _scale_factor
     );
 END;
 $$ LANGUAGE plpgsql STABLE;
@@ -571,6 +608,15 @@ BEGIN
     -- Skip matches without a winning_lineup_id
     IF match_record.winning_lineup_id IS NULL THEN
         RAISE NOTICE 'Skipping match % as it has no winning_lineup_id', _match_id;
+        RETURN 0;
+    END IF;
+
+    -- DEAFCS ELO history lock: a match in the locked history keeps the rows it
+    -- has (hasura/functions/elo/elo_history_lock.sql). Every writer of rated
+    -- rows takes the same transaction lock, so this never interleaves with a
+    -- recompute.
+    PERFORM pg_advisory_xact_lock(public.elo_write_lock_key());
+    IF public.match_elo_locked(_match_id) THEN
         RETURN 0;
     END IF;
 
@@ -659,14 +705,22 @@ BEGIN
             map_wins,
             map_losses,
             series_multiplier,
-            season_id
+            season_id,
+            elo_version,
+            scale_factor
         ) VALUES (
             match_type,
             match_record.id,
             player_record.steam_id,
             new_elo,
             elo_change,
-            COALESCE((elo_data->>'impact')::NUMERIC, 1.0),
+            -- v2 keeps a missing HLTV-style rating as NULL (shown as "-"),
+            -- version 1 keeps its 1.0 default.
+            CASE
+                WHEN COALESCE((elo_data->>'elo_version')::SMALLINT, 1) >= 2
+                    THEN (elo_data->>'impact')::NUMERIC
+                ELSE COALESCE((elo_data->>'impact')::NUMERIC, 1.0)
+            END,
             match_record.ended_at,
             (elo_data->>'actual_score')::double precision,
             (elo_data->>'expected_score')::double precision,
@@ -684,7 +738,9 @@ BEGIN
             (elo_data->>'map_wins')::integer,
             (elo_data->>'map_losses')::integer,
             (elo_data->>'series_multiplier')::integer,
-            _season_id
+            _season_id,
+            COALESCE((elo_data->>'elo_version')::SMALLINT, 1),
+            (elo_data->>'scale_factor')::integer
         );
 
         ratings_created := ratings_created + 1;
