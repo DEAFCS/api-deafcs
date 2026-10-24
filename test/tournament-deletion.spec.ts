@@ -40,6 +40,7 @@ describe("tournament deletion (SQL-driven)", () => {
       { log: jest.fn(), error: jest.fn(), warn: jest.fn() } as any,
       {} as any, // S3Service is not used by deleteTournamentAwardRecords
       postgres,
+      { notifyPlayers: jest.fn() } as any,
     );
     await seedRegionWithServer(postgres, "TestA");
   }, 600_000);

@@ -28,6 +28,8 @@ export const NOTIFICATION_CATEGORIES: Record<string, string[]> = {
   // DEAFCS: replies to your News comments, a separate switch from new articles.
   news_replies: ["NewsCommentReply"],
   tournaments: ["TournamentCreated", "TournamentReminder"],
+  // DEAFCS: 5Stack's AwardGranted, its own switch (on by default).
+  awards: ["AwardGranted"],
   matches: ["MatchStatusChange", "MatchImported", "MatchSupport"],
   sanctions: ["PlayerSanctioned", "PlayerWarning"],
   scrims: [

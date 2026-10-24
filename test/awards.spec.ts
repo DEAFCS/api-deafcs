@@ -8,6 +8,11 @@ import { RequestMethod } from "@nestjs/common";
 import { Fixtures } from "./utils/fixtures";
 import { TournamentFixtures } from "./utils/tournament-fixtures";
 import {
+  awardNotifications,
+  recordingNotifications,
+  settle,
+} from "./utils/award-notifications";
+import {
   bootMigratedDb,
   seedRegionWithServer,
   SqlTestDb,
@@ -35,6 +40,7 @@ describe("awards (SQL-driven)", () => {
   });
 
   beforeEach(async () => {
+    await postgres.query("DELETE FROM notifications");
     await postgres.query("DELETE FROM award_recipients");
     await postgres.query("DELETE FROM award_occurrences");
     await postgres.query("DELETE FROM matches");
@@ -828,6 +834,7 @@ describe("awards (SQL-driven)", () => {
     };
     let createFloor: string;
     let grantFloor: string;
+    let notifications: ReturnType<typeof recordingNotifications>;
 
     beforeEach(() => {
       createFloor = "administrator";
@@ -838,10 +845,12 @@ describe("awards (SQL-driven)", () => {
         remove: jest.fn(),
         has: jest.fn().mockResolvedValue(false),
       };
+      notifications = recordingNotifications(postgres);
       service = new AwardsService(
         new Logger("AwardsActionTest"),
         s3 as never,
         postgres,
+        notifications as never,
       );
 
       controller = new AwardsController(service, {
@@ -1174,6 +1183,142 @@ describe("awards (SQL-driven)", () => {
           [granted.id],
         );
         expect(row).toEqual({ tier: "special", tournament_id: null });
+      });
+
+      describe("AwardGranted notifications", () => {
+        const occurrenceOf = async (recipientId: string) => {
+          const [row] = await postgres.query<Array<{ occurrence_id: string }>>(
+            "SELECT occurrence_id FROM award_recipients WHERE id = $1",
+            [recipientId],
+          );
+          return row.occurrence_id;
+        };
+
+        it("tells the player once, even when the notification runs again", async () => {
+          const awardId = await createAward("Hall of Fame");
+          const steam = await fx.player();
+
+          const granted = await controller.grantAward({
+            award_id: awardId,
+            player_steam_id: steam,
+            user: user(await fx.player(), "administrator"),
+          });
+          await settle(
+            async () => (await awardNotifications(postgres)).length > 0,
+          );
+
+          // A retry, or a second delivery, of the same grant.
+          await service.notifyAwarded(await occurrenceOf(granted.id));
+
+          const rows = await awardNotifications(postgres);
+          expect(rows).toEqual([
+            {
+              steam_id: steam,
+              entity_id: `${awardId}/${await occurrenceOf(granted.id)}`,
+              message: "You were awarded <b>Hall of Fame</b>.",
+            },
+          ]);
+        });
+
+        it("tells every roster player when a team receives an award", async () => {
+          const t = await playedOutCup();
+          const awardId = await createAward("Team Spirit", "special", true);
+          const roster = await rosterOf(t.id);
+          const members = (
+            await postgres.query<Array<{ steam_id: string }>>(
+              `SELECT player_steam_id::text AS steam_id FROM team_roster
+                WHERE team_id = $1 AND role <> 'Invite' ORDER BY 1`,
+              [roster.team_id],
+            )
+          ).map((row) => row.steam_id);
+          expect(members.length).toBeGreaterThan(1);
+
+          await controller.grantAward({
+            award_id: awardId,
+            team_id: roster.team_id,
+            tournament_id: t.id,
+            user: user(t.organizer, "user"),
+          });
+          await settle(
+            async () =>
+              (await awardNotifications(postgres)).length >= members.length,
+          );
+
+          const notified = (await awardNotifications(postgres))
+            .map((row) => row.steam_id)
+            .sort();
+          expect(notified).toEqual(members);
+        });
+
+        it("keeps the grant when the notification fails", async () => {
+          notifications.fail = true;
+          const awardId = await createAward("Community Contributor");
+          const steam = await fx.player();
+
+          const granted = await controller.grantAward({
+            award_id: awardId,
+            player_steam_id: steam,
+            user: user(await fx.player(), "administrator"),
+          });
+          await settle(
+            async () => notifications.notifyPlayers.mock.calls.length > 0,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 50));
+
+          const [kept] = await postgres.query<
+            Array<{ player_steam_id: string; revoked_at: string | null }>
+          >(
+            "SELECT player_steam_id::text AS player_steam_id, revoked_at FROM award_recipients WHERE id = $1",
+            [granted.id],
+          );
+          expect(kept).toEqual({ player_steam_id: steam, revoked_at: null });
+          expect(await awardNotifications(postgres)).toEqual([]);
+        });
+
+        it("tells the podium of a tournament that just finished, once", async () => {
+          const t = await playedOutCup();
+          const podium = (
+            await postgres.query<Array<{ steam_id: string }>>(
+              `SELECT DISTINCT r.player_steam_id::text AS steam_id
+                 FROM award_recipients r
+                 JOIN award_occurrences o ON o.id = r.occurrence_id
+                WHERE o.tournament_id = $1 AND o.source = 'tournament_calculated'
+                  AND r.player_steam_id IS NOT NULL
+                ORDER BY 1`,
+              [t.id],
+            )
+          ).map((row) => row.steam_id);
+          expect(podium.length).toBeGreaterThan(0);
+
+          await service.notifyTournamentPlacements(t.id);
+          // A recalculation re-creates the recipients; nobody hears twice.
+          await postgres.query(
+            "SELECT public.recalculate_tournament_awards($1)",
+            [t.id],
+          );
+          await service.notifyTournamentPlacements(t.id);
+
+          const notified = (await awardNotifications(postgres)).map(
+            (row) => row.steam_id,
+          );
+          expect([...notified].sort()).toEqual(podium);
+          expect(new Set(notified).size).toBe(notified.length);
+        });
+
+        it("says nothing about a tournament that finished days ago", async () => {
+          const t = await playedOutCup();
+          await postgres.query(
+            `UPDATE matches m SET ended_at = now() - interval '10 days'
+               FROM tournament_brackets b
+               JOIN tournament_stages ts ON ts.id = b.tournament_stage_id
+              WHERE b.match_id = m.id AND ts.tournament_id = $1`,
+            [t.id],
+          );
+
+          await service.notifyTournamentPlacements(t.id);
+
+          expect(await awardNotifications(postgres)).toEqual([]);
+        });
       });
 
       it("runs occurrence creation and recipient fan-out in one transaction", async () => {

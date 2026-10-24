@@ -13132,6 +13132,9 @@ enum e_notification_types_enum {
   """An admin posted a new announcement"""
   AnnouncementChatMessage
 
+  """You received an award"""
+  AwardGranted
+
   """New chat message"""
   ChatMessage
 

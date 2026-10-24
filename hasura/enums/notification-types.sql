@@ -46,3 +46,8 @@ INSERT INTO e_notification_types (value, description) VALUES
 ('UtilityPracticeReady', 'Your utility practice server is ready'),
 ('UtilityDriftScanFinished', 'A utility drift scan finished')
 ON CONFLICT(value) DO NOTHING;
+
+-- Upstream 5Stack award notification (5stackgg/api hasura/enums/notification-types.sql).
+INSERT INTO e_notification_types (value, description) VALUES
+('AwardGranted', 'You received an award')
+ON CONFLICT(value) DO NOTHING;

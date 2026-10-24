@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import { PoolClient } from "pg";
 import { PostgresService } from "../../postgres/postgres.service";
+import { AwardsService } from "../awards.service";
 import {
   CandidateSnapshot,
   categoryOf,
@@ -46,7 +47,10 @@ type Query = <T>(sql: string, params?: unknown[]) => Promise<T>;
 // candidate of the stored snapshot, once per month (unique calculation key).
 @Injectable()
 export class PlayerOfTheMonthService {
-  constructor(private readonly postgres: PostgresService) {}
+  constructor(
+    private readonly postgres: PostgresService,
+    private readonly awards?: AwardsService,
+  ) {}
 
   // Only finished months can be reviewed (the whole month must be in).
   public assertReviewableMonth(month: string, now = new Date()): { start: Date; end: Date; key: string } {
@@ -284,6 +288,7 @@ export class PlayerOfTheMonthService {
     if (!/^\d{1,20}$/.test(playerSteamId ?? "")) throw new BadRequestException("Invalid player");
     const monthDate = start.toISOString().slice(0, 10);
 
+    let occurrenceId: string | null = null;
     await this.postgres.transaction(async (client) => {
       const review = await client.query<{ status: string; candidates: CandidateSnapshot }>(
         `SELECT status, candidates FROM public.player_of_the_month_reviews WHERE month = $1 FOR UPDATE`,
@@ -329,6 +334,7 @@ export class PlayerOfTheMonthService {
         [award.rows[0].id, start.toISOString(), note, actorSteamId, occurrenceKey(key)],
       );
       if (!occurrence.rows[0]) throw new ConflictException("This month already has a Player of the Month");
+      occurrenceId = occurrence.rows[0].id;
 
       await client.query(
         `INSERT INTO public.award_recipients (occurrence_id, player_steam_id, recipient_note)
@@ -361,6 +367,8 @@ export class PlayerOfTheMonthService {
         ],
       );
     });
+    // After the commit; a failed notification never undoes the approval.
+    if (occurrenceId) void this.awards?.notifyAwarded(occurrenceId);
     return this.getReview(key) as Promise<ReviewView>;
   }
 

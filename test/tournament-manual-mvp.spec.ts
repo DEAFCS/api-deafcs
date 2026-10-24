@@ -6,6 +6,11 @@ jest.mock("@kubernetes/client-node", () => ({
 }));
 
 import {
+  awardNotifications,
+  recordingNotifications,
+  settle,
+} from "./utils/award-notifications";
+import {
   BadRequestException,
   ForbiddenException,
   Logger,
@@ -38,7 +43,12 @@ describe("manual tournament MVP (SQL-driven)", () => {
     fx = new Fixtures(postgres, 76561199970000000n);
     tournaments = new TournamentFixtures(postgres, fx);
     await seedRegionWithServer(postgres, "TestA");
-    service = new AwardsService(new Logger(), {} as never, postgres);
+    service = new AwardsService(
+      new Logger(),
+      {} as never,
+      postgres,
+      recordingNotifications(postgres) as never,
+    );
     controller = new AwardsController(service, {} as never);
   }, 600_000);
 
@@ -47,6 +57,7 @@ describe("manual tournament MVP (SQL-driven)", () => {
   });
 
   beforeEach(async () => {
+    await postgres.query("DELETE FROM notifications");
     await postgres.query("DELETE FROM award_recipients");
     await postgres.query("DELETE FROM award_occurrences");
     await postgres.query("DELETE FROM matches");
@@ -443,6 +454,33 @@ describe("manual tournament MVP (SQL-driven)", () => {
       expect(old.player_steam_id).toBe(s.seats1[0]);
       expect(old.revoked_by).toBe(admin);
       expect(old.revocation_reason).toBe("MVP changed: Reconsidered");
+    });
+
+    it("tells each chosen MVP once, also when the choice comes back to them", async () => {
+      const s = await setup();
+      await play(s, s.seats1, s.seats2);
+      await markFinished(s.id);
+      const pick = (player: string) =>
+        service.setTournamentMvp({
+          tournament_id: s.id,
+          player_steam_id: player,
+          actor_steam_id: s.organizer,
+        });
+
+      await pick(s.seats1[0]);
+      await settle(async () => (await awardNotifications(postgres)).length === 1);
+      await pick(s.seats2[0]);
+      await settle(async () => (await awardNotifications(postgres)).length === 2);
+      await pick(s.seats1[0]);
+      await pick(s.seats1[0]);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const rows = await awardNotifications(postgres);
+      expect(rows.map((row) => row.steam_id).sort()).toEqual(
+        [s.seats1[0], s.seats2[0]].sort(),
+      );
+      expect(new Set(rows.map((row) => row.entity_id)).size).toBe(1);
+      expect(rows[0].entity_id.endsWith("/tournament:" + s.id + ":mvp")).toBe(true);
     });
 
     it("choosing the player who already holds it changes nothing", async () => {

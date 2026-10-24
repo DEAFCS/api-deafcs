@@ -102,6 +102,12 @@ export class TournamentsController {
           id: true,
         },
       });
+
+      // DEAFCS: the podium players hear about their placement award
+      // (calculated by tau_tournaments_trophies in the same update). Not
+      // awaited, never fails the event; AwardsService skips old tournaments
+      // and anyone already notified.
+      void this.awards.notifyTournamentPlacements(tournamentId);
     }
 
     // Cancelling resets the bracket: drop the matches so they can be

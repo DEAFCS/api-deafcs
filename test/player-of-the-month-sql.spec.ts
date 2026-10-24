@@ -2,6 +2,9 @@ import { PostgresService } from "./../src/postgres/postgres.service";
 import { PlayerOfTheMonthService } from "./../src/awards/player-of-the-month/player-of-the-month.service";
 import { PlayerOfTheMonthController } from "./../src/awards/player-of-the-month/player-of-the-month.controller";
 import { Fixtures } from "./utils/fixtures";
+import { Logger } from "@nestjs/common";
+import { AwardsService } from "./../src/awards/awards.service";
+import { awardNotifications, recordingNotifications, settle } from "./utils/award-notifications";
 import { bootMigratedDb, seedRegionWithServer, SqlTestDb } from "./utils/sql-test-db";
 
 // Player of the Month against the migrated schema (migration
@@ -13,6 +16,7 @@ describe("Player of the Month (SQL-driven)", () => {
   let postgres: PostgresService;
   let fx: Fixtures;
   let service: PlayerOfTheMonthService;
+  let awardsService: AwardsService;
   let admin: string;
 
   // A finished month well in the past so every month here is reviewable.
@@ -24,7 +28,8 @@ describe("Player of the Month (SQL-driven)", () => {
     postgres = db.postgres;
     fx = new Fixtures(postgres, 76561199730000000n);
     await seedRegionWithServer(postgres, "TestA");
-    service = new PlayerOfTheMonthService(postgres);
+    awardsService = new AwardsService(new Logger("PlayerOfTheMonthTest"), {} as never, postgres, recordingNotifications(postgres) as never);
+    service = new PlayerOfTheMonthService(postgres, awardsService);
   }, 600_000);
 
   afterAll(async () => {
@@ -38,6 +43,7 @@ describe("Player of the Month (SQL-driven)", () => {
     await postgres.query("DELETE FROM player_of_the_month_review_events");
     await postgres.query("ALTER TABLE player_of_the_month_review_events ENABLE TRIGGER USER");
     await postgres.query("DELETE FROM player_of_the_month_reviews");
+    await postgres.query("DELETE FROM notifications");
     await postgres.query("DELETE FROM award_recipients");
     await postgres.query("DELETE FROM award_occurrences");
     await postgres.query("DELETE FROM player_sanctions");
@@ -146,6 +152,16 @@ describe("Player of the Month (SQL-driven)", () => {
     expect(awards).toHaveLength(1);
     expect(awards[0]).toMatchObject({ source: "manual", calculation_key: `player_of_the_month:${MONTH}`, player: winner });
     expect(new Date(awards[0].effective_at).toISOString()).toBe("2026-08-01T00:00:00.000Z");
+
+    // The winner is told once (AwardGranted, keyed by the month), also if the
+    // notification is sent again.
+    await settle(async () => (await awardNotifications(postgres)).length === 1);
+    await awardsService.notifyAwarded(approved.occurrence_id!);
+    const told = await awardNotifications(postgres);
+    expect(told).toHaveLength(1);
+    expect(told[0].steam_id).toBe(winner);
+    expect(told[0].entity_id.endsWith(`/player_of_the_month:${MONTH}`)).toBe(true);
+    expect(told[0].message).toBe("You were awarded <b>Player of the Month</b>.");
 
     // Approved is final: no second approval, no recalculation.
     await expect(service.approve(MONTH, winner, null, admin)).rejects.toThrow(/already approved/);

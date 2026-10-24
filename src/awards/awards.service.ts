@@ -11,6 +11,7 @@ import {
 import { S3Service } from "../s3/s3.service";
 import { PostgresService } from "../postgres/postgres.service";
 import { User } from "../auth/types/User";
+import { NotificationsService } from "../notifications/notifications.service";
 
 const EXTENSION_BY_MIMETYPE: Record<string, string> = {
   "image/png": "png",
@@ -79,6 +80,7 @@ export class AwardsService {
     private readonly logger: Logger,
     private readonly s3: S3Service,
     private readonly postgres: PostgresService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   public async listAwards(): Promise<AwardRow[]> {
@@ -244,7 +246,7 @@ export class AwardsService {
         input.team_id ?? null,
       );
     }
-    return await this.postgres.transaction(async (client) => {
+    const granted = await this.postgres.transaction(async (client) => {
       if (!award.allow_multiple) {
         const duplicate = await client.query<{ id: string }>(
           `SELECT r.id
@@ -291,7 +293,10 @@ export class AwardsService {
         ],
       );
       const occurrence = occurrenceResult.rows[0];
-      const grantedResult = await client.query<{ id: string }>(
+      const grantedResult = await client.query<{
+        id: string;
+        occurrence_id: string;
+      }>(
         `INSERT INTO public.award_recipients
           (occurrence_id,player_steam_id,team_id,tournament_team_id,recipient_note)
          VALUES ($1,$2,$3,$4,$5) RETURNING *`,
@@ -313,6 +318,125 @@ export class AwardsService {
       }
       return grantedResult.rows[0];
     });
+
+    // After the commit, and never awaited by the grant: a player, or every
+    // roster member a team grant fanned out to (5Stack AwardsService).
+    void this.notifyAwarded(granted.occurrence_id);
+
+    return granted;
+  }
+
+  // DEAFCS port of 5Stack's AwardsService.notifyAwarded (5stackgg/api
+  // src/awards/awards.service.ts @ cf3afa6). DEAFCS keeps awards as
+  // award_occurrences + award_recipients, so this notifies the active player
+  // recipients of one occurrence. Each player hears about an award once:
+  // entity_id is "<award id>/<occurrence key>" (the stable calculation_key
+  // when there is one, so a tournament recalculation or a retried Player of
+  // the Month approval keeps its key), and a player who already has an
+  // AwardGranted row for that key (read or deleted) is skipped. A manual
+  // tournament MVP is keyed per tournament, so picking the same player again
+  // after a change does not announce it twice. Only called
+  // from live grant paths, never from migrations or backfills. A failure is
+  // logged and never undoes the grant.
+  public async notifyAwarded(
+    occurrenceId: string,
+    steamIds?: string[],
+  ): Promise<void> {
+    try {
+      const [occurrence] = await this.postgres.query<
+        Array<{ award_id: string; key: string; name: string }>
+      >(
+        `SELECT o.award_id,
+                COALESCE(
+                  o.calculation_key,
+                  CASE WHEN o.placement = 0 AND o.tournament_id IS NOT NULL
+                       THEN 'tournament:' || o.tournament_id || ':mvp' END,
+                  o.id::text
+                ) AS key,
+                a.name
+           FROM public.award_occurrences o
+           JOIN public.awards a ON a.id = o.award_id
+          WHERE o.id = $1`,
+        [occurrenceId],
+      );
+      if (!occurrence) {
+        return;
+      }
+
+      const entityId = `${occurrence.award_id}/${occurrence.key}`;
+      const recipients = await this.postgres.query<Array<{ steam_id: string }>>(
+        `SELECT DISTINCT r.player_steam_id::text AS steam_id
+           FROM public.award_recipients r
+          WHERE r.occurrence_id = $1
+            AND r.player_steam_id IS NOT NULL
+            AND r.revoked_at IS NULL
+            AND ($2::bigint[] IS NULL OR r.player_steam_id = ANY($2::bigint[]))
+            AND NOT EXISTS (
+              SELECT 1 FROM public.notifications n
+               WHERE n.type = 'AwardGranted'
+                 AND n.steam_id = r.player_steam_id
+                 AND n.entity_id = $3
+            )`,
+        [occurrenceId, steamIds ?? null, entityId],
+      );
+      if (recipients.length === 0) {
+        return;
+      }
+
+      await this.notifications.notifyPlayers("AwardGranted", {
+        title: "Award Received",
+        message: `You were awarded <b>${NotificationsService.escapeHtml(
+          occurrence.name,
+        )}</b>.`,
+        role: "user",
+        entity_id: entityId,
+        steamIds: recipients.map((recipient) => recipient.steam_id),
+      });
+    } catch (error) {
+      this.logger.warn(
+        `unable to send award notifications for occurrence ${occurrenceId}`,
+        error,
+      );
+    }
+  }
+
+  // Calculated tournament placements: the players on the podium, once the
+  // tournament has just finished. Old tournaments (a status rollback and
+  // re-finish, a recalculation) are not announced again.
+  public async notifyTournamentPlacements(tournamentId: string): Promise<void> {
+    try {
+      const [{ recent }] = await this.postgres.query<
+        Array<{ recent: boolean }>
+      >(
+        `SELECT COALESCE(max(m.ended_at) >= now() - interval '3 days', false) AS recent
+           FROM public.tournament_stages ts
+           JOIN public.tournament_brackets b ON b.tournament_stage_id = ts.id
+           JOIN public.matches m ON m.id = b.match_id
+          WHERE ts.tournament_id = $1`,
+        [tournamentId],
+      );
+      if (!recent) {
+        return;
+      }
+
+      const occurrences = await this.postgres.query<Array<{ id: string }>>(
+        `SELECT o.id
+           FROM public.award_occurrences o
+          WHERE o.tournament_id = $1
+            AND o.source = 'tournament_calculated'
+            AND o.placement IN (1, 2, 3)
+          ORDER BY o.placement`,
+        [tournamentId],
+      );
+      for (const occurrence of occurrences) {
+        await this.notifyAwarded(occurrence.id);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `unable to send placement notifications for tournament ${tournamentId}`,
+        error,
+      );
+    }
   }
   public assertSingleScope(input: {
     tournament_id?: string | null;
@@ -437,8 +561,8 @@ export class AwardsService {
     actor_steam_id: string;
     note?: string | null;
   }): Promise<void> {
-    await this.runMvpFunction(
-      "SELECT public.set_tournament_mvp($1, $2, $3, $4)",
+    const [picked] = await this.runMvpFunction<{ recipient_id: string | null }>(
+      "SELECT public.set_tournament_mvp($1, $2, $3, $4) AS recipient_id",
       [
         input.tournament_id,
         input.player_steam_id,
@@ -446,6 +570,18 @@ export class AwardsService {
         input.note ?? null,
       ],
     );
+
+    // 5Stack notifies the picked MVP (c81ea3ff, #624).
+    if (picked?.recipient_id) {
+      const [recipient] = await this.postgres.query<
+        Array<{ occurrence_id: string }>
+      >(`SELECT occurrence_id FROM public.award_recipients WHERE id = $1`, [
+        picked.recipient_id,
+      ]);
+      if (recipient) {
+        void this.notifyAwarded(recipient.occurrence_id);
+      }
+    }
   }
 
   public async clearTournamentMvp(input: {
@@ -460,9 +596,12 @@ export class AwardsService {
   }
 
   // The functions raise 22000 with a message written for the user.
-  private async runMvpFunction(sql: string, params: unknown[]): Promise<void> {
+  private async runMvpFunction<T = unknown>(
+    sql: string,
+    params: unknown[],
+  ): Promise<T[]> {
     try {
-      await this.postgres.query(sql, params as never);
+      return await this.postgres.query<T[]>(sql, params as never);
     } catch (error) {
       if ((error as { code?: string })?.code === "22000") {
         throw new BadRequestException((error as Error).message);
