@@ -65,7 +65,7 @@ describe("recently_banned_players (SQL-driven)", () => {
   beforeEach(async () => {
     await postgres.query("DELETE FROM matches");
     await postgres.query("DELETE FROM player_sanctions");
-    // DEAFCS: fx.player() accepts the terms, which references the player.
+    // DEAFCS: member() accepts the terms, which references the player.
     await postgres.query("DELETE FROM player_terms_acceptances");
     await postgres.query("DELETE FROM players");
   });
@@ -104,6 +104,18 @@ describe("recently_banned_players (SQL-driven)", () => {
     );
 
   const ids = (rows: Array<Entry>) => rows.map((row) => String(row.steam_id));
+
+  // DEAFCS: the list shows registered players only. A member has signed in
+  // (players.last_sign_in_at, set by the Steam sign-in); fx.player() alone is
+  // a player known only from imported match data.
+  const member = async (name?: string) => {
+    const steam = await fx.player(name);
+    await postgres.query(
+      "UPDATE players SET last_sign_in_at = now() WHERE steam_id = $1",
+      [steam],
+    );
+    return steam;
+  };
 
   // node-postgres hands a date column back as local midnight.
   const day = (value: Date | string | null) =>
@@ -239,12 +251,12 @@ describe("recently_banned_players (SQL-driven)", () => {
     let lifted: string;
 
     beforeEach(async () => {
-      const moderator = await fx.player("mod");
-      vacAuto = await fx.player("vacauto");
-      gameOnly = await fx.player("gameonly");
-      staff = await fx.player("staffbanned");
-      old = await fx.player("oldvac");
-      lifted = await fx.player("lifted");
+      const moderator = await member("mod");
+      vacAuto = await member("vacauto");
+      gameOnly = await member("gameonly");
+      staff = await member("staffbanned");
+      old = await member("oldvac");
+      lifted = await member("lifted");
 
       await steamBan(vacAuto, { vac: 1, daysAgo: 2 });
       await sanction(vacAuto, { hoursAgo: 2 * 24 - 3 });
@@ -312,9 +324,9 @@ describe("recently_banned_players (SQL-driven)", () => {
 
   describe("banned here", () => {
     it("tells an active ban from a timed one that has ended", async () => {
-      const moderator = await fx.player("mod");
-      const ended = await fx.player("ended");
-      const active = await fx.player("active");
+      const moderator = await member("mod");
+      const ended = await member("ended");
+      const active = await member("active");
       await sanction(ended, {
         by: moderator,
         hoursAgo: 20 * 24,
@@ -336,10 +348,10 @@ describe("recently_banned_players (SQL-driven)", () => {
     });
 
     it("not_banned_here keeps Steam-banned players who can still play", async () => {
-      const gameOnly = await fx.player("gameonly");
-      const vacAuto = await fx.player("vacauto");
-      const staffOnly = await fx.player("staffonly");
-      const moderator = await fx.player("mod");
+      const gameOnly = await member("gameonly");
+      const vacAuto = await member("vacauto");
+      const staffOnly = await member("staffonly");
+      const moderator = await member("mod");
       await steamBan(gameOnly, { game: 1, daysAgo: 4 });
       await steamBan(vacAuto, { vac: 1, daysAgo: 4 });
       await sanction(vacAuto, { hoursAgo: 4 * 24 - 2 });
@@ -356,8 +368,8 @@ describe("recently_banned_players (SQL-driven)", () => {
 
   describe("history here", () => {
     it("counts matches, the last map and matches since the Steam ban", async () => {
-      const banned = await fx.player("gamebanned");
-      const other = await fx.player("other");
+      const banned = await member("gamebanned");
+      const other = await member("other");
       await steamBan(banned, { game: 1, daysAgo: 5 });
       await match({
         lineup1: [banned],
@@ -389,9 +401,9 @@ describe("recently_banned_players (SQL-driven)", () => {
     });
 
     it("flags a player whose Steam ban predates their first match here", async () => {
-      const arrived = await fx.player("arrived");
-      const fresh = await fx.player("fresh");
-      const other = await fx.player("other");
+      const arrived = await member("arrived");
+      const fresh = await member("fresh");
+      const other = await member("other");
       await steamBan(arrived, { vac: 2, game: 1, daysAgo: 1400 });
       await match({ lineup1: [arrived], lineup2: [other], daysAgo: 2 });
       await sanction(arrived, { hoursAgo: 36 });
@@ -418,13 +430,13 @@ describe("recently_banned_players (SQL-driven)", () => {
     let stranger: string;
 
     beforeEach(async () => {
-      const moderator = await fx.player("mod");
-      const filler = await fx.player("filler");
-      viewer = await fx.player("viewer");
-      opponentLost = await fx.player("cheater");
-      teammate = await fx.player("mate");
-      opponentWon = await fx.player("gameban");
-      stranger = await fx.player("stranger");
+      const moderator = await member("mod");
+      const filler = await member("filler");
+      viewer = await member("viewer");
+      opponentLost = await member("cheater");
+      teammate = await member("mate");
+      opponentWon = await member("gameban");
+      stranger = await member("stranger");
 
       // Lost 9-13 to the cheater on Mirage, won with the teammate, beat the
       // game-banned player.
@@ -527,11 +539,68 @@ describe("recently_banned_players (SQL-driven)", () => {
     });
   });
 
+  describe("registered players only (DEAFCS)", () => {
+    it("leaves out players known only from imported matches", async () => {
+      const registered = await member("registeredvac");
+      const imported = await fx.player("importedvac");
+      for (const steam of [registered, imported]) {
+        await steamBan(steam, { vac: 1, daysAgo: 2 });
+        await sanction(steam, { hoursAgo: 24 });
+      }
+
+      expect(ids(await list())).toEqual([registered]);
+      expect(ids(await list({ kinds: ["vac"] }))).toEqual([registered]);
+      expect(ids(await list({ kinds: ["auto"] }))).toEqual([registered]);
+      expect(await list({ search: "importedvac" })).toEqual([]);
+      expect(await list({ search: imported })).toEqual([]);
+    });
+
+    it("keeps a registered member who never played here", async () => {
+      const moderator = await member("mod");
+      const newcomer = await member("newcomer");
+      await sanction(newcomer, { by: moderator, hoursAgo: 5 });
+
+      const [row] = await list();
+      expect(String(row.steam_id)).toBe(newcomer);
+      expect(row.matches_played).toBe(0);
+      expect(row.first_match_at).toBeNull();
+    });
+
+    it("an imported player's Steam ban is still enforced, only not listed", async () => {
+      const imported = await fx.player("importedgame");
+      await steamBan(imported, { game: 1, daysAgo: 1 });
+      const banId = await sanction(imported, { hoursAgo: 12 });
+
+      expect(await list()).toEqual([]);
+      const [state] = await postgres.query<
+        Array<{ banned: boolean; sanctions: number }>
+      >(
+        `SELECT public.is_banned(p) AS banned,
+                (SELECT count(*)::int FROM player_sanctions WHERE id = $2) AS sanctions
+           FROM players p WHERE p.steam_id = $1`,
+        [imported, banId],
+      );
+      expect(state).toEqual({ banned: true, sanctions: 1 });
+    });
+
+    it("lists an imported player once they sign in", async () => {
+      const later = await fx.player("signsinlater");
+      await steamBan(later, { vac: 1, daysAgo: 3 });
+      expect(await list()).toEqual([]);
+
+      await postgres.query(
+        "UPDATE players SET last_sign_in_at = now() WHERE steam_id = $1",
+        [later],
+      );
+      expect(ids(await list())).toEqual([later]);
+    });
+  });
+
   describe("search", () => {
     it("matches part of a name, any case, or an exact steam id", async () => {
-      const moderator = await fx.player("mod");
-      const kow = await fx.player("xX_Kowalczyk_Xx");
-      const other = await fx.player("someone");
+      const moderator = await member("mod");
+      const kow = await member("xX_Kowalczyk_Xx");
+      const other = await member("someone");
       await sanction(kow, { by: moderator, hoursAgo: 2 });
       await sanction(other, { by: moderator, hoursAgo: 2 });
 

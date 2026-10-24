@@ -5,6 +5,13 @@
 -- per-kind Steam dates (see `kind` below). The function only reads; DEAFCS's
 -- sanctions and Steam ban rules are unchanged.
 --
+-- DEAFCS: only registered players are listed: players.last_sign_in_at is set
+-- by the Steam sign-in (SteamStrategy) and never by match imports, so a row
+-- without it is someone known only from imported match data (Premier,
+-- FACEIT, Valve). Their bans and sanctions stay and are still enforced; they
+-- are just not on this page. A registered player is listed whether or not
+-- they ever played here.
+--
 -- Steam only says how many whole days ago the LATEST ban of either kind was,
 -- as of when we last asked (steam_bans_checked_at), so a Steam ban is a day,
 -- not a moment: steam_banned_on. banned_at puts the day at 00:00 UTC, so a
@@ -87,6 +94,7 @@ steam AS (
     ) kind
     WHERE (pl.vac_ban_count > 0 OR pl.game_ban_count > 0)
       AND pl.steam_bans_checked_at IS NOT NULL
+      AND pl.last_sign_in_at IS NOT NULL
 ),
 candidates AS (
     SELECT s.steam_id
@@ -102,6 +110,11 @@ candidates AS (
       AND ps.deleted_at IS NULL
       AND ps.created_at >= b.since
       AND (CASE WHEN ps.sanctioned_by_steam_id IS NULL THEN 'auto' ELSE 'staff' END) = ANY (b.kinds)
+      AND EXISTS (
+          SELECT 1 FROM public.players registered
+          WHERE registered.steam_id = ps.player_steam_id
+            AND registered.last_sign_in_at IS NOT NULL
+      )
 ),
 details AS (
     SELECT

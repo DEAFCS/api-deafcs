@@ -107,6 +107,11 @@ describe("recently_banned_players is Moderator and above (Hasura)", () => {
   it("lists a staff ban for moderators and every role above", async () => {
     const moderator = await fx.player("Moderator");
     const banned = await fx.player("Banned");
+    // DEAFCS: the list shows registered (signed-in) players only.
+    await postgres.query(
+      "UPDATE players SET last_sign_in_at = now() WHERE steam_id = $1",
+      [banned],
+    );
     await postgres.query(
       `INSERT INTO player_sanctions
          (player_steam_id, sanctioned_by_steam_id, type, reason)
