@@ -329,13 +329,16 @@ export class AwardsService {
   // DEAFCS port of 5Stack's AwardsService.notifyAwarded (5stackgg/api
   // src/awards/awards.service.ts @ cf3afa6). DEAFCS keeps awards as
   // award_occurrences + award_recipients, so this notifies the active player
-  // recipients of one occurrence. Each player hears about an award once:
-  // entity_id is "<award id>/<occurrence key>" (the stable calculation_key
-  // when there is one, so a tournament recalculation or a retried Player of
-  // the Month approval keeps its key), and a player who already has an
-  // AwardGranted row for that key (read or deleted) is skipped. A manual
-  // tournament MVP is keyed per tournament, so picking the same player again
-  // after a change does not announce it twice. Only called
+  // recipients of one occurrence. Each player hears about each occurrence
+  // (one grant, one Player of the Month month, one tournament placement)
+  // once: entity_id is "<award id>/<occurrence key>" (the occurrence's unique
+  // calculation_key when there is one, e.g. "player_of_the_month:2026-09", so
+  // a tournament recalculation or a retried approval keeps its key while
+  // another month gets a new one; otherwise the occurrence id), and a player
+  // who already has an AwardGranted row for that key (read or deleted) is
+  // skipped. A manual tournament MVP is keyed per tournament (one MVP slot),
+  // so picking the same player again after a change does not announce it
+  // twice. Only called
   // from live grant paths, never from migrations or backfills. A failure is
   // logged and never undoes the grant.
   public async notifyAwarded(

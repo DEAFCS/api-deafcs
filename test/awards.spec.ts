@@ -1220,6 +1220,77 @@ describe("awards (SQL-driven)", () => {
           ]);
         });
 
+        it("tells a player again for each new Player of the Month, once per month", async () => {
+          const steam = await fx.player();
+          const [potm] = await postgres.query<Array<{ id: string }>>(
+            "SELECT id FROM awards WHERE system_key = 'player_of_the_month'",
+          );
+          // September and December for the same player: two occurrences,
+          // keyed by month exactly as the monthly review stores them.
+          const months: string[] = [];
+          for (const month of ["2026-09", "2026-12"]) {
+            const [occurrence] = await postgres.query<Array<{ id: string }>>(
+              `INSERT INTO award_occurrences (award_id, source, effective_at, calculation_key)
+               VALUES ($1, 'manual', $2::date, $3) RETURNING id`,
+              [potm.id, month + "-01", "player_of_the_month:" + month],
+            );
+            await postgres.query(
+              "INSERT INTO award_recipients (occurrence_id, player_steam_id) VALUES ($1, $2)",
+              [occurrence.id, steam],
+            );
+            months.push(occurrence.id);
+          }
+
+          await service.notifyAwarded(months[0]);
+          expect(await awardNotifications(postgres)).toHaveLength(1);
+          await service.notifyAwarded(months[1]);
+          // Retries and repeated processing of either month.
+          await service.notifyAwarded(months[0]);
+          await service.notifyAwarded(months[1]);
+          await service.notifyAwarded(months[1], [steam]);
+
+          const rows = await awardNotifications(postgres);
+          expect(rows.map((row) => row.steam_id)).toEqual([steam, steam]);
+          expect(rows.map((row) => row.entity_id).sort()).toEqual([
+            potm.id + "/player_of_the_month:2026-09",
+            potm.id + "/player_of_the_month:2026-12",
+          ]);
+        });
+
+        it("tells a player about every separate grant of a repeatable award", async () => {
+          const awardId = await createAward(
+            "Clutch of the Week",
+            "special",
+            true,
+          );
+          const steam = await fx.player();
+          const admin = user(await fx.player(), "administrator");
+
+          const first = await controller.grantAward({
+            award_id: awardId,
+            player_steam_id: steam,
+            user: admin,
+          });
+          await settle(
+            async () => (await awardNotifications(postgres)).length === 1,
+          );
+          const second = await controller.grantAward({
+            award_id: awardId,
+            player_steam_id: steam,
+            user: admin,
+          });
+          await settle(
+            async () => (await awardNotifications(postgres)).length === 2,
+          );
+          // Re-sending either grant changes nothing.
+          await service.notifyAwarded(await occurrenceOf(first.id));
+          await service.notifyAwarded(await occurrenceOf(second.id));
+
+          const rows = await awardNotifications(postgres);
+          expect(rows).toHaveLength(2);
+          expect(new Set(rows.map((row) => row.entity_id)).size).toBe(2);
+        });
+
         it("tells every roster player when a team receives an award", async () => {
           const t = await playedOutCup();
           const awardId = await createAward("Team Spirit", "special", true);
